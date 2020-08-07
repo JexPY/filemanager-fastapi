@@ -1,0 +1,7 @@
+venv
+.env
+.vscode
+logs
+data
+certbot
+.DS_Store

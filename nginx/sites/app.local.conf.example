@@ -1,0 +1,33 @@
+server {
+
+    listen 80 default_server;
+    listen [::]:80 default_server ipv6only=on;
+
+    server_name localhost;
+
+    # location / {
+    #     try_files $uri $uri/ @fallback;
+    # }
+
+    location ~ /\.ht {
+        deny all;
+    }
+
+    location / {
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://python-upstream;
+    }
+
+    # Needs openning port from docker file and appolo needs to be listening 0.0.0.0 host 
+    location /graphql {
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+
+        proxy_pass http://python-upstream;
+    }
+}

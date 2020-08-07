@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "filemanager-fastapi"
+version = "0.0.1"
+description = "Fastapi with file management"
+authors = ["JEX <guja1995@gmail.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+fastapi = "^0.60.1"
+uvicorn = "^0.11.8"
+gunicorn = "^20.0.4"
+python-multipart = "^0.0.5"
+
+[tool.poetry.dev-dependencies]
+pylint = "^2.5.3"
+
+[build-system]
+requires = ["poetry>=0.12"]
+build-backend = "poetry.masonry.api"

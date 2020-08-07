@@ -1,0 +1,54 @@
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    server_name filemanager.etomer.io www.filemanager.etomer.io;
+
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+
+    ###### GENERATED CERTS AND KEYS #######
+    ssl_certificate /var/certs/fullchain.pem;
+    ssl_certificate_key /var/certs/privkey1.pem;
+    ssl_trusted_certificate /var/certs/cert1.pem;
+    #####################################
+
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:MozSSL:10m;  # about 40000 sessions
+    ssl_session_tickets off;
+
+
+    # location / {
+    #     try_files $uri $uri/ @fallback;
+    # }
+
+    location ~ /\.ht {
+        deny all;
+    }
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt/;
+        log_not_found off;
+    }
+
+    location / {
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://node-upstream;
+    }
+
+    # Needs openning port from docker file and appolo needs to be listening 0.0.0.0 host 
+    location /graphql {
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+
+        proxy_pass http://node-upstream;
+    }
+}

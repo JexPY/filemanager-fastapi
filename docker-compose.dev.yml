@@ -1,0 +1,13 @@
+version: '3.3'
+
+services:
+  api:
+    build:
+       context: ./api
+    volumes:
+    - './api/app:/app'
+    command: /start.sh
+    ports:
+      - 8000:8000
+    expose:
+      - 8000
