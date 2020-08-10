@@ -6,8 +6,8 @@ services:
        context: ./api
     volumes:
     - './api/app:/app'
-    command: /start.sh
+    command: /start-reload.sh
     ports:
-      - 8000:8000
+      - 80:80
     expose:
-      - 8000
+      - 80
