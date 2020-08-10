@@ -8,7 +8,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR $WORKDIR
 RUN apt-get update && apt-get install -y python3-dev build-essential
 
+# Image modifications
+RUN apt-get install -y libtiff5-dev libjpeg62-turbo-dev zlib1g-dev libfreetype6-dev liblcms2-dev libwebp-dev
+
+RUN ln -s /usr/lib/x86_64-linux-gnu/libz.so /lib/
+RUN ln -s /usr/lib/x86_64-linux-gnu/libjpeg.so /lib/
+
+
 RUN apt-get install curl -y
+
 
 # Install Poetry
 RUN curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-poetry.py | POETRY_HOME=/opt/poetry python && \
@@ -18,6 +26,8 @@ RUN curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-
 
 COPY ./pyproject.toml ./poetry.lock* /$WORKDIR/
 COPY ./gunicorn_conf.py /gunicorn_conf.py
+
+# RUN poetry add Pillow-SIMD
 RUN poetry install --no-root --no-dev
 
 COPY ./start.sh /start.sh
