@@ -88,9 +88,11 @@ Contributions are what make the open source community such an amazing place to b
 
 ## Image optimization result
 - Original
+
 ![](api/app/pictures/originals/dcb8ac79618540688ea36e688a8c3635.png?raw=true)
 
 - Thumbnailed
+
 ![](api/app/pictures/thumbnails/dcb8ac79618540688ea36e688a8c3635.webp?raw=true)
 
 
