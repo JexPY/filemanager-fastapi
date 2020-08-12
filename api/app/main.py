@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from typing import List
 import os
 
-from services.serveUploadedFiles import handle_upload_image_file
+from services.serveUploadedFiles import handle_upload_image_file, handle_multiple_image_file_uploads
 from services.security.customBearerCheck import validateToken
 from services.storage.local import responseImageFile
 
@@ -27,13 +27,13 @@ async def create_upload_file(file: UploadFile = File(...), OAuth2AuthorizationCo
 
 @app.post("/uploadfiles/")
 async def create_upload_files(files: List[UploadFile] = File(...), OAuth2AuthorizationCodeBearer = Depends(validateToken)):
-    if len(files) > int(os.environ.get('MULTIPLE_FILE_UPLOAD_LIMIT')):
+    fileAmount = len(files)
+    if fileAmount > int(os.environ.get('MULTIPLE_FILE_UPLOAD_LIMIT')):
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail='Amount of files must not be more than {}'.format(os.environ.get('MULTIPLE_FILE_UPLOAD_LIMIT'))
     ) 
-    # Maybe: move to threads?
-    return [handle_upload_image_file(eachfile) for eachfile in files]
+    return handle_multiple_image_file_uploads(files, fileAmount)
 
 @app.get("/getImage/")
 async def get_image(
