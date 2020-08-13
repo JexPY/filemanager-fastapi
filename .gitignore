@@ -3,7 +3,7 @@ venv
 .vscode
 logs
 data
-certbot
+certbot/letsecrypt/
 .DS_Store
 key.json
 docker-compose.yml

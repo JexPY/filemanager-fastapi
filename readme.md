@@ -75,6 +75,25 @@ docker-compose up
 ```
 4. Enter your API at `localhost/docs` -->
 
+## FFMPEG 4
+- If you like to use ffmpeg in your docker .env file change INSTALL_FFMPEG=false to INSTALL_FFMPEG=true
+- Don't fortget to change api .env IMAGE_OPTIMIZATION_USING to ffmpeg.
+- LTS version at this time:
+```sh
+ffmpeg version 4.1.6-1~deb10u1 Copyright (c) 2000-2020 the FFmpeg developers
+  built with gcc 8 (Debian 8.3.0-6)
+  libavutil      56. 22.100 / 56. 22.100
+  libavcodec     58. 35.100 / 58. 35.100
+  libavformat    58. 20.100 / 58. 20.100
+  libavdevice    58.  5.100 / 58.  5.100
+  libavfilter     7. 40.101 /  7. 40.101
+  libavresample   4.  0.  0 /  4.  0.  0
+  libswscale      5.  3.100 /  5.  3.100
+  libswresample   3.  3.100 /  3.  3.100
+  libpostproc    55.  3.100 / 55.  3.100
+```
+- enjoy :)
+
 <!-- CONTRIBUTING -->
 ## Contributing
 
@@ -91,10 +110,13 @@ Contributions are what make the open source community such an amazing place to b
 
 ![](api/app/pictures/originals/dcb8ac79618540688ea36e688a8c3635.png?raw=true)
 
-- Thumbnailed
+- Thumbnailed usind pillow-SIMD
 
 ![](api/app/pictures/thumbnails/dcb8ac79618540688ea36e688a8c3635.webp?raw=true)
 
+- Thumbnailed usind FFMPEG
+
+![](api/app/pictures/thumbnails/72014f9f91ab40c7b8df61ab350bcc71.webp?raw=true)
 
 <!-- LICENSE -->
 ## License
