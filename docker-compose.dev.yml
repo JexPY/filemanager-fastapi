@@ -4,6 +4,8 @@ services:
   api:
     build:
        context: ./api
+       args:
+        - INSTALL_FFMPEG=${INSTALL_FFMPEG}
     volumes:
     - './api/app:/app'
     command: /start-reload.sh

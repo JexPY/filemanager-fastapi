@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer,OAuth2AuthorizationCodeBearer,HTTPBasicCredentials
 
 from dotenv import load_dotenv
-from typing import List
+from typing import List,Optional
 import os
 
 from services.serveUploadedFiles import handle_upload_image_file, handle_multiple_image_file_uploads
@@ -21,8 +21,15 @@ def root(token: str = Depends(validateToken)):
 
 # File size validates NGINX
 @app.post("/uploadfile/")
-async def create_upload_file(file: UploadFile = File(...), OAuth2AuthorizationCodeBearer = Depends(validateToken)):
-    return handle_upload_image_file(file)
+async def create_upload_file(
+    thumbnail: Optional[str] = Query(
+        os.environ.get('IMAGE_THUMBNAIL'),
+        description='True/False depending your needs',
+        regex='^(True|False)$'
+        ),
+    file: UploadFile = File(...),
+    OAuth2AuthorizationCodeBearer = Depends(validateToken)):
+    return handle_upload_image_file(True if thumbnail == 'True' else False, file)
 
 
 @app.post("/uploadfiles/")
@@ -37,12 +44,15 @@ async def create_upload_files(files: List[UploadFile] = File(...), OAuth2Authori
 
 @app.get("/getImage/")
 async def get_image(
-    image: str = Query(..., max_length=50),
+    image: str = Query(...,
+        description='uploaded image name',
+        max_length=50
+        ),
     version: str = Query(
         ...,
         description='Should provide verision of image you want from localStorage original or thumbnail',
         regex='^(original|thumbnail)$'
         ),
-        OAuth2AuthorizationCodeBearer = Depends(validateToken)
+    OAuth2AuthorizationCodeBearer = Depends(validateToken)
         ):
     return responseImageFile(image, version)
