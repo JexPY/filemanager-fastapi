@@ -21,7 +21,9 @@ def uploadFileToGoogleStorage(imagePaths: dict):
         return cleanAfterYourself(imagePaths)
 
 def cleanAfterYourself(imagePaths):
-    if Path(os.environ.get('IMAGE_ORIGINAL_PATH') + imagePaths['original']).is_file():
-            Path(os.environ.get('IMAGE_ORIGINAL_PATH') + imagePaths['original']).unlink()
-    if Path(os.environ.get('IMAGE_THUMBNAIL_PATH') + imagePaths['thumbnail']).is_file():
-            Path(os.environ.get('IMAGE_THUMBNAIL_PATH') + imagePaths['thumbnail']).unlink()
+        if imagePaths.get('original'):
+                if Path(os.environ.get('IMAGE_ORIGINAL_PATH') + imagePaths['original']).is_file():
+                        Path(os.environ.get('IMAGE_ORIGINAL_PATH') + imagePaths['original']).unlink()
+        if imagePaths.get('original'):
+                if Path(os.environ.get('IMAGE_THUMBNAIL_PATH') + imagePaths['thumbnail']).is_file():
+                        Path(os.environ.get('IMAGE_THUMBNAIL_PATH') + imagePaths['thumbnail']).unlink()
