@@ -34,8 +34,8 @@ def handle_upload_image_file(thumbnail, upload_file: UploadFile):
             
             if os.environ.get('PREFERED_STORAGE') == 'google':
                 _thread.start_new_thread(uploadFileToGoogleStorage, (copy.deepcopy(imagePaths),))
-                imagePaths['original'] = os.environ.get('GOOGLE_BUCKET_URL') + os.environ.get('IMAGE_ORIGINAL_PATH') + imagePaths['original']
-                imagePaths['thumbnail'] = os.environ.get('GOOGLE_BUCKET_URL') + os.environ.get('IMAGE_THUMBNAIL_PATH') + imagePaths['thumbnail']
+                imagePaths['original'] = os.environ.get('GOOGLE_BUCKET_URL') + os.environ.get('IMAGE_ORIGINAL_PATH') + imagePaths['original'] if imagePaths.get('original') else imagePaths.get('original')
+                imagePaths['thumbnail'] = os.environ.get('GOOGLE_BUCKET_URL') + os.environ.get('IMAGE_THUMBNAIL_PATH') + imagePaths['thumbnail'] if imagePaths.get('thumbnail') else imagePaths.get('thumbnail')
 
             imagePaths['storage'] = os.environ.get('PREFERED_STORAGE')
             return imagePaths
@@ -52,8 +52,8 @@ def handle_multiple_image_file_uploads(FILES: List[UploadFile], workers: int):
         future_to_url = {executor.submit(handle_upload_image_file, True, eachFile): eachFile for eachFile in FILES}
         result = []
         for future in concurrent.futures.as_completed(future_to_url):
-            try:
+            # try:
                 result.append(future.result())
-            except:
-                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail='Multiple upload failed')
+            # except:
+            #     raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail='Multiple upload failed')
         return result
