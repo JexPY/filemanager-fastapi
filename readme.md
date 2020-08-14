@@ -118,10 +118,16 @@ Contributions are what make the open source community such an amazing place to b
 
 ![](api/app/pictures/thumbnails/72014f9f91ab40c7b8df61ab350bcc71.webp?raw=true)
 
+
 <!-- LICENSE -->
 ## License
 
 Distributed under the MIT License. See `LICENSE` for more information.
+
+<!-- Sponsors -->
+## Sponsored by
+
+<a href="https://www.etomer.io/"><img src="https://www.etomer.io/static/media/etomer-logo-dark.22a369ff.svg" width="150"></a>
 
 <!-- CONTACT -->
 ## Contact
