@@ -2,6 +2,8 @@ from fastapi import FastAPI, File, UploadFile, BackgroundTasks, Depends, HTTPExc
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer,OAuth2AuthorizationCodeBearer,HTTPBasicCredentials
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 
 from dotenv import load_dotenv
 from typing import List,Optional
@@ -14,6 +16,25 @@ from services.storage.local import responseImageFile
 load_dotenv()
 app = FastAPI()
 
+# If you want to serve files from local server you need to mount your static file directory
+if os.environ.get('PREFERED_STORAGE') == 'local':
+    app.mount("/pictures", StaticFiles(directory="pictures"), name="pictures")
+
+# If you want cors configuration also possible thanks to fast-api
+origins = [
+    "http://localhost.etomer.io",
+    "https://localhost.etomer.io",
+    "http://localhost",
+    "http://localhost:8080",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 def root(token: str = Depends(validateToken)):
