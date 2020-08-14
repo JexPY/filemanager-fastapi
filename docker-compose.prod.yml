@@ -15,15 +15,15 @@ services:
       - 9000
 
 ### Certbot #########################################
-  # certbot:
-  #   build:
-  #     context: ./certbot
-  #   volumes:
-  #     - ./data/certbot/certs/:/var/certs
-  #     - ./certbot/letsencrypt/:/var/www/letsencrypt
-  #   environment:
-  #     - CN=${DOMAINS}
-  #     - EMAIL=${SSL_DOMAIN_OWNER}
+  certbot:
+    build:
+      context: ./certbot
+    volumes:
+      - ./data/certbot/certs/:/var/certs
+      - ./certbot/letsencrypt/:/var/www/letsencrypt
+    environment:
+      - CN=${DOMAINS}
+      - EMAIL=${SSL_DOMAIN_OWNER}
 
   ### NGINX Server #########################################
   nginx:
