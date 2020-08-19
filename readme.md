@@ -32,7 +32,7 @@ Here's what features Filemanager-Fastapi has at this time:
 * Serving files from local storage
 * Easy Security using Bearer token
 * Out of box documenation thanks to fast-api [/docs && /redoc paths are avaliable]
-* SSL secured reverse nginx proxy using gunicorn and uvlopp
+* SSL secured reverse nginx proxy using gunicorn and uvloop
 
 Going to add video file modification using ffmpeg and will optimize it a little therefore its already is really fast, try by yourself :)
 
@@ -41,13 +41,12 @@ Going to add video file modification using ffmpeg and will optimize it a little 
 * [Docker](https://www.docker.com/)
 * [pillow-simd](https://github.com/uploadcare/pillow-simd)
 
-
-
 <!-- GETTING STARTED -->
 ## Getting Started
 
-This is an example of how you may give instructions on setting up your project locally.
 To get a local copy up and running follow these simple example steps.
+
+#### Before you start steps below make sure that you have create all .env files, .env-example s are provided.
 
 ### Installation for local development
 - Fast realoading included
@@ -74,6 +73,18 @@ docker-compose build api
 docker-compose up
 ```
 4. Enter your API at `localhost/docs` -->
+
+## Size after development [with ffmpeg and pillow-simd]
+- command
+```sh
+$ docker ps --size
+```
+## Result
+```sh
+NAMES                         SIZE
+filemanager-fastapi_nginx_1   126B (virtual 28.1MB)
+filemanager-fastapi_api_1     310B (virtual 1.12GB)
+```
 
 ## FFMPEG 4
 - If you like to use ffmpeg in your docker .env file change INSTALL_FFMPEG=false to INSTALL_FFMPEG=true
@@ -108,15 +119,15 @@ Contributions are what make the open source community such an amazing place to b
 ## Image optimization result
 - Original
 
-![](api/app/pictures/originals/dcb8ac79618540688ea36e688a8c3635.png?raw=true)
+![](api/app/static/pictures/original/dcb8ac79618540688ea36e688a8c3635.png?raw=true)
 
 - Thumbnailed usind pillow-SIMD
 
-![](api/app/pictures/thumbnails/dcb8ac79618540688ea36e688a8c3635.webp?raw=true)
+![](api/app/static/pictures/thumbnail/dcb8ac79618540688ea36e688a8c3635.webp?raw=true)
 
 - Thumbnailed usind FFMPEG
 
-![](api/app/pictures/thumbnails/72014f9f91ab40c7b8df61ab350bcc71.webp?raw=true)
+![](api/app/static/pictures/thumbnail/72014f9f91ab40c7b8df61ab350bcc71.webp?raw=true)
 
 
 <!-- LICENSE -->
