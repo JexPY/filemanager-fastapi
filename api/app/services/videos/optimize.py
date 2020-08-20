@@ -9,31 +9,38 @@ from fastapi import HTTPException, status
 def video_file_FFMPEG(temp_stored_file: Path, optimize: bool):
     try:
         local_savings()
-        origin, optimized = generate_unique_name('mp4', 'mp4')
-        # Save original
+        origin, optimized = generate_unique_name(os.environ.get('VIDEO_AllOWED_FILE_FORMAT'), os.environ.get('VIDEO_DESIRED_FILE_FORMAT'))
+        # Save original with config is ready for original file of mp4 or mov also decreases size by default
         if os.environ.get('SAVE_ORIGINAL') == 'True':
             (
                 ffmpeg
                 .input(temp_stored_file)
-                .output(os.environ.get('VIDEO_ORIGINAL_PATH') + origin)
-                .run()
+                .output(os.environ.get('VIDEO_ORIGINAL_LOCAL_PATH') + origin, vcodec='h264', acodec='aac')
+                .run(quiet=True)
             )
         else:
             origin = None
         if optimize:
-            aud = ffmpeg.input(temp_stored_file).audio
-            vid = ffmpeg.input(temp_stored_file).video.filter('scale', size='640x1136', force_original_aspect_ratio='decrease').filter('pad', '640', '1136', '(ow-iw)/2', '(oh-ih)/2')
-            ffmpeg.concat(vid, aud, v=1, a=1)
-            out = ffmpeg.output(vid, aud, os.environ.get('VIDEO_OPTIMIZED_PATH') + optimized)
-            out.run()
+            audio = ffmpeg.input(temp_stored_file).audio
+            video = ffmpeg.input(temp_stored_file).video.filter('scale', size='640x1136', force_original_aspect_ratio='decrease').filter('pad', '640', '1136', '(ow-iw)/2', '(oh-ih)/2')
+            ffmpeg.concat(video, audio, v=1, a=1)
+            # ffmpeg config for webm
+            # Also is possible to use vcodec libvpx-vp9 but sometimes it increzes size needs testing may it suits you more
+            # Check docs https://trac.ffmpeg.org/wiki/Encode/VP9
+            if os.environ.get('VIDEO_DESIRED_FILE_FORMAT') == 'webm':
+                out = ffmpeg.output(video, audio, os.environ.get('VIDEO_OPTIMIZED_LOCAL_PATH') + optimized, crf='10', qmin='0', qmax='50', video_bitrate='1M', vcodec='libvpx', acodec='libvorbis')
+            # ffmpeg config for mp4
+            elif os.environ.get('VIDEO_DESIRED_FILE_FORMAT') == 'mp4':
+                out = ffmpeg.output(video, audio, os.environ.get('VIDEO_OPTIMIZED_LOCAL_PATH') + optimized, vcodec='h264', acodec='aac')
+            out.run(quiet=True)
         else:
             optimized = None
         return {
             'original': origin,
-            'optimized': os.environ.get('VIDEO_OPTIMIZED_PATH') + optimized
+            'optimized': optimized
         }
     except:
-        raise HTTPException(status_code=503, detail="Image manipulation failed using FFMPEG")
+        raise HTTPException(status_code=503, detail="Video manipulation failed using FFMPEG")
 
 
 def local_savings():

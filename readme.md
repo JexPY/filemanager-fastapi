@@ -24,11 +24,13 @@
 Long story short, I needed microservice that would manage the files, so I ended writing Filemanager-Fastapi and of course prs are welcome.
 
 Here's what features Filemanager-Fastapi has at this time:
-* Uploading image
-* Image optimization/converting using Pillow-SIMD
+* Uploading image file/files
+* Image file/files optimization/converting using Pillow-SIMD or FFMPEG
+* Uploading video file
+* Video file optimization/converting using FFMPEG
 * Uploading to local or Google Storage (S3 is comming)
 * Live reloading on local development
-* Self cleaning (temp files and Pillow-SIMD)
+* Self cleaning (temp files, Pillow-SIMD, FFMPEG)
 * Serving files from local storage
 * Easy Security using Bearer token
 * Out of box documenation thanks to fast-api [/docs && /redoc paths are avaliable]

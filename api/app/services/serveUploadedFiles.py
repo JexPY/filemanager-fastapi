@@ -10,7 +10,7 @@ from .images.resize import resize_image
 from .videos.optimize import video_file_FFMPEG
 from tempfile import NamedTemporaryFile
 from fastapi import UploadFile,HTTPException,status
-from .storage.googleCloud import uploadFileToGoogleStorage
+from .storage.googleCloud import upload_image_file_to_google_storage,upload_video_file_to_google_storage
 from ffmpeg import probe
 
 def save_upload_file_tmp(upload_file: UploadFile) -> Path:
@@ -34,9 +34,12 @@ def handle_upload_image_file(thumbnail, upload_file: UploadFile):
             imagePaths = resize_image(tmp_path, imghdr.what(tmp_path), thumbnail, os.environ.get('IMAGE_CONVERTING_PREFERED_FORMAT'))
             
             if os.environ.get('PREFERED_STORAGE') == 'google':
-                _thread.start_new_thread(uploadFileToGoogleStorage, (copy.deepcopy(imagePaths),))
+                _thread.start_new_thread(upload_image_file_to_google_storage, (copy.deepcopy(imagePaths),))
                 imagePaths['original'] = os.environ.get('GOOGLE_BUCKET_URL') + os.environ.get('IMAGE_ORIGINAL_PATH') + imagePaths['original'] if imagePaths.get('original') else imagePaths.get('original')
                 imagePaths['thumbnail'] = os.environ.get('GOOGLE_BUCKET_URL') + os.environ.get('IMAGE_THUMBNAIL_PATH') + imagePaths['thumbnail'] if imagePaths.get('thumbnail') else imagePaths.get('thumbnail')
+            elif os.environ.get('PREFERED_STORAGE') == 'local':
+                imagePaths['original'] = os.environ.get('API_URL') + os.environ.get('IMAGE_ORIGINAL_PATH') + imagePaths['original'] if imagePaths.get('original') else imagePaths.get('original')
+                imagePaths['thumbnail'] = os.environ.get('API_URL') + os.environ.get('IMAGE_THUMBNAIL_PATH') + imagePaths['thumbnail'] if imagePaths.get('thumbnail') else imagePaths.get('thumbnail')
 
             imagePaths['storage'] = os.environ.get('PREFERED_STORAGE')
             return imagePaths
@@ -60,7 +63,7 @@ def handle_multiple_image_file_uploads(FILES: List[UploadFile], workers: int):
         return result
 
 
-def handle_upload_video_file(thumbnail, upload_file: UploadFile):
+def handle_upload_video_file(optimize, upload_file: UploadFile):
     try:
         tmp_path = save_upload_file_tmp(upload_file)
         videoFileCheck = probe(tmp_path).get('format')
@@ -68,25 +71,28 @@ def handle_upload_video_file(thumbnail, upload_file: UploadFile):
             # Checks for video file type also is possible to restict for only mp4 format by checking major_brand
             # videoFileCheck.get('tags').get('major_brand') == 'mp42'
             if os.environ.get('VIDEO_AllOWED_FILE_FORMAT') in videoFileCheck.get('format_name').split(','):
-                return video_file_FFMPEG(tmp_path, True)
+
+                videoPaths = video_file_FFMPEG(tmp_path, optimize)
+                
+                if os.environ.get('PREFERED_STORAGE') == 'google':
+
+                    _thread.start_new_thread(upload_video_file_to_google_storage, (copy.deepcopy(videoPaths),))
+                    videoPaths['original'] = os.environ.get('GOOGLE_BUCKET_URL') + os.environ.get('VIDEO_ORIGINAL_PATH') + videoPaths['original'] if videoPaths.get('original') else videoPaths.get('original')
+                    videoPaths['optimized'] = os.environ.get('GOOGLE_BUCKET_URL') + os.environ.get('VIDEO_OPTIMIZED_PATH') + videoPaths['optimized'] if videoPaths.get('optimized') else videoPaths.get('optimized')
+
+                elif os.environ.get('PREFERED_STORAGE') == 'local':
+                    videoPaths['original'] = os.environ.get('API_URL') + os.environ.get('VIDEO_ORIGINAL_PATH') + videoPaths['original'] if videoPaths.get('original') else videoPaths.get('original')
+                    videoPaths['optimized'] = os.environ.get('API_URL') + os.environ.get('VIDEO_OPTIMIZED_PATH') + videoPaths['optimized'] if videoPaths.get('optimized') else videoPaths.get('optimized')
+
+                videoPaths['storage'] = os.environ.get('PREFERED_STORAGE')
+
+                return videoPaths
             else:
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail='Format not granted')
         else:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail='Not valid format')
-    except:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail='Corrupted file')
-        # if imghdr.what(tmp_path):
+    # except:
+    #     raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail='Corrupted file')
 
-        #     imagePaths = resize_image(tmp_path, imghdr.what(tmp_path), thumbnail, os.environ.get('IMAGE_CONVERTING_PREFERED_FORMAT'))
-            
-        #     if os.environ.get('PREFERED_STORAGE') == 'google':
-        #         _thread.start_new_thread(uploadFileToGoogleStorage, (copy.deepcopy(imagePaths),))
-        #         imagePaths['original'] = os.environ.get('GOOGLE_BUCKET_URL') + os.environ.get('IMAGE_ORIGINAL_PATH') + imagePaths['original'] if imagePaths.get('original') else imagePaths.get('original')
-        #         imagePaths['thumbnail'] = os.environ.get('GOOGLE_BUCKET_URL') + os.environ.get('IMAGE_THUMBNAIL_PATH') + imagePaths['thumbnail'] if imagePaths.get('thumbnail') else imagePaths.get('thumbnail')
-
-        #     imagePaths['storage'] = os.environ.get('PREFERED_STORAGE')
-        #     return imagePaths
-        # else:
-        #     raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail='The file format not supported')
     finally:
         tmp_path.unlink()  # Delete the temp file
