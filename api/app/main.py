@@ -10,8 +10,8 @@ from typing import List,Optional
 import os
 
 from services.serveUploadedFiles import handle_upload_image_file, handle_multiple_image_file_uploads, handle_upload_video_file
-from services.security.customBearerCheck import validateToken
-from services.storage.local import responseImageFile
+from services.security.customBearerCheck import validate_token
+from services.storage.local import response_image_file
 
 load_dotenv()
 app = FastAPI(docs_url=None if os.environ.get('docs_url') == 'None' else '/docs', redoc_url=None if os.environ.get('redoc_url') == 'None' else '/redoc')
@@ -31,14 +31,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/", tags=["root token check"])
+@app.get("/", tags=["main"])
 def root(
     cpu_load: Optional[str] = Query(
         False,
-        description='True/False depending your needs',
+        description='True/False depending your needs, gets average CPU load value',
         regex='^(True|False)$'
         ),
-    token: str = Depends(validateToken)):
+    token: str = Depends(validate_token)):
 
     result = {
         "Hello": f"Token is {token}",
@@ -49,7 +49,7 @@ def root(
     return result
 
 # File size validates NGINX
-@app.post("/uploadImagefile/", tags=["image"])
+@app.post("/image", tags=["image"])
 async def upload_image_file(
     thumbnail: Optional[str] = Query(
         os.environ.get('IMAGE_THUMBNAIL'),
@@ -57,21 +57,21 @@ async def upload_image_file(
         regex='^(True|False)$'
         ),
     file: UploadFile = File(...),
-    OAuth2AuthorizationCodeBearer = Depends(validateToken)):
+    OAuth2AuthorizationCodeBearer = Depends(validate_token)):
     return handle_upload_image_file(True if thumbnail == 'True' else False, file)
 
 
-@app.post("/uploadImagefiles/", tags=["image"])
-async def upload_image_files(files: List[UploadFile] = File(...), OAuth2AuthorizationCodeBearer = Depends(validateToken)):
+@app.post("/images", tags=["image"])
+async def upload_image_files(files: List[UploadFile] = File(...), OAuth2AuthorizationCodeBearer = Depends(validate_token)):
     fileAmount = len(files)
     if fileAmount > int(os.environ.get('MULTIPLE_FILE_UPLOAD_LIMIT')):
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail='Amount of files must not be more than {}'.format(os.environ.get('MULTIPLE_FILE_UPLOAD_LIMIT'))
-    ) 
+    )
     return handle_multiple_image_file_uploads(files, fileAmount)
 
-@app.get("/getImage/", tags=["image"])
+@app.get("/image", tags=["image"])
 async def get_image(
     image: str = Query(...,
         description='uploaded image name',
@@ -82,12 +82,12 @@ async def get_image(
         description='Should provide verision of image you want from localStorage original or thumbnail',
         regex='^(original|thumbnail)$'
         ),
-    OAuth2AuthorizationCodeBearer = Depends(validateToken)
+    OAuth2AuthorizationCodeBearer = Depends(validate_token)
         ):
-    return responseImageFile(image, version)
+    return response_image_file(image, version)
 
 
-@app.post("/uploadVideofile/", tags=["video"])
+@app.post("/video", tags=["video"])
 async def upload_video_file(
     optimize: Optional[str] = Query(
         os.environ.get('VIDEO_OPTIMIZE'),
@@ -95,5 +95,5 @@ async def upload_video_file(
         regex='^(True|False)$'
         ),
     file: UploadFile = File(..., description='Allows mov, mp4, m4a, 3gp, 3g2, mj2'),
-    OAuth2AuthorizationCodeBearer = Depends(validateToken)):
+    OAuth2AuthorizationCodeBearer = Depends(validate_token)):
     return handle_upload_video_file(True if optimize == 'True' else False, file)

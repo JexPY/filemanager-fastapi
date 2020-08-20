@@ -23,7 +23,7 @@ def resize_image_pillow_SIMD(temp_stored_file: Path, extension: str, thumbnail: 
         origin, thumb = generate_unique_name(extension, desiredExtension)
         img = Image.open(temp_stored_file)
         if os.environ.get('SAVE_ORIGINAL') == 'True':
-            img.save(Path(os.environ.get('IMAGE_ORIGINAL_PATH') + origin).absolute())
+            img.save(Path(os.environ.get('IMAGE_ORIGINAL_LOCAL_PATH') + origin).absolute())
         else:
             origin = None
         if thumbnail:
@@ -31,7 +31,7 @@ def resize_image_pillow_SIMD(temp_stored_file: Path, extension: str, thumbnail: 
             wpercent = (resize_width/float(img.size[0]))
             hsize = int((float(img.size[1])*float(wpercent)))
             img.thumbnail((resize_width,hsize), Image.BICUBIC)
-            img.save(Path(os.environ.get('IMAGE_THUMBNAIL_PATH') + thumb).absolute())
+            img.save(Path(os.environ.get('IMAGE_THUMBNAIL_LOCAL_PATH') + thumb).absolute())
         else:
             thumb = None
         return {
@@ -49,7 +49,7 @@ def resize_image_pillow_FFMPEG(temp_stored_file: Path, extension: str, thumbnail
             (
                 ffmpeg
                 .input(temp_stored_file)
-                .output(os.environ.get('IMAGE_ORIGINAL_PATH') + origin)
+                .output(os.environ.get('IMAGE_ORIGINAL_LOCAL_PATH') + origin)
                 .run()
             )
         else:
@@ -60,7 +60,7 @@ def resize_image_pillow_FFMPEG(temp_stored_file: Path, extension: str, thumbnail
                 ffmpeg
                 .input(temp_stored_file)
                 .filter("scale", os.environ.get('THUMBNAIL_MAX_WIDHT'), "-1")
-                .output(os.environ.get('IMAGE_THUMBNAIL_PATH') + thumb)
+                .output(os.environ.get('IMAGE_THUMBNAIL_LOCAL_PATH') + thumb)
                 .run()
             )
         else:
@@ -73,8 +73,8 @@ def resize_image_pillow_FFMPEG(temp_stored_file: Path, extension: str, thumbnail
         raise HTTPException(status_code=503, detail="Image manipulation failed using FFMPEG")
 
 def local_savings():
-    Path(os.environ.get('IMAGE_ORIGINAL_PATH')).mkdir(parents=True, exist_ok=True)
-    Path(os.environ.get('IMAGE_THUMBNAIL_PATH')).mkdir(parents=True, exist_ok=True)
+    Path(os.environ.get('IMAGE_ORIGINAL_LOCAL_PATH')).mkdir(parents=True, exist_ok=True)
+    Path(os.environ.get('IMAGE_THUMBNAIL_LOCAL_PATH')).mkdir(parents=True, exist_ok=True)
 
 def generate_unique_name(extension, desiredExtension):
     unique = uuid4().hex

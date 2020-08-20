@@ -4,7 +4,7 @@ from fastapi.responses import FileResponse
 from fastapi import HTTPException,status
 
 
-def responseImageFile(filename:str, version:str):
+def response_image_file(filename:str, version:str):
     validPath = {
         'original': os.environ.get('IMAGE_ORIGINAL_PATH'),
         'thumbnail': os.environ.get('IMAGE_THUMBNAIL_PATH'),
