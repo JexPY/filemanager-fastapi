@@ -44,8 +44,8 @@ def video_file_FFMPEG(temp_stored_file: Path, optimize: bool):
 
 
 def local_savings():
-    Path(os.environ.get('VIDEO_ORIGINAL_PATH')).mkdir(parents=True, exist_ok=True)
-    Path(os.environ.get('VIDEO_OPTIMIZED_PATH')).mkdir(parents=True, exist_ok=True)
+    Path(os.environ.get('VIDEO_ORIGINAL_LOCAL_PATH')).mkdir(parents=True, exist_ok=True)
+    Path(os.environ.get('VIDEO_OPTIMIZED_LOCAL_PATH')).mkdir(parents=True, exist_ok=True)
 
 def generate_unique_name(extension, desiredExtension):
     unique = uuid4().hex
