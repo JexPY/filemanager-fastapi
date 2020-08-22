@@ -2,6 +2,7 @@ version: '3.3'
 
 services:
   api:
+    image: 127.0.0.1:5000/filemenager-fastapi
     build:
        context: ./api
        args:

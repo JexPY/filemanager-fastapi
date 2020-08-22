@@ -1,8 +1,7 @@
 import os
-from pathlib import Path
 from libcloud.storage.types import Provider
 from libcloud.storage.providers import get_driver
-
+from ..helpers.alena import cleaning_service
 
 def authorize_google():
         cls = get_driver(Provider.GOOGLE_STORAGE)
@@ -25,7 +24,7 @@ def upload_video_file_to_google_storage(videoPaths: dict):
                         googleCloudStorageDriver.upload_object_via_stream(iterator=iterator,
                                                                 container=container,
                                                                 object_name=os.environ.get('VIDEO_OPTIMIZED_GOOGLE_CLOUD_PATH') + videoPaths['optimized']) 
-        return clean_after_yourself(videoPaths, videos=True)
+        return cleaning_service(videoPaths, videos=True)
 
 def upload_image_file_to_google_storage(imagePaths: dict):
         googleCloudStorageDriver, container = authorize_google()
@@ -39,23 +38,10 @@ def upload_image_file_to_google_storage(imagePaths: dict):
                 with open('./' + os.environ.get('IMAGE_THUMBNAIL_LOCAL_PATH') + imagePaths['thumbnail'], 'rb') as iterator:
                         googleCloudStorageDriver.upload_object_via_stream(iterator=iterator,
                                                                 container=container,
-                                                                object_name=os.environ.get('IMAGE_THUMBNAIL_GOOGLE_CLOUD_PATH') + imagePaths['thumbnail']) 
-        return clean_after_yourself(imagePaths, images=True)
-
-
-
-def clean_after_yourself(pathsToClean, images = False, videos = False):
-        if images:
-                if pathsToClean.get('original'):
-                        if Path(os.environ.get('IMAGE_ORIGINAL_LOCAL_PATH') + pathsToClean['original']).is_file():
-                                Path(os.environ.get('IMAGE_ORIGINAL_LOCAL_PATH') + pathsToClean['original']).unlink()
-                if pathsToClean.get('thumbnail'):
-                        if Path(os.environ.get('IMAGE_THUMBNAIL_LOCAL_PATH') + pathsToClean['thumbnail']).is_file():
-                                Path(os.environ.get('IMAGE_THUMBNAIL_LOCAL_PATH') + pathsToClean['thumbnail']).unlink()
-        if videos:
-                if pathsToClean.get('original'):
-                        if Path(os.environ.get('VIDEO_ORIGINAL_LOCAL_PATH') + pathsToClean['original']).is_file():
-                                Path(os.environ.get('VIDEO_ORIGINAL_LOCAL_PATH') + pathsToClean['original']).unlink()
-                if pathsToClean.get('optimized'):
-                        if Path(os.environ.get('VIDEO_OPTIMIZED_LOCAL_PATH') + pathsToClean['optimized']).is_file():
-                                Path(os.environ.get('VIDEO_OPTIMIZED_LOCAL_PATH') + pathsToClean['optimized']).unlink()
+                                                                object_name=os.environ.get('IMAGE_THUMBNAIL_GOOGLE_CLOUD_PATH') + imagePaths['thumbnail'])
+        if imagePaths.get('qrImage'):
+                with open('./' + os.environ.get('QR_IMAGE_LOCAL_PATH') + imagePaths['qrImage'], 'rb') as iterator:
+                        googleCloudStorageDriver.upload_object_via_stream(iterator=iterator,
+                                                                container=container,
+                                                                object_name=os.environ.get('QR_IMAGE_GOOGLE_CLOUD_PATH') + imagePaths['qrImage'])
+        return cleaning_service(imagePaths, images=True)
