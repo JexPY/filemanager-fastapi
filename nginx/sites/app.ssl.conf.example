@@ -5,7 +5,7 @@ server {
 }
 
 server {
-    server_name filemanager.etomer.io www.filemanager.etomer.io;
+    server_name ff.etomer.io www.ff.etomer.io;
 
     listen 443 ssl http2;
     listen [::]:443 ssl http2;

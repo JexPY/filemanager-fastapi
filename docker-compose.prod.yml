@@ -2,10 +2,11 @@ version: '3.3'
 
 services:
   api:
+    image: gujadoesdocker/filemanager-fastapi
     build:
-       context: ./api
-       args:
-        - INSTALL_FFMPEG=${INSTALL_FFMPEG}
+      context: ./api
+      args:
+      - INSTALL_FFMPEG=${INSTALL_FFMPEG}
     volumes:
     - './api/app:/app'
     command: /start.sh
@@ -16,6 +17,7 @@ services:
 
 ### Certbot #########################################
   certbot:
+    image: phusion/baseimage:bionic-1.0.0
     build:
       context: ./certbot
     volumes:
@@ -27,6 +29,7 @@ services:
 
   ### NGINX Server #########################################
   nginx:
+    image: nginx:alpine
     build:
       context: ./nginx
       args:
