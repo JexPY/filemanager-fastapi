@@ -10,6 +10,7 @@ from typing import List,Optional
 import os
 
 from services.serveUploadedFiles import handle_upload_image_file, handle_multiple_image_file_uploads, handle_upload_video_file
+from services.serverQrcode import handle_qr_code
 from services.security.customBearerCheck import validate_token
 from services.storage.local import response_image_file
 
@@ -85,6 +86,20 @@ async def get_image(
     OAuth2AuthorizationCodeBearer = Depends(validate_token)
         ):
     return response_image_file(image, version)
+
+@app.post("/qrImage", tags=["image"])
+async def text_to_generate_qr_image(
+    qr_text: str = Query(
+        ...,
+        description='Provide text to generate qr image',
+        ),
+    with_logo: Optional[str] = Query(
+        os.environ.get('QR_IMAGE_WITH_LOGO'),
+        description='True/False depending your needs default is {}'.format(os.environ.get('QR_IMAGE_WITH_LOGO')),
+        regex='^(True|False)$'
+        ),
+    OAuth2AuthorizationCodeBearer = Depends(validate_token)):
+    return handle_qr_code(qr_text, True if with_logo == 'True' else False)
 
 
 @app.post("/video", tags=["video"])

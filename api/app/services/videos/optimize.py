@@ -1,14 +1,18 @@
 import os
 import ffmpeg
 from PIL import Image
-from uuid import uuid4
 from pathlib import Path
+from ..helpers.uniqueFileName import generate_unique_name
+from ..helpers.alena import local_savings
 from fastapi import HTTPException, status
 
 
 def video_file_FFMPEG(temp_stored_file: Path, optimize: bool):
     try:
-        local_savings()
+        if not optimize and not os.environ.get('SAVE_ORIGINAL') == 'True':
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail='Save original is dissabled, contact admin')
+        
+        local_savings(videos=True)
         origin, optimized = generate_unique_name(os.environ.get('VIDEO_AllOWED_FILE_FORMAT'), os.environ.get('VIDEO_DESIRED_FILE_FORMAT'))
         # Save original with config is ready for original file of mp4 or mov also decreases size by default
         if os.environ.get('SAVE_ORIGINAL') == 'True':
@@ -41,13 +45,3 @@ def video_file_FFMPEG(temp_stored_file: Path, optimize: bool):
         }
     except:
         raise HTTPException(status_code=503, detail="Video manipulation failed using FFMPEG")
-
-
-def local_savings():
-    Path(os.environ.get('VIDEO_ORIGINAL_LOCAL_PATH')).mkdir(parents=True, exist_ok=True)
-    Path(os.environ.get('VIDEO_OPTIMIZED_LOCAL_PATH')).mkdir(parents=True, exist_ok=True)
-
-def generate_unique_name(extension, desiredExtension):
-    unique = uuid4().hex
-    # First goes original, second is thumbnail with desiredExtension
-    return unique + '.' +  extension, unique + '.' +  desiredExtension,

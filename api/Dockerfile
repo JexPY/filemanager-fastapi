@@ -11,8 +11,13 @@ RUN apt-get update && apt-get install -y python3-dev build-essential
 # Image modifications
 RUN apt-get install -y libtiff5-dev libjpeg62-turbo-dev zlib1g-dev libfreetype6-dev liblcms2-dev libwebp-dev
 
-RUN ln -s /usr/lib/x86_64-linux-gnu/libz.so /lib/
-RUN ln -s /usr/lib/x86_64-linux-gnu/libjpeg.so /lib/
+RUN if [ ! -e /lib/libz.so ]; then \
+    ln -s /usr/lib/x86_64-linux-gnu/libz.so /lib/ \
+    ;fi
+
+RUN if [ ! -e /lib/libjpeg.so ]; then \
+    ln -s /usr/lib/x86_64-linux-gnu/libjpeg.so /lib/ \
+    ;fi
 
 # Install FFMPEG:
 ARG INSTALL_FFMPEG=false
@@ -28,10 +33,13 @@ RUN ffmpeg -decoders
 RUN apt-get install curl -y
 
 # Install Poetry
-RUN curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-poetry.py | POETRY_HOME=/opt/poetry python && \
+RUN if [ ! -e /usr/local/bin/poetry ]; then \
+    curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-poetry.py | POETRY_HOME=/opt/poetry python && \
     cd /usr/local/bin && \
     ln -s /opt/poetry/bin/poetry && \
-    poetry config virtualenvs.create false
+    poetry config virtualenvs.create false \
+    ;fi
+    
 
 COPY ./pyproject.toml ./poetry.lock* /$WORKDIR/
 COPY ./gunicorn_conf.py /gunicorn_conf.py
