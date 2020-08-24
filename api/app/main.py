@@ -78,14 +78,14 @@ async def get_image(
         description='uploaded image name',
         max_length=50
         ),
-    version: str = Query(
+    image_type: str = Query(
         ...,
-        description='Should provide verision of image you want from localStorage original or thumbnail',
-        regex='^(original|thumbnail)$'
+        description='Should provide verision of image you want from localStorage original, thumbnail or qrImage',
+        regex='^(original|thumbnail|qrImage)$'
         ),
     OAuth2AuthorizationCodeBearer = Depends(validate_token)
         ):
-    return response_image_file(image, version)
+    return response_image_file(image, image_type)
 
 @app.post("/qrImage", tags=["image"])
 async def text_to_generate_qr_image(
