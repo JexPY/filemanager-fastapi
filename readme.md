@@ -21,9 +21,9 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-Long story short, I needed microservice that would manage the files, so I ended up with writing Filemanager-Fastapi and I am not even complaining. Hope you will be able to use it in concrete needs. Have fun, and of course prs are welcome.
+Long story short, I needed microservice that would manage the files, so I ended up with writing Filemanager-Fastapi (FF) and I am not even complaining. Hope you will be able to use it in concrete needs. Have fun, and of course prs are welcome.
 
-Here's what features Filemanager-Fastapi has at this time:
+Here's what features FF has at this time:
 * Uploading image file/files
 * Image file/files optimization/converting using Pillow-SIMD or FFMPEG
   - You can have both installed or you can choose any of engines depending your needs 
@@ -39,12 +39,18 @@ Here's what features Filemanager-Fastapi has at this time:
 * Live reloading on local development
 * Self cleaning (temp files, Pillow-SIMD, FFMPEG)
 * Serving files from local storage
+  - The path starts from static folder for example:
+  ```
+  http://localhost/static/pictures/original/dcb8ac79618540688ea36e688a8c3635.png
+  ```
 * Easy Security using Bearer token
+  - For security its recomended to make requests from  your backend server, not from browser, as your key of FF can be tracked.
+  
 * Out of box documenation thanks to fast-api [/docs && /redoc paths are avaliable]
 * SSL secured reverse nginx proxy using gunicorn and uvloop
 
 
-Going to add video file modification using ffmpeg and will optimize it a little therefore its already is really fast, try by yourself :)
+May optimize it a little therefore FF already is really fast, try by yourself :)
 
 ### Built With
 * [FastAPI](https://fastapi.tiangolo.com/)
