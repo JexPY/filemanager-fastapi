@@ -121,8 +121,8 @@ kkk5mmkgk6zf        filemanager-fastapi_api   replicated          1/1           
 Avaliable at (https://hub.docker.com/r/gujadoesdocker/filemanager-fastapi)
 
 ### You need A+ ssl?
-- No problem Filemanager-Fastapi comes with nginx and certbot configuration that guarantees A+ ssl
-Check here (https://www.ssllabs.com/ssltest/analyze.html?d=ff.etomer.io)
+- No problem Filemanager-Fastapi comes with nginx and certbot configuration that guarantees A+ ssl.
+<!-- Check here (https://www.ssllabs.com/ssltest/analyze.html?d=ff.etomer.io) -->
 - If you will need help let me know.
 
 
@@ -208,9 +208,9 @@ It is possible to edit configuration easily to generate Qrcode image on your nee
 Distributed under the MIT License. See `LICENSE` for more information.
 
 <!-- Sponsors -->
-## Sponsored by
+<!-- ## Sponsored by
 
-<a href="https://www.etomer.io/"><img src="https://www.etomer.io/static/media/etomer-logo-dark.22a369ff.svg" width="150"></a>
+<a href="https://www.etomer.io/"><img src="https://www.etomer.io/static/media/etomer-logo-dark.22a369ff.svg" width="150"></a> -->
 
 <!-- CONTACT -->
 ## Contact
