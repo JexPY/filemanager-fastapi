@@ -44,9 +44,9 @@ Here's what features FF has at this time:
   http://localhost/static/pictures/original/dcb8ac79618540688ea36e688a8c3635.png
   ```
 * Easy Security using Bearer token
-  - For security its recomended to make requests from  your backend server, not from browser, as your key of FF can be tracked.
+  - For security its recommended to make requests from  your backend server, not from browser, as your key of FF can be tracked.
   
-* Out of box documenation thanks to fast-api [/docs && /redoc paths are avaliable]
+* Out of box documentation thanks to fast-api [/docs && /redoc paths are available]
 * SSL secured reverse nginx proxy using gunicorn and uvloop
 
 
@@ -67,7 +67,7 @@ To get a local copy up and running follow these simple example steps.
 #### Before you start steps below make sure that you have created all .env files, .env-example s are provided.
 
 ### Installation for local development
-- Fast realoading included
+- Fast reloading included
 1. Change docker-compose.dev.yml to docker-compose.yml
 2. 
 ```sh
@@ -118,7 +118,7 @@ ID                  NAME                      MODE                REPLICAS      
 kkk5mmkgk6zf        filemanager-fastapi_api   replicated          1/1                 127.0.0.1:5000/filemenager-fastapi:latest   *:80->80/tcp
 ```
 ### Docker Hub image
-Avaliable at (https://hub.docker.com/r/gujadoesdocker/filemanager-fastapi)
+Available at (https://hub.docker.com/r/gujadoesdocker/filemanager-fastapi)
 
 ### You need A+ ssl?
 - No problem Filemanager-Fastapi comes with nginx and certbot configuration that guarantees A+ ssl.
@@ -151,7 +151,7 @@ filemanager-fastapi_api_1     310B (virtual 1.12GB)
 
 ## FFMPEG 4
 - If you like to use ffmpeg in your docker .env file change INSTALL_FFMPEG=false to INSTALL_FFMPEG=true
-- Don't fortget to change api .env IMAGE_OPTIMIZATION_USING to ffmpeg.
+- Don't forget to change api .env IMAGE_OPTIMIZATION_USING to ffmpeg.
 - LTS version at this time:
 ```sh
 ffmpeg version 4.1.6-1~deb10u1 Copyright (c) 2000-2020 the FFmpeg developers
