@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 from typing import List,Optional
 import os
 
-from services.serveUploadedFiles import handle_upload_image_file, handle_multiple_image_file_uploads, handle_upload_video_file
-from services.serverQrcode import handle_qr_code
-from services.security.customBearerCheck import validate_token
+from .services.serveUploadedFiles import handle_upload_image_file, handle_multiple_image_file_uploads, handle_upload_video_file
+from .services.serverQrcode import handle_qr_code
+from .services.security.customBearerCheck import validate_token
 from services.storage.local import response_image_file
 
 load_dotenv()
