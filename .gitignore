@@ -9,3 +9,6 @@ key.json
 docker-compose.yml
 nginx/sites/app.conf
 static/
+__pycache__/
+ *.pyc
+ .pytest_cache
