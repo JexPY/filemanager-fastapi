@@ -1,9 +1,9 @@
 
-<!-- [![Contributors][contributors-shield]][contributors-url]
+[![Contributors][contributors-shield]][contributors-url]
 [![Forks][forks-shield]][forks-url]
 [![Stargazers][stars-shield]][stars-url]
 [![Issues][issues-shield]][issues-url]
-[![MIT License][license-shield]][license-url] -->
+[![MIT License][license-shield]][license-url]
 
 
 <!-- PROJECT LOGO -->
@@ -219,8 +219,8 @@ Twitter - [@guja_py](https://twitter.com/guja_py)
 
 
 <!-- MARKDOWN LINKS & IMAGES -->
-<!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
-<!-- [contributors-shield]: https://img.shields.io/github/contributors/JexPY/filemanager-fastapi.svg?style=flat-square
+
+[contributors-shield]: https://img.shields.io/github/contributors/JexPY/filemanager-fastapi.svg?style=flat-square
 [contributors-url]: https://github.com/JexPY/filemanager-fastapi/graphs/contributors
 [forks-shield]: https://img.shields.io/github/forks/JexPY/filemanager-fastapi.svg?style=flat-square
 [forks-url]: https://github.com/othneildrew/Best-README-Template/network/members
@@ -229,4 +229,4 @@ Twitter - [@guja_py](https://twitter.com/guja_py)
 [issues-shield]: https://img.shields.io/github/issues/JexPY/filemanager-fastapi.svg?style=flat-square
 [issues-url]: https://github.com/JexPY/filemanager-fastapi/issues
 [license-shield]: https://img.shields.io/github/license/JexPY/filemanager-fastapi.svg?style=flat-square
-[license-url]: https://github.com/JexPY/filemanager-fastapi/blob/master/LICENSE.txt -->
+[license-url]: https://github.com/JexPY/filemanager-fastapi/blob/master/LICENSE.txt
