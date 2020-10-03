@@ -8,17 +8,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from typing import List,Optional
 import os
+import sys
 
-from .services.serveUploadedFiles import handle_upload_image_file, handle_multiple_image_file_uploads, handle_upload_video_file
-from .services.serverQrcode import handle_qr_code
-from .services.security.customBearerCheck import validate_token
+from services.serveUploadedFiles import handle_upload_image_file, handle_multiple_image_file_uploads, handle_upload_video_file
+from services.serverQrcode import handle_qr_code
+from services.security.customBearerCheck import validate_token
 from services.storage.local import response_image_file
 
 load_dotenv()
 app = FastAPI(docs_url=None if os.environ.get('docs_url') == 'None' else '/docs', redoc_url=None if os.environ.get('redoc_url') == 'None' else '/redoc')
 
 # If you want to serve files from local server you need to mount your static file directory
-if os.environ.get('PREFERED_STORAGE') == 'local':
+if os.environ.get('PREFERED_STORAGE') == 'local' and 'pytest' not in sys.modules.keys():
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # If you want cors configuration also possible thanks to fast-api
