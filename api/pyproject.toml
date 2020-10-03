@@ -17,6 +17,9 @@ aiofiles = "^0.5.0"
 cryptography = "^3.0"
 ffmpeg-python = "^0.2.0"
 qrcode = "^6.1"
+pytest = "^6.1.0"
+pytest-asyncio = "^0.14.0"
+httpx = "^0.15.5"
 
 [tool.poetry.dev-dependencies]
 pylint = "^2.5.3"
