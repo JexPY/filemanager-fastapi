@@ -80,7 +80,13 @@ docker-compose up
 4. Enter your API at `localhost/docs`
 
 5. Now you should be able to see the open api endpoints. 
-- Don't forget to authorize with FILE_MANAGER_BEARER_TOKEN that you should have generated in .env file
+- Don't forget to authorize with FILE_MANAGER_BEARER_TOKEN that you should generate and paste in .env file.
+  - If you forgot to generate FILE_MANAGER_BEARER_TOKEN here is one of the ways to generate secret key
+      - ```sh
+        openssl rand -base64 64
+        ```
+      - p.s You can create as much tokens as you want just separate them with ,
+
 ![](api/app/static/pictures/original/ef79f4dd65974d268e5ca2013a54edf.png?raw=true)
 
 ### Installation for docker swarm
