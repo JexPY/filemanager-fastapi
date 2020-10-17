@@ -9,7 +9,7 @@ WORKDIR $WORKDIR
 RUN apt-get update && apt-get install -y python3-dev build-essential
 
 # Image modifications
-RUN apt-get install -y libtiff5-dev libjpeg62-turbo-dev zlib1g-dev libfreetype6-dev liblcms2-dev libwebp-dev
+RUN apt-get install -y libtiff5-dev libjpeg62-turbo-dev zlib1g-dev libfreetype6-dev liblcms2-dev libwebp-dev libmagic1
 
 RUN if [ ! -e /lib/libz.so ]; then \
     ln -s /usr/lib/x86_64-linux-gnu/libz.so /lib/ \

@@ -25,9 +25,11 @@ Long story short, I needed microservice that would manage the files, so I ended 
 
 Here's what features FF has at this time:
 * Uploading image file/files
+* Downloading image file/files, from any image url
 * Image file/files optimization/converting using Pillow-SIMD or FFMPEG
   - You can have both installed or you can choose any of engines depending your needs 
 * Uploading video file
+* Downloading video file, from any video url
 * Video file optimization/converting using FFMPEG
   - change in .env INSTALL_FFMPEG=false to INSTALL_FFMPEG=true
   - Then run 
@@ -80,8 +82,14 @@ docker-compose up
 4. Enter your API at `localhost/docs`
 
 5. Now you should be able to see the open api endpoints. 
-- Don't forget to authorize with FILE_MANAGER_BEARER_TOKEN that you should have generated in .env file
-![](api/app/static/pictures/original/ef79f4dd65974d268e5ca2013a54edf.png?raw=true)
+- Don't forget to authorize with FILE_MANAGER_BEARER_TOKEN that you should generate and paste in .env file.
+  - If you forgot to generate FILE_MANAGER_BEARER_TOKEN here is one of the ways to generate secret key
+      - ```sh
+        openssl rand -base64 64
+        ```
+      - p.s You can create as much tokens as you want just separate them with ,
+
+![](api/app/static/pictures/original/afba38beae434b9fb4691bf8559947aa.png?raw=true)
 
 ### Installation for docker swarm
 - If you’re trying things out on a local development environment, you can put your engine into swarm mode with docker swarm init.

@@ -11,9 +11,10 @@ import os
 import sys
 
 from services.serveUploadedFiles import handle_upload_image_file, handle_multiple_image_file_uploads, handle_upload_video_file
-from services.serverQrcode import handle_qr_code
+from services.serveQrcode import handle_qr_code
 from services.security.customBearerCheck import validate_token
 from services.storage.local import response_image_file
+from services.serveDataFromUrl import handle_download_data_from_url, handle_multiple_image_file_downloads
 
 load_dotenv()
 app = FastAPI(docs_url=None if os.environ.get('docs_url') == 'None' else '/docs', redoc_url=None if os.environ.get('redoc_url') == 'None' else '/redoc')
@@ -50,6 +51,7 @@ def root(
         result['cpu_average_load'] = os.getloadavg()
     return result
 
+
 # File size validates NGINX
 @app.post("/image", tags=["image"])
 async def upload_image_file(
@@ -64,14 +66,23 @@ async def upload_image_file(
 
 
 @app.post("/images", tags=["image"])
-async def upload_image_files(files: List[UploadFile] = File(...), OAuth2AuthorizationCodeBearer = Depends(validate_token)):
+async def upload_image_files(
+        thumbnail: Optional[str] = Query(
+        os.environ.get('IMAGE_THUMBNAIL'),
+        description='True/False depending your needs',
+        regex='^(True|False)$'
+        ),
+        files: List[UploadFile] = File(...),
+        OAuth2AuthorizationCodeBearer = Depends(validate_token)
+    ):
     fileAmount = len(files)
     if fileAmount > int(os.environ.get('MULTIPLE_FILE_UPLOAD_LIMIT')):
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail='Amount of files must not be more than {}'.format(os.environ.get('MULTIPLE_FILE_UPLOAD_LIMIT'))
     )
-    return handle_multiple_image_file_uploads(files, fileAmount)
+    return handle_multiple_image_file_uploads(files, fileAmount, True if thumbnail == 'True' else False)
+
 
 @app.get("/image", tags=["image"])
 async def get_image(
@@ -87,6 +98,7 @@ async def get_image(
     OAuth2AuthorizationCodeBearer = Depends(validate_token)
         ):
     return response_image_file(image, image_type)
+
 
 @app.post("/qrImage", tags=["image"])
 async def text_to_generate_qr_image(
@@ -113,3 +125,52 @@ async def upload_video_file(
     file: UploadFile = File(..., description='Allows mov, mp4, m4a, 3gp, 3g2, mj2'),
     OAuth2AuthorizationCodeBearer = Depends(validate_token)):
     return handle_upload_video_file(True if optimize == 'True' else False, file)
+
+
+@app.get("/imageUrl", tags=["from url"])
+async def image_from_url(
+    image_url: str = Query(
+        None,
+        description = "Pass valid image url to upload",
+        min_length  = 5
+    ),
+    thumbnail: Optional[str] = Query(
+        os.environ.get('IMAGE_THUMBNAIL'),
+        description='True/False depending your needs',
+        regex='^(True|False)$'
+    ),
+    OAuth2AuthorizationCodeBearer = Depends(validate_token)):
+    return handle_download_data_from_url(image_url, True if thumbnail == 'True' else False, file_type='image')
+
+
+@app.get("/imageUrls", tags=["from url"])
+async def images_from_urls(
+    image_urls: List[str] = Query(
+        None,
+        description = "Pass valid image urls to upload",
+        min_length  = 5
+    ),
+    OAuth2AuthorizationCodeBearer = Depends(validate_token)):
+    fileAmount = len(image_urls)
+    if fileAmount > int(os.environ.get('MULTIPLE_FILE_UPLOAD_LIMIT')):
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail='Amount of files must not be more than {}'.format(os.environ.get('MULTIPLE_FILE_UPLOAD_LIMIT'))
+    )
+    return handle_multiple_image_file_downloads(image_urls, fileAmount)
+
+
+@app.get("/videoUrl", tags=["from url"])
+async def video_from_url(
+    video_url: str = Query(
+        None,
+        description = "Pass valid video url to upload",
+        min_length  = 5
+    ),
+    optimize: Optional[str] = Query(
+        os.environ.get('VIDEO_OPTIMIZE'),
+        description='True/False depending your needs default is {}'.format(os.environ.get('VIDEO_OPTIMIZE')),
+        regex='^(True|False)$'
+        ),
+    OAuth2AuthorizationCodeBearer = Depends(validate_token)):
+    return handle_download_data_from_url(video_url, False, True if optimize == 'True' else False, file_type='video')
