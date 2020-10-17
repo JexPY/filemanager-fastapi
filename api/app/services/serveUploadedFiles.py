@@ -61,6 +61,7 @@ def handle_upload_image_file(thumbnail, upload_file: None, raw_data_file = None)
                 imagePaths['thumbnail'] = os.environ.get('API_URL') + os.environ.get('IMAGE_THUMBNAIL_LOCAL_PATH') + imagePaths['thumbnail'] if imagePaths.get('thumbnail') else None
 
             imagePaths['storage'] = os.environ.get('PREFERED_STORAGE')
+            imagePaths['file_name'] = imagePaths['original'].split('/')[-1]
             return imagePaths
         else:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail='The file format not supported')
@@ -106,6 +107,7 @@ def handle_upload_video_file(optimize, upload_file: None, raw_data_file = None):
                     videoPaths['optimized'] = os.environ.get('API_URL') + os.environ.get('VIDEO_OPTIMIZED_LOCAL_PATH') + videoPaths['optimized'] if videoPaths.get('optimized') else None
 
                 videoPaths['storage'] = os.environ.get('PREFERED_STORAGE')
+                videoPaths['file_name'] = videoPaths['original'].split('/')[-1]
 
                 return videoPaths
         else:
