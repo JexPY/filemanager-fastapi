@@ -20,15 +20,15 @@ RUN if [ ! -e /lib/libjpeg.so ]; then \
     ;fi
 
 # Install FFMPEG:
-ARG INSTALL_FFMPEG=false
+ARG INSTALL_FFMPEG=true
 RUN echo "Oh dang look at that $INSTALL_FFMPEG"
 
 RUN if [ ${INSTALL_FFMPEG} = true ]; then \
-    apt-get install -y ffmpeg \    
-RUN ffmpeg -version \
-    RUN ffmpeg -encoders \
-    RUN ffmpeg -decoders \
+    apt-get install -y ffmpeg \
 ;fi
+RUN ffmpeg -version 
+RUN ffmpeg -encoders
+RUN ffmpeg -decoders
 
 RUN apt-get install curl -y
 
