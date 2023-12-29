@@ -73,7 +73,7 @@ To get a local copy up and running follow these simple example steps.
 1. Change docker-compose.dev.yml to docker-compose.yml
 2. 
 ```sh
-docker-compose build api
+docker compose build --build-arg INSTALL_FFMPEG=true api
 ```
 3. Start the service
 ```sh
