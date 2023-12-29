@@ -24,8 +24,8 @@ ARG INSTALL_FFMPEG=false
 RUN echo "Oh dang look at that $INSTALL_FFMPEG"
 
 RUN if [ ${INSTALL_FFMPEG} = true ]; then \
-    apt-get install -y ffmpeg \
-    RUN ffmpeg -version \
+    apt-get install -y ffmpeg \    
+RUN ffmpeg -version \
     RUN ffmpeg -encoders \
     RUN ffmpeg -decoders \
 ;fi
@@ -34,7 +34,7 @@ RUN apt-get install curl -y
 
 # Install Poetry
 RUN if [ ! -e /usr/local/bin/poetry ]; then \
-    curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-poetry.py | POETRY_HOME=/opt/poetry python && \
+    curl -sSL https://install.python-poetry.org | POETRY_HOME=/opt/poetry python && \
     cd /usr/local/bin && \
     ln -s /opt/poetry/bin/poetry && \
     poetry config virtualenvs.create false \
