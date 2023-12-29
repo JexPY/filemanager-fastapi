@@ -25,10 +25,10 @@ RUN echo "Oh dang look at that $INSTALL_FFMPEG"
 
 RUN if [ ${INSTALL_FFMPEG} = true ]; then \
     apt-get install -y ffmpeg \
+    RUN ffmpeg -version \
+    RUN ffmpeg -encoders \
+    RUN ffmpeg -decoders \
 ;fi
-RUN ffmpeg -version
-RUN ffmpeg -encoders
-RUN ffmpeg -decoders
 
 RUN apt-get install curl -y
 
