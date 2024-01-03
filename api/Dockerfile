@@ -20,7 +20,7 @@ RUN if [ ! -e /lib/libjpeg.so ]; then \
     ;fi
 
 # Install FFMPEG:
-ARG INSTALL_FFMPEG=true
+ARG INSTALL_FFMPEG=false
 RUN echo "Oh dang look at that $INSTALL_FFMPEG"
 
 RUN if [ ${INSTALL_FFMPEG} = true ]; then \

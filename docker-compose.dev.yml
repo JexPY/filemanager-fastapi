@@ -14,5 +14,3 @@ services:
       - 80:80
     expose:
       - 80
-    environment:
-      - CORS_ORIGINS=*
