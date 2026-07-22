@@ -1,0 +1,31 @@
+{
+    /*** 
+        Your Projects using FF
+    ***/
+    'projects': [{
+        'project_name': 'Cool Project 1',
+        'preferred_engine': 'pillow-simd', //
+        'access-token': '846a06d82cc8621aca79e386227ee109b2c2af8187aadf499706a48df557a1c51cb462e31a370952',
+
+        'storage': {
+            'google': {
+                // secrets
+                'GOOGLE_STORAGE_KEY_FILE': './key.json',
+                'GOOGLE_CLIENT_EMAIL': 'etomeraccessstorage@ace-lotus-270420.iam.gserviceaccount.com',
+                // bucket
+                'DEFAULT_BUCKET_NAME': 'static.etomer.io',
+                'GOOGLE_BUCKET_URL': 'https://static.etomer.io/',
+                // config
+                'VIDEO_ORIGINAL_GOOGLE_CLOUD_PATH': 'videos/original/',
+                'VIDEO_OPTIMIZED_GOOGLE_CLOUD_PATH': 'videos/optimized/'
+
+            }
+            
+        }
+    },
+
+    {
+
+    }]
+    
+}

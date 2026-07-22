@@ -1,4 +1,4 @@
-FROM python:3.8.1-slim-buster
+FROM python:3.10.1-slim-buster
 
 ENV WORKDIR=/usr/src/app
 ENV USER=app
@@ -34,11 +34,9 @@ RUN apt-get install curl -y
 
 # Install Poetry
 RUN if [ ! -e /usr/local/bin/poetry ]; then \
-    curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-poetry.py | POETRY_HOME=/opt/poetry python && \
+    curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/install-poetry.py | POETRY_HOME=/opt/poetry python && \
     cd /usr/local/bin && \
-    ln -s /opt/poetry/bin/poetry && \
-    poetry config virtualenvs.create false \
-    ;fi
+    ln -s /opt/poetry/bin/poetry && poetry config virtualenvs.create false && poetry config virtualenvs.in-project false&& poetry config experimental.new-installer false;fi
     
 
 COPY ./pyproject.toml ./poetry.lock* /$WORKDIR/

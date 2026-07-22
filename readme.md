@@ -21,7 +21,7 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-Long story short, I needed microservice that would manage the files, so I ended up with writing Filemanager-Fastapi (FF) and I am not even complaining. Hope you will be able to use it in concrete needs. Have fun, and of course prs are welcome.
+Long story short, I needed microservice that would manage the files, so I ended up with writing FileManager-FastApi (FF) and I am not even complaining. Hope you will be able to use it in concrete needs. Have fun, and of course prs are welcome.
 
 Here's what features FF has at this time:
 * Uploading image file/files
