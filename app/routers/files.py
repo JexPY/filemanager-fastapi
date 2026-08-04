@@ -1,19 +1,21 @@
 import hmac
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import Response
 
-from app.config import settings
-from app.services.storage import upload_file, StorageError
-from app.services.imgproxy import generate_signed_url
-from app.services.image_vips import validate_and_strip_image
-from app.services.qr_generator import generate_qr_image
-from app.tasks import compress_video_task
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import Response
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
 from app.broker import broker
+from app.config import settings
+from app.services.image_vips import validate_and_strip_image
+from app.services.imgproxy import generate_signed_url
+from app.services.qr_generator import generate_qr_image
+from app.services.storage import StorageError, upload_file
+from app.tasks import compress_video_task
 
 router = APIRouter()
 security = HTTPBearer()
+
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
@@ -23,6 +25,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     return token
 
+
 @router.post("/generate/qrcode", dependencies=[Depends(verify_token)])
 async def generate_qrcode(content: str = Form(...)):
     try:
@@ -30,6 +33,7 @@ async def generate_qrcode(content: str = Form(...)):
         return Response(content=png_data, media_type="image/png")
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
 
 @router.post("/upload/image", dependencies=[Depends(verify_token)])
 async def upload_image(file: UploadFile = File(...)):
@@ -47,10 +51,10 @@ async def upload_image(file: UploadFile = File(...)):
     # Storage failures are server-side; never surface backend internals to the caller.
     try:
         obj = await upload_file(optimized_buffer, object_name, content_type)
-    except StorageError:
+    except StorageError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
-        )
+        ) from exc
 
     thumbnail_url = generate_signed_url(obj.url, processing_options="rs:fill:300:300")
     original_optimized_url = generate_signed_url(obj.url, processing_options="rs:auto")
@@ -63,7 +67,10 @@ async def upload_image(file: UploadFile = File(...)):
         "imgproxy_optimized_url": original_optimized_url,
     }
 
-@router.post("/upload/video", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(verify_token)])
+
+@router.post(
+    "/upload/video", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(verify_token)]
+)
 async def upload_video(file: UploadFile = File(...)):
     file_data = await file.read()
 
@@ -77,10 +84,10 @@ async def upload_video(file: UploadFile = File(...)):
             raw_key,
             file.content_type or "application/octet-stream",
         )
-    except StorageError:
+    except StorageError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
-        )
+        ) from exc
 
     # Enqueue the task with the lightweight key reference.
     task = await compress_video_task.kiq(
@@ -94,14 +101,15 @@ async def upload_video(file: UploadFile = File(...)):
         "raw_key": raw_key,
     }
 
+
 @router.get("/tasks/{task_id}", dependencies=[Depends(verify_token)])
 async def get_task_status(task_id: str):
     is_ready = await broker.result_backend.is_result_ready(task_id)
     if not is_ready:
         return {"task_id": task_id, "status": "pending"}
-        
+
     task_result = await broker.result_backend.get_result(task_id)
     if task_result.is_err:
         return {"task_id": task_id, "status": "failed", "error": str(task_result.error)}
-    
+
     return {"task_id": task_id, "status": "completed", "result": task_result.return_value}

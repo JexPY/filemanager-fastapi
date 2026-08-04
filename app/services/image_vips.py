@@ -1,5 +1,6 @@
 import pyvips
 
+
 def validate_and_strip_image(file_data: bytes) -> tuple[bytes, str, int, int]:
     """
     Load image using pyvips, strip metadata (EXIF), and return the optimized bytes

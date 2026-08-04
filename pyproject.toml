@@ -26,6 +26,7 @@ dev = [
     "httpx>=0.27.0",
     "ruff>=0.7.0",
     "mypy>=1.13.0",
+    "types-aiofiles>=24.1.0",
 ]
 
 [tool.uv]
@@ -41,6 +42,20 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ASYNC"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's DI system relies on `= Depends(...)`/`= File(...)` etc as defaults.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Body",
+    "fastapi.Security",
+]
+
 [tool.mypy]
 python_version = "3.14"
 warn_unused_ignores = true
@@ -49,7 +64,14 @@ no_implicit_optional = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["pyvips.*", "segno.*", "gcloud.aio.storage.*", "aioboto3.*", "taskiq_fastapi.*"]
+module = [
+    "pyvips.*",
+    "segno.*",
+    "gcloud.aio.storage.*",
+    "aioboto3.*",
+    "taskiq_fastapi.*",
+    "botocore.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -1,7 +1,8 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ALLOWED_STORAGE_BACKENDS = {"local", "s3", "gcp"}
+
 
 class Settings(BaseSettings):
     # Redis for TaskIQ
@@ -47,7 +48,7 @@ class Settings(BaseSettings):
         return normalized
 
     @model_validator(mode="after")
-    def _validate_backend_requirements(self) -> "Settings":
+    def _validate_backend_requirements(self) -> Settings:
         # Fail fast at startup rather than surfacing a confusing error on first upload.
         if self.STORAGE_BACKEND == "s3" and not self.S3_BUCKET:
             raise ValueError("STORAGE_BACKEND='s3' requires S3_BUCKET to be set")
@@ -60,5 +61,6 @@ class Settings(BaseSettings):
         if not self.FILE_MANAGER_BEARER_TOKENS:
             return []
         return [t.strip() for t in self.FILE_MANAGER_BEARER_TOKENS.split(",") if t.strip()]
+
 
 settings = Settings()

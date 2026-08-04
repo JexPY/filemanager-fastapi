@@ -1,10 +1,13 @@
+from typing import Any
+
 import taskiq_fastapi
 from taskiq import TaskiqEvents, TaskiqState
 from taskiq_redis import RedisAsyncResultBackend, RedisStreamBroker
+
 from app.config import settings
 
 # Create result backend
-result_backend = RedisAsyncResultBackend(
+result_backend: RedisAsyncResultBackend[Any] = RedisAsyncResultBackend(
     redis_url=settings.REDIS_URL,
 )
 

@@ -17,8 +17,8 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
-import aiofiles
 import aioboto3
+import aiofiles
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 from gcloud.aio.storage import Storage
@@ -44,6 +44,7 @@ class StorageObject:
 # Backend interface
 # ---------------------------------------------------------------------------
 
+
 class StorageBackend(ABC):
     @abstractmethod
     async def upload(self, data: bytes, key: str, content_type: str) -> StorageObject: ...
@@ -54,13 +55,14 @@ class StorageBackend(ABC):
     @abstractmethod
     async def delete(self, key: str) -> None: ...
 
-    async def aclose(self) -> None:
+    async def aclose(self) -> None:  # noqa: B027 -- intentional no-op default, not abstract
         """Release any long-lived clients. Default is a no-op."""
 
 
 # ---------------------------------------------------------------------------
 # Local filesystem backend
 # ---------------------------------------------------------------------------
+
 
 class LocalStorage(StorageBackend):
     def __init__(self, root: str, public_base_url: str) -> None:
@@ -99,6 +101,7 @@ class LocalStorage(StorageBackend):
 # S3 / R2 / MinIO backend (aioboto3)
 # ---------------------------------------------------------------------------
 
+
 class S3Storage(StorageBackend):
     def __init__(self) -> None:
         if not settings.S3_BUCKET:
@@ -130,9 +133,7 @@ class S3Storage(StorageBackend):
                 if self._client is None:
                     stack = AsyncExitStack()
                     client = await stack.enter_async_context(
-                        self._session.client(
-                            "s3", endpoint_url=self._endpoint, config=self._config
-                        )
+                        self._session.client("s3", endpoint_url=self._endpoint, config=self._config)
                     )
                     self._client, self._stack = client, stack
         return self._client
@@ -200,6 +201,7 @@ class S3Storage(StorageBackend):
 # ---------------------------------------------------------------------------
 # Google Cloud Storage backend (gcloud-aio-storage)
 # ---------------------------------------------------------------------------
+
 
 class GCSStorage(StorageBackend):
     def __init__(self) -> None:
