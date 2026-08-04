@@ -54,6 +54,10 @@ class Settings(BaseSettings):
             raise ValueError("STORAGE_BACKEND='s3' requires S3_BUCKET to be set")
         if self.STORAGE_BACKEND == "gcp" and not self.GCS_BUCKET:
             raise ValueError("STORAGE_BACKEND='gcp' requires GCS_BUCKET to be set")
+        if not self.valid_tokens:
+            # Otherwise the service boots successfully and then silently 401s
+            # every single request forever -- fail at startup instead.
+            raise ValueError("FILE_MANAGER_BEARER_TOKENS must be set to at least one token")
         return self
 
     @property

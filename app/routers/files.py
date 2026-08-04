@@ -14,10 +14,17 @@ from app.services.storage import StorageError, upload_file
 from app.tasks import compress_video_task
 
 router = APIRouter()
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+def verify_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> str:
+    # auto_error=False so a missing/malformed Authorization header lands here
+    # too, instead of Starlette's default 403 -- missing and wrong credentials
+    # should both be 401.
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     token = credentials.credentials
     # Constant-time comparison against each configured token to avoid timing leaks.
     is_valid = any(hmac.compare_digest(token, t) for t in settings.valid_tokens)
