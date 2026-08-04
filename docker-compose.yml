@@ -46,9 +46,12 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # These must be hex-encoded strings
-      - IMGPROXY_KEY=${IMGPROXY_KEY:-0000}
-      - IMGPROXY_SALT=${IMGPROXY_SALT:-0000}
+      # Hex-encoded strings; must match the app's IMGPROXY_KEY/IMGPROXY_SALT
+      # exactly. No fallback default here on purpose: a blank .env value
+      # used to silently become "0000" for imgproxy while staying "" for the
+      # app, so every signed URL 403'd until someone noticed the mismatch.
+      - IMGPROXY_KEY=${IMGPROXY_KEY:?IMGPROXY_KEY must be set, e.g. via `openssl rand -hex 32`}
+      - IMGPROXY_SALT=${IMGPROXY_SALT:?IMGPROXY_SALT must be set, e.g. via `openssl rand -hex 32`}
 
   nginx:
     image: nginx:alpine

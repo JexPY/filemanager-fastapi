@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # Imgproxy Config (must be hex encoded)
     IMGPROXY_KEY: str = Field(default="")
     IMGPROXY_SALT: str = Field(default="")
+    # Scheme+host imgproxy is reachable at, prefixed onto the signed paths
+    # returned to clients (e.g. http://localhost:8080). Without this, the
+    # imgproxy_*_url response fields are just paths, not fetchable URLs.
+    IMGPROXY_BASE_URL: str = Field(default="")
 
     # Auth
     FILE_MANAGER_BEARER_TOKENS: str = Field(default="")
@@ -78,6 +82,17 @@ class Settings(BaseSettings):
             # Otherwise the service boots successfully and then silently 401s
             # every single request forever -- fail at startup instead.
             raise ValueError("FILE_MANAGER_BEARER_TOKENS must be set to at least one token")
+        # Every /upload/image call signs a URL with these; a missing/invalid
+        # value previously only surfaced as a runtime ValueError on the first
+        # such call, *after* the file had already been written to storage.
+        for field_name in ("IMGPROXY_KEY", "IMGPROXY_SALT"):
+            value = getattr(self, field_name)
+            if not value:
+                raise ValueError(f"{field_name} must be set (hex-encoded)")
+            try:
+                bytes.fromhex(value)
+            except ValueError as exc:
+                raise ValueError(f"{field_name} must be valid hex, got {value!r}") from exc
         return self
 
     @property
