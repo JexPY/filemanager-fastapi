@@ -10,8 +10,19 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Ensure we get ffmpeg 7 (which should be default or available in 3.14-slim based on Debian Trixie/Fork)
+#
+# libvips is also required here even though tasks.py itself never touches
+# pyvips: taskiq_fastapi.init(broker, "app.main:app") in broker.py makes the
+# worker import the full FastAPI app (for dependency-injection context) at
+# startup, which transitively imports app.routers.files -> image_vips ->
+# pyvips. Without libvips installed, the worker process crashes on boot.
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    libvips \
+    libvips-dev \
+    librsvg2-2 \
+    librsvg2-dev \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock ./
@@ -29,5 +40,10 @@ RUN useradd --create-home --uid 1000 appuser \
 
 USER appuser
 
-# Run the taskiq worker listening to the broker
-CMD ["taskiq", "worker", "app.broker:broker", "app.tasks", "--fs-discover", "--workers", "2"]
+# Run the taskiq worker listening to the broker. --fs-discover is
+# deliberately omitted: it recursively scans the working directory for
+# task modules, and inside this image that includes .venv/site-packages --
+# it was picking up (and crashing on) unrelated third-party modules that
+# happen to be named "tasks.py" (e.g. s3transfer.tasks). app.tasks is
+# already explicitly listed below, so fs-discover adds nothing but risk.
+CMD ["taskiq", "worker", "app.broker:broker", "app.tasks", "--workers", "2"]
