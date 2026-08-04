@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  lint-type-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # docker-compose.yml's env_file: .env directives (and the imgproxy
+      # service's required ${IMGPROXY_KEY:?...} interpolation, which Compose
+      # validates for every service regardless of which one is actually run)
+      # both need a .env file to exist. .env is gitignored/never committed,
+      # so CI provisions one from the example -- the test service's own
+      # environment: block overrides the auth/imgproxy values that actually
+      # matter for the test run.
+      - name: Provision .env for docker compose
+        run: cp .env-example .env
+
+      - name: Build test image
+        run: docker compose build test
+
+      # Nothing currently requires a live MinIO (S3 presigned-URL tests sign
+      # locally against dummy credentials, no network needed), but this
+      # keeps the s3_integration marker usable for tests that need one later.
+      - name: Start Redis + MinIO (s3-dev profile)
+        run: docker compose --profile s3-dev up -d redis minio minio-init
+
+      - name: Lint (ruff check)
+        run: docker compose run --rm test ruff check .
+
+      - name: Format check (ruff format)
+        run: docker compose run --rm test ruff format --check .
+
+      - name: Type check (mypy)
+        run: docker compose run --rm test mypy app
+
+      - name: Tests (pytest)
+        run: docker compose run --rm test pytest -v
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile s3-dev --profile test down -v
