@@ -17,7 +17,17 @@ RUN apt-get update && apt-get install -y \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY . .
+COPY app/ ./app/
+
+# chown before switching users so a fresh media_data volume (mounted at
+# /data/media, used only when STORAGE_BACKEND=local) inherits this
+# ownership when Docker initializes it, instead of staying root-owned.
+# /tmp (used for ffmpeg scratch files) is already world-writable (1777).
+RUN useradd --create-home --uid 1000 appuser \
+    && mkdir -p /data/media \
+    && chown -R appuser:appuser /app /data/media
+
+USER appuser
 
 # Run the taskiq worker listening to the broker
 CMD ["taskiq", "worker", "app.broker:broker", "app.tasks", "--fs-discover", "--workers", "2"]

@@ -20,6 +20,15 @@ RUN apt-get update && apt-get install -y \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY . .
+COPY app/ ./app/
+
+# chown before switching users so a fresh media_data volume (mounted at
+# /data/media, used only when STORAGE_BACKEND=local) inherits this
+# ownership when Docker initializes it, instead of staying root-owned.
+RUN useradd --create-home --uid 1000 appuser \
+    && mkdir -p /data/media \
+    && chown -R appuser:appuser /app /data/media
+
+USER appuser
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80"]
