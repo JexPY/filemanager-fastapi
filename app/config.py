@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # this just rejects absurd input before it ever reaches segno.
     MAX_QR_CONTENT_LENGTH: int = Field(default=2000)
 
+    # Kills a wedged ffmpeg process after this many seconds. Distinct from the
+    # hardcoded `-t 60` in tasks.py, which caps *output duration* (silently
+    # truncating long inputs) -- this caps *wall-clock processing time*.
+    FFMPEG_TIMEOUT_SECONDS: int = Field(default=120)
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @field_validator("STORAGE_BACKEND")
