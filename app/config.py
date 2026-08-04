@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # Upload limits (bytes)
     MAX_IMAGE_UPLOAD_BYTES: int = Field(default=25 * 1024 * 1024)
     MAX_VIDEO_UPLOAD_BYTES: int = Field(default=500 * 1024 * 1024)
+    # Decompression-bomb guard: reject images decoding to more than this
+    # many total pixels (width * height), before the full-resolution encode.
+    MAX_IMAGE_PIXELS: int = Field(default=40_000_000)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

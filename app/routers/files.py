@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import uuid
 
@@ -73,7 +74,9 @@ async def upload_image(request: Request, file: UploadFile = File(...)):
 
     # Client-side failures (bad/unsupported image) => 400 with the validation message.
     try:
-        optimized_buffer, content_type, width, height = validate_and_strip_image(file_data)
+        optimized_buffer, content_type, width, height = await asyncio.to_thread(
+            validate_and_strip_image, file_data
+        )
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
