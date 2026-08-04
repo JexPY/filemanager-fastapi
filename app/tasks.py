@@ -8,7 +8,7 @@ import aiofiles.os
 
 from app.broker import broker
 from app.config import settings
-from app.services.storage import StorageError, delete_file, download_file, upload_file
+from app.services.storage import StorageError, delete_file, download_file, get_storage, upload_file
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +70,15 @@ async def compress_video_task(raw_storage_key: str, original_filename: str) -> d
 
         obj = await upload_file(output_data, output_key, "video/mp4")
 
+        # Prefer a presigned URL over the plain object URL when the backend
+        # supports it (S3/R2/MinIO): the plain URL is unusable for a private
+        # bucket.
+        backend = await get_storage()
+        presigned_url = await backend.presigned_get_url(obj.key)
+
         return {
             "status": "success",
-            "url": obj.url,
+            "url": presigned_url or obj.url,
             "key": obj.key,
             "size": obj.size,
             "original_filename": original_filename,

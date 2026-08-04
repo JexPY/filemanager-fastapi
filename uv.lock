@@ -428,6 +428,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "aioboto3" },
     { name = "aiofiles" },
+    { name = "aiohttp" },
     { name = "fastapi" },
     { name = "gcloud-aio-storage" },
     { name = "pydantic" },
@@ -456,6 +457,7 @@ dev = [
 requires-dist = [
     { name = "aioboto3", specifier = ">=13.1.0" },
     { name = "aiofiles", specifier = ">=24.1.0" },
+    { name = "aiohttp", specifier = ">=3.9.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "gcloud-aio-storage", specifier = ">=9.3.0" },
     { name = "pydantic", specifier = ">=2.9.0" },

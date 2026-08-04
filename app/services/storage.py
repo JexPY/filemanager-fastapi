@@ -19,6 +19,7 @@ from pathlib import Path
 
 import aioboto3
 import aiofiles
+import aiohttp
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 from gcloud.aio.storage import Storage
@@ -57,6 +58,15 @@ class StorageBackend(ABC):
 
     async def aclose(self) -> None:  # noqa: B027 -- intentional no-op default, not abstract
         """Release any long-lived clients. Default is a no-op."""
+
+    async def presigned_get_url(  # noqa: B027 -- intentional default, not abstract
+        self, key: str, expires_in: int = 3600
+    ) -> str | None:
+        """Temporary signed GET URL, for backends where the plain object URL
+        isn't usable as-is (e.g. a private S3 bucket). None means the
+        backend doesn't support presigning -- callers should fall back to
+        the object's regular url."""
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +238,7 @@ class GCSStorage(StorageBackend):
         client = await self._get_client()
         try:
             await client.upload(self._bucket, key, data, content_type=content_type)
-        except Exception as exc:  # gcloud-aio raises aiohttp/ResponseError types
+        except aiohttp.ClientError as exc:
             raise StorageError(f"GCS upload failed for {key!r}") from exc
         return StorageObject(
             key=key, url=self._object_url(key), size=len(data), content_type=content_type
@@ -238,14 +248,14 @@ class GCSStorage(StorageBackend):
         client = await self._get_client()
         try:
             return await client.download(self._bucket, key)
-        except Exception as exc:
+        except aiohttp.ClientError as exc:
             raise StorageError(f"GCS download failed for {key!r}") from exc
 
     async def delete(self, key: str) -> None:
         client = await self._get_client()
         try:
             await client.delete(self._bucket, key)
-        except Exception as exc:
+        except aiohttp.ClientError as exc:
             raise StorageError(f"GCS delete failed for {key!r}") from exc
 
     async def aclose(self) -> None:
