@@ -5,10 +5,16 @@ from fastapi import FastAPI
 from taskiq_fastapi import populate_dependency_context
 
 from app.broker import broker
-from app.routers import files
+from app.middleware import RequestIDLogFilter, RequestIDMiddleware
+from app.routers import files, health
 from app.services.storage import close_storage
 
-logging.basicConfig(level=logging.INFO)
+_handler = logging.StreamHandler()
+_handler.addFilter(RequestIDLogFilter())
+_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s [%(request_id)s] %(name)s: %(message)s")
+)
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 
 
 @asynccontextmanager
@@ -31,4 +37,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(RequestIDMiddleware)
+
 app.include_router(files.router)
+app.include_router(health.router)
