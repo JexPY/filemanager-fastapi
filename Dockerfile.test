@@ -1,0 +1,26 @@
+FROM python:3.14-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+ENV PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+
+# Needs both the api image's (libvips) and the worker image's (ffmpeg) system
+# deps at once: a single test run exercises image_vips.py and tasks.py together.
+RUN apt-get update && apt-get install -y \
+    libvips \
+    libvips-dev \
+    librsvg2-2 \
+    librsvg2-dev \
+    gcc \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project
+
+COPY . .
