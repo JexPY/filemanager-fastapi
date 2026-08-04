@@ -17,6 +17,7 @@ dependencies = [
     "gcloud-aio-storage>=9.3.0",
     "aiofiles>=24.1.0",
     "python-multipart>=0.0.9",
+    "redis>=5.0.0",
 ]
 
 [dependency-groups]

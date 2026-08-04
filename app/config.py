@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     # truncating long inputs) -- this caps *wall-clock processing time*.
     FFMPEG_TIMEOUT_SECONDS: int = Field(default=120)
 
+    # How long a "this task id was actually issued" marker lives in Redis, so
+    # GET /tasks/{id} can 404 a bogus/typo'd id instead of reporting "pending"
+    # forever. Generous enough to cover realistic queue backlog + processing.
+    TASK_STATUS_TTL_SECONDS: int = Field(default=3600)
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @field_validator("STORAGE_BACKEND")

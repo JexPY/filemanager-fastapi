@@ -20,3 +20,18 @@ async def test_oversized_content_is_rejected(
     too_long = "x" * (settings.MAX_QR_CONTENT_LENGTH + 1)
     resp = await client.post("/generate/qrcode", data={"content": too_long}, headers=auth_headers)
     assert resp.status_code == 422
+
+
+async def test_content_exceeding_qr_capacity_is_rejected_without_leaking_detail(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    # Under the character cap, but 4-byte-per-char emoji content still blows
+    # past QR's byte-mode capacity -- exercises segno's DataOverflowError
+    # path distinct from the Form max_length rejection above (422).
+    content = "\U0001f600" * 1500
+    resp = await client.post("/generate/qrcode", data={"content": content}, headers=auth_headers)
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail == "Invalid QR content"
+    assert "DataOverflow" not in detail
+    assert "segno" not in detail.lower()

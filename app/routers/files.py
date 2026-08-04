@@ -1,5 +1,6 @@
 import asyncio
 import hmac
+import logging
 import re
 import uuid
 
@@ -9,11 +10,14 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.broker import broker
 from app.config import settings
-from app.services.image_vips import validate_and_strip_image
+from app.services.image_vips import ImageValidationError, validate_and_strip_image
 from app.services.imgproxy import generate_signed_url
 from app.services.qr_generator import generate_qr_image
 from app.services.storage import StorageError, upload_file
+from app.services.task_status import mark_task_issued, was_task_issued
 from app.tasks import compress_video_task
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
@@ -83,22 +87,32 @@ def _sanitize_extension(filename: str) -> str:
 async def generate_qrcode(content: str = Form(..., max_length=settings.MAX_QR_CONTENT_LENGTH)):
     try:
         png_data = await asyncio.to_thread(generate_qr_image, content)
-        return Response(content=png_data, media_type="image/png")
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    except ValueError as exc:
+        # segno raises ValueError (e.g. DataOverflowError) for content it
+        # can't encode -- a client-input problem, not a server fault. The
+        # detail is client-safe (segno's own capacity-limit messages don't
+        # leak internals), but keep it generic and log the real exception.
+        logger.warning("QR generation rejected input: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid QR content"
+        ) from exc
+    return Response(content=png_data, media_type="image/png")
 
 
 @router.post("/upload/image", dependencies=[Depends(verify_token)])
 async def upload_image(request: Request, file: UploadFile = File(...)):
     file_data = await _read_capped(file, request, settings.MAX_IMAGE_UPLOAD_BYTES)
 
-    # Client-side failures (bad/unsupported image) => 400 with the validation message.
+    # Client-side failures (bad/unsupported image) => 400, generic detail.
     try:
         optimized_buffer, content_type, width, height = await asyncio.to_thread(
             validate_and_strip_image, file_data
         )
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except ImageValidationError as exc:
+        logger.warning("Image validation rejected upload: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or unsupported image"
+        ) from exc
 
     unique_id = uuid.uuid4().hex
     object_name = f"images/{unique_id}.webp"
@@ -149,6 +163,7 @@ async def upload_video(request: Request, file: UploadFile = File(...)):
         raw_storage_key=raw_key,
         original_filename=original_filename,
     )
+    await mark_task_issued(task.task_id)
 
     return {
         "status": "accepted",
@@ -161,10 +176,20 @@ async def upload_video(request: Request, file: UploadFile = File(...)):
 async def get_task_status(task_id: str):
     is_ready = await broker.result_backend.is_result_ready(task_id)
     if not is_ready:
+        # is_result_ready alone can't tell "still running" apart from "this
+        # task id never existed" -- both look like "not ready". The marker
+        # set at enqueue time (mark_task_issued) resolves the ambiguity.
+        if not await was_task_issued(task_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown task id")
         return {"task_id": task_id, "status": "pending"}
 
     task_result = await broker.result_backend.get_result(task_id)
     if task_result.is_err:
-        return {"task_id": task_id, "status": "failed", "error": str(task_result.error)}
+        # The underlying exception (e.g. raw ffmpeg stderr, which can include
+        # internal /tmp paths) is server-side detail only -- never echoed to
+        # the caller, unlike the rest of this route which was already careful
+        # about that (StorageError -> generic 502 above).
+        logger.error("Task %s failed: %s", task_id, task_result.error)
+        return {"task_id": task_id, "status": "failed", "error": "Video processing failed"}
 
     return {"task_id": task_id, "status": "completed", "result": task_result.return_value}
