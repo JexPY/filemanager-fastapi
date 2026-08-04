@@ -1,0 +1,13 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+taskiq>=0.11.0
+taskiq-redis>=0.5.0
+taskiq-fastapi>=0.3.0
+pyvips>=2.2.3
+segno>=1.6.1
+aioboto3>=13.1.0
+gcloud-aio-storage>=9.3.0
+aiofiles>=24.1.0
+python-multipart>=0.0.9

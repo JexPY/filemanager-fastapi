@@ -1,0 +1,18 @@
+FROM python:3.14-slim
+
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Ensure we get ffmpeg 7 (which should be default or available in 3.14-slim based on Debian Trixie/Fork)
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# Run the taskiq worker listening to the broker
+CMD ["taskiq", "worker", "app.broker:broker", "app.tasks", "--fs-discover", "--workers", "2"]
