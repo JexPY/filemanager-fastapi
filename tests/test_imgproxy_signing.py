@@ -5,7 +5,7 @@ import hmac
 import pytest
 
 from app.config import Settings, settings
-from app.services.imgproxy import generate_signed_url, sign_url
+from app.services.imgproxy import build_source_url, generate_signed_url, sign_url
 
 
 def _expected_signature(path: str) -> str:
@@ -52,3 +52,18 @@ def test_blank_imgproxy_key_or_salt_fails_fast(field_name: str) -> None:
 def test_invalid_hex_imgproxy_key_or_salt_fails_fast(field_name: str) -> None:
     with pytest.raises(ValueError, match=field_name):
         Settings(**{field_name: "not-hex-zzz"})
+
+
+def test_build_source_url_uses_local_scheme_for_local_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    assert build_source_url("images/x.webp", "images/x.webp") == "local:///images/x.webp"
+
+
+def test_build_source_url_passes_through_for_non_local_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "s3")
+    url = "https://bucket.s3.amazonaws.com/images/x.webp?X-Amz-Signature=abc"
+    assert build_source_url("images/x.webp", url) == url

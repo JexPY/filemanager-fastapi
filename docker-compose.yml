@@ -52,6 +52,12 @@ services:
       # app, so every signed URL 403'd until someone noticed the mismatch.
       - IMGPROXY_KEY=${IMGPROXY_KEY:?IMGPROXY_KEY must be set, e.g. via `openssl rand -hex 32`}
       - IMGPROXY_SALT=${IMGPROXY_SALT:?IMGPROXY_SALT must be set, e.g. via `openssl rand -hex 32`}
+      # Enables the local:///<key> source scheme for STORAGE_BACKEND=local --
+      # without this (and the matching volume mount below), imgproxy has no
+      # way to reach locally-stored objects at all.
+      - IMGPROXY_LOCAL_FILESYSTEM_ROOT=/data/media
+    volumes:
+      - media_data:/data/media:ro
 
   nginx:
     image: nginx:alpine

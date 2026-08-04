@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 import app.services.storage as storage_module
+from app.config import settings
 from app.main import app
 from tests.conftest import fixture_bytes
 from tests.fakes import InMemoryStorageBackend
@@ -25,20 +26,29 @@ async def test_valid_image_upload_succeeds(
     assert "imgproxy_optimized_url" in body
 
 
-async def test_raw_url_is_plain_object_url_when_backend_does_not_presign(
+async def test_raw_url_is_local_source_scheme_for_local_backend(
     client: httpx.AsyncClient, auth_headers: dict[str, str]
 ) -> None:
+    # The test env's STORAGE_BACKEND defaults to "local" -- build_source_url
+    # swaps in imgproxy's local:// scheme rather than the fake's plain URL.
     resp = await client.post(
         "/upload/image",
         headers=auth_headers,
         files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
     )
-    assert "X-Amz-Signature" not in resp.json()["raw_url"]
+    body = resp.json()
+    assert body["raw_url"].startswith("local:///images/")
+    assert "X-Amz-Signature" not in body["raw_url"]
 
 
 async def test_raw_url_is_presigned_when_backend_supports_it(
     monkeypatch: pytest.MonkeyPatch, auth_headers: dict[str, str]
 ) -> None:
+    # STORAGE_BACKEND must actually be non-local here too: build_source_url's
+    # local:// override is keyed on this setting, not on the fake's
+    # presign_capable flag, since a real deployment can't run local storage
+    # with a presigning backend at the same time.
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "s3")
     monkeypatch.setattr(storage_module, "_storage", InMemoryStorageBackend(presign_capable=True))
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:

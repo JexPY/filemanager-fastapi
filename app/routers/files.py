@@ -11,7 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.broker import broker
 from app.config import settings
 from app.services.image_vips import ImageValidationError, validate_and_strip_image
-from app.services.imgproxy import generate_signed_url
+from app.services.imgproxy import build_source_url, generate_signed_url
 from app.services.qr_generator import generate_qr_image
 from app.services.storage import StorageError, get_storage, upload_file
 from app.services.task_status import mark_task_issued, was_task_issued
@@ -129,9 +129,11 @@ async def upload_image(request: Request, file: UploadFile = File(...)):
     # presigned URL over the plain object URL: the plain URL is unusable for
     # a private bucket, and imgproxy needs a URL it can actually fetch, so
     # the same source is used both for the raw_url field and for imgproxy.
+    # For the local backend, imgproxy has no HTTP path to the API's storage
+    # at all -- build_source_url swaps in its local:// source scheme instead.
     backend = await get_storage()
     presigned_url = await backend.presigned_get_url(obj.key)
-    source_url = presigned_url or obj.url
+    source_url = build_source_url(obj.key, presigned_url or obj.url)
 
     thumbnail_url = generate_signed_url(source_url, processing_options="rs:fill:300:300")
     original_optimized_url = generate_signed_url(source_url, processing_options="rs:auto")

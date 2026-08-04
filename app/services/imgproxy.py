@@ -26,3 +26,20 @@ def generate_signed_url(url: str, processing_options: str = "rs:fill:300:300") -
     encoded_url = base64.urlsafe_b64encode(url.encode()).decode("utf-8").rstrip("=")
     path = f"/{processing_options}/{encoded_url}"
     return sign_url(path)
+
+
+def build_source_url(key: str, url: str) -> str:
+    """The source imgproxy should fetch from for a given stored object.
+
+    With STORAGE_BACKEND=local, imgproxy (a separate container) has no HTTP
+    path to the API's storage at all -- `url` would be an unreachable bare
+    key or localhost address. It does share the same media_data volume
+    (mounted read-only, with IMGPROXY_LOCAL_FILESYSTEM_ROOT pointing at it
+    in docker-compose.yml), so local objects use imgproxy's local:// source
+    scheme instead. Every other backend already returns a URL imgproxy can
+    fetch directly (a presigned or public object URL), so `url` is used
+    as-is.
+    """
+    if settings.STORAGE_BACKEND == "local":
+        return f"local:///{key}"
+    return url
