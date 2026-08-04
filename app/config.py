@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # Auth
     FILE_MANAGER_BEARER_TOKENS: str = Field(default="")
 
+    # Upload limits (bytes)
+    MAX_IMAGE_UPLOAD_BYTES: int = Field(default=25 * 1024 * 1024)
+    MAX_VIDEO_UPLOAD_BYTES: int = Field(default=500 * 1024 * 1024)
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @field_validator("STORAGE_BACKEND")

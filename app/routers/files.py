@@ -1,7 +1,7 @@
 import hmac
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -33,6 +33,31 @@ def verify_token(
     return token
 
 
+async def _read_capped(file: UploadFile, request: Request, max_bytes: int) -> bytes:
+    """Reads at most max_bytes+1 bytes, rejecting anything larger with 413.
+
+    Content-Length (when present) is checked up front to reject an honestly
+    labeled oversized request without reading anything; the bounded read
+    below is the real guarantee since Content-Length can be absent (chunked
+    transfer) or wrong.
+    """
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > max_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                    detail="File too large",
+                )
+        except ValueError:
+            pass  # malformed header; fall through to the bounded read below
+
+    data = await file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="File too large")
+    return data
+
+
 @router.post("/generate/qrcode", dependencies=[Depends(verify_token)])
 async def generate_qrcode(content: str = Form(...)):
     try:
@@ -43,8 +68,8 @@ async def generate_qrcode(content: str = Form(...)):
 
 
 @router.post("/upload/image", dependencies=[Depends(verify_token)])
-async def upload_image(file: UploadFile = File(...)):
-    file_data = await file.read()
+async def upload_image(request: Request, file: UploadFile = File(...)):
+    file_data = await _read_capped(file, request, settings.MAX_IMAGE_UPLOAD_BYTES)
 
     # Client-side failures (bad/unsupported image) => 400 with the validation message.
     try:
@@ -78,8 +103,8 @@ async def upload_image(file: UploadFile = File(...)):
 @router.post(
     "/upload/video", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(verify_token)]
 )
-async def upload_video(file: UploadFile = File(...)):
-    file_data = await file.read()
+async def upload_video(request: Request, file: UploadFile = File(...)):
+    file_data = await _read_capped(file, request, settings.MAX_VIDEO_UPLOAD_BYTES)
 
     # Stage the raw upload in storage; only its key travels through Redis.
     original_filename = file.filename or "video.mp4"
