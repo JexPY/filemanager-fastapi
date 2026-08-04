@@ -1,5 +1,6 @@
 import asyncio
 import hmac
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
@@ -59,6 +60,25 @@ async def _read_capped(file: UploadFile, request: Request, max_bytes: int) -> by
     return data
 
 
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
+_MAX_EXTENSION_LENGTH = 8
+_DEFAULT_EXTENSION = "bin"
+
+
+def _sanitize_extension(filename: str) -> str:
+    """Derives a safe storage-key suffix from a client-supplied filename.
+
+    The raw extension is fully attacker-controlled input: LocalStorage's
+    path-traversal guard happens to catch `../`-style payloads for the local
+    backend, but S3/GCS have no equivalent guard, so an unsanitized extension
+    would let a client control an arbitrary key suffix (arbitrary characters,
+    pseudo-directories via `/`, unbounded length) on those backends.
+    """
+    raw_ext = filename.rsplit(".", 1)[-1] if "." in filename else ""
+    cleaned = _NON_ALNUM_RE.sub("", raw_ext.lower())[:_MAX_EXTENSION_LENGTH]
+    return cleaned or _DEFAULT_EXTENSION
+
+
 @router.post("/generate/qrcode", dependencies=[Depends(verify_token)])
 async def generate_qrcode(content: str = Form(..., max_length=settings.MAX_QR_CONTENT_LENGTH)):
     try:
@@ -111,7 +131,7 @@ async def upload_video(request: Request, file: UploadFile = File(...)):
 
     # Stage the raw upload in storage; only its key travels through Redis.
     original_filename = file.filename or "video.mp4"
-    ext = original_filename.rsplit(".", 1)[-1] if "." in original_filename else "mp4"
+    ext = _sanitize_extension(original_filename)
     raw_key = f"raw/videos/{uuid.uuid4().hex}.{ext}"
     try:
         await upload_file(
