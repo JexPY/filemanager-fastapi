@@ -5,6 +5,8 @@ import segno
 
 
 def generate_qr_image(content: str, scale: int = 5) -> bytes:
+    # `content` length is bounded by the router (Form max_length=settings.
+    # MAX_QR_CONTENT_LENGTH) before this is ever called.
     qr = segno.make(content)
 
     # Generate SVG buffer

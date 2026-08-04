@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # Decompression-bomb guard: reject images decoding to more than this
     # many total pixels (width * height), before the full-resolution encode.
     MAX_IMAGE_PIXELS: int = Field(default=40_000_000)
+    # QR codes have a hard capacity limit (~2953 bytes at version 40/level L);
+    # this just rejects absurd input before it ever reaches segno.
+    MAX_QR_CONTENT_LENGTH: int = Field(default=2000)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

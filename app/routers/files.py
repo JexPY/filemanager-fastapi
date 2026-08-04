@@ -60,9 +60,9 @@ async def _read_capped(file: UploadFile, request: Request, max_bytes: int) -> by
 
 
 @router.post("/generate/qrcode", dependencies=[Depends(verify_token)])
-async def generate_qrcode(content: str = Form(...)):
+async def generate_qrcode(content: str = Form(..., max_length=settings.MAX_QR_CONTENT_LENGTH)):
     try:
-        png_data = generate_qr_image(content)
+        png_data = await asyncio.to_thread(generate_qr_image, content)
         return Response(content=png_data, media_type="image/png")
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
