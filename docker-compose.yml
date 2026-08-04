@@ -35,8 +35,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -70,6 +68,11 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
       - LOCAL_STORAGE_DIR=/data/media
+      # Fixed test-only values so the suite never depends on the developer's
+      # own .env being populated correctly.
+      - FILE_MANAGER_BEARER_TOKENS=test-token
+      - IMGPROXY_KEY=00112233445566778899aabbccddeeff00112233445566778899aabbccddee
+      - IMGPROXY_SALT=aabbccddeeff00112233445566778899aabbccddeeff0011223344556677aa
     volumes:
       - media_data:/data/media
     depends_on:
