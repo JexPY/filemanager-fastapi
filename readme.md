@@ -1,240 +1,153 @@
+# Filemanager-FastAPI
 
-[![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
-[![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
-[![MIT License][license-shield]][license-url]
+A distributed media-processing microservice: upload images and videos, get back
+optimized WebP + on-the-fly imgproxy thumbnails for images, and an async
+H.264/AAC-compressed MP4 for videos. Also generates QR codes. Storage is
+pluggable (local disk, S3/R2/MinIO, or Google Cloud Storage).
 
+## Architecture
 
-<!-- PROJECT LOGO -->
-<br />
-<p align="center">
-  <a href="#">
-    <img src="https://media2.giphy.com/media/3gWIUenLXoEgPk0BwB/source.gif" alt="Logo" width="80" height="80">
-  </a>
+Two process types share one codebase:
 
-  <h3 align="center">Filemanager-Fastapi</h3>
+- **`api`** (FastAPI, `uvicorn app.main:app`) — handles all HTTP requests.
+  Validates and stages uploads in storage, then hands off heavy work.
+- **`worker`** (TaskIQ, `taskiq worker app.broker:broker app.tasks`) — runs
+  FFmpeg video compression asynchronously.
 
-  <p align="center">
-    Blazing fast filemanager using fastapi.
-
-<!-- ABOUT THE PROJECT -->
-## About The Project
-
-Long story short, I needed microservice that would manage the files, so I ended up with writing FileManager-FastApi (FF) and I am not even complaining. Hope you will be able to use it in concrete needs. Have fun, and of course prs are welcome.
-
-Here's what features FF has at this time:
-* Uploading image file/files
-* Downloading image file/files, from any image url
-* Image file/files optimization/converting using Pillow-SIMD or FFMPEG
-  - You can have both installed or you can choose any of engines depending your needs 
-* Uploading video file
-* Downloading video file, from any video url
-* Video file optimization/converting using FFMPEG
-  - change in .env INSTALL_FFMPEG=false to INSTALL_FFMPEG=true
-  - Then run 
-  ```sh
-  docker-compose build api
-  ```
-* The bonus one Qrcode generator
-* Uploading to local, Google Storage, or S3
-* Live reloading on local development
-* Self cleaning (temp files, Pillow-SIMD, FFMPEG)
-* Serving files from local storage
-  - The path starts from static folder for example:
-  ```
-  http://localhost/static/pictures/original/dcb8ac79618540688ea36e688a8c3635.png
-  ```
-* Easy Security using Bearer token
-  - For security its recommended to make requests from  your backend server, not from browser, as your key of FF can be tracked.
-  
-* Out of box documentation thanks to fast-api [/docs && /redoc paths are available]
-* SSL secured reverse nginx proxy using gunicorn and uvloop
-
-
-May optimize it a little therefore FF already is really fast, try by yourself :)
-
-### Built With
-* [FastAPI](https://fastapi.tiangolo.com/)
-* [Docker](https://www.docker.com/)
-* [pillow-simd](https://github.com/uploadcare/pillow-simd)
-* [FFMPEG](https://github.com/FFmpeg/FFmpeg)
-* [Libcloud](https://github.com/apache/libcloud)
-
-<!-- GETTING STARTED -->
-## Getting Started
-
-To get a local copy up and running follow these simple example steps.
-
-#### Before you start steps below make sure that you have created all .env files, .env-example s are provided.
-
-### Installation for local development
-- Fast reloading included
-1. Change docker-compose.dev.yml to docker-compose.yml
-2. 
-```sh
-docker-compose build api
 ```
-3. Start the service
-```sh
-docker-compose up
-```
-4. Enter your API at `localhost/docs`
-
-5. Now you should be able to see the open api endpoints. 
-- Don't forget to authorize with FILE_MANAGER_BEARER_TOKEN that you should generate and paste in .env file.
-  - If you forgot to generate FILE_MANAGER_BEARER_TOKEN here is one of the ways to generate secret key
-      - ```sh
-        openssl rand -base64 64
-        ```
-      - p.s You can create as much tokens as you want just separate them with ,
-
-![](api/app/static/pictures/original/afba38beae434b9fb4691bf8559947aa.png?raw=true)
-
-### Installation for docker swarm
-- If you’re trying things out on a local development environment, you can put your engine into swarm mode with docker swarm init.
-- If you’ve already got a multi-node swarm running, keep in mind that all docker stack and docker service commands must be run from a manager node.
-#### Set up a Docker registry
-- Start the registry as a service on your swarm:
-```sh
-docker service create --name registry --publish published=5000,target=5000 registry:2
-```
-3. Build the image locally with docker-compose
-- Decide wich docker-compose you are going to use there is .dev and .prod, when you decide rename to docker-compose.yml and continue
-```sh
-docker-compose build
-```
-4. Bring the app down
-```sh
-docker-compose down --volumes
-```
-5. Push the generated image to the registry
-```sh
-docker-compose push
-```
-6. Deploy the stack to the swarm
-```sh
-docker stack deploy --compose-file docker-compose.yml filemanager-fastapi
-```
-7. Check
-```sh
-docker stack services filemanager-fastapi
-```
-8. Result
-```sh
-ID                  NAME                      MODE                REPLICAS            IMAGE                                       PORTS
-kkk5mmkgk6zf        filemanager-fastapi_api   replicated          1/1                 127.0.0.1:5000/filemenager-fastapi:latest   *:80->80/tcp
-```
-### Docker Hub image
-Available at (https://hub.docker.com/r/gujadoesdocker/filemanager-fastapi)
-
-### You need A+ ssl?
-- No problem Filemanager-Fastapi comes with nginx and certbot configuration that guarantees A+ ssl.
-<!-- Check here (https://www.ssllabs.com/ssltest/analyze.html?d=ff.etomer.io) -->
-- If you will need help let me know.
-
-
-<!-- 1. Change docker-compose.dev.yml to docker-compose.yml
-2. 
-```sh
-docker-compose build api
-```
-3. Start the service
-```sh
-docker-compose up
-```
-4. Enter your API at `localhost/docs` -->
-
-## Size after development [with ffmpeg and pillow-simd]
-- command
-```sh
-$ docker ps --size
-```
-## Result
-```sh
-NAMES                         SIZE
-filemanager-fastapi_nginx_1   126B (virtual 28.1MB)
-filemanager-fastapi_api_1     310B (virtual 1.12GB)
+client --(bearer auth)--> api ---+--> image: pyvips validate/strip -> storage -> imgproxy signs a fetch URL
+                                  +--> qrcode: segno -> pyvips -> PNG response
+                                  +--> video: storage (raw) --key only--> Redis --> worker
+                                                                                      |
+                                                                                      v
+                                                                        ffmpeg compress -> storage
+                                                                        (raw deleted after)
 ```
 
-## FFMPEG 4
-- If you like to use ffmpeg in your docker .env file change INSTALL_FFMPEG=false to INSTALL_FFMPEG=true
-- Don't forget to change api .env IMAGE_OPTIMIZATION_USING to ffmpeg.
-- LTS version at this time:
+Only the storage **key** for a video ever travels through Redis — never the
+file bytes. The `api` and `worker` containers share a storage volume/bucket
+and a Redis instance, nothing else.
+
+## Features
+
+- **Image upload** (`POST /upload/image`) — format-allow-listed (PNG/JPEG/
+  GIF/WEBP; SVG and anything else libvips can load is rejected), decoded and
+  strip'd of all metadata (EXIF/GPS/ICC/XMP) via pyvips, re-encoded to WebP,
+  uploaded to storage. Response includes signed imgproxy URLs for a 300x300
+  thumbnail and an auto-format optimized version.
+- **Video upload** (`POST /upload/video`) — staged in storage, then
+  compressed asynchronously (H.264/AAC via FFmpeg) by a TaskIQ worker.
+  Poll `GET /tasks/{task_id}` for status.
+- **QR code generation** (`POST /generate/qrcode`) — segno → SVG → pyvips →
+  PNG.
+- **Pluggable storage** — local filesystem, S3-compatible (real AWS, R2,
+  MinIO), or Google Cloud Storage, selected via `STORAGE_BACKEND`.
+- **Bearer token auth** — constant-time comparison against a configured
+  token list.
+- **`/healthz`, `/readyz`** — liveness and dependency-readiness probes.
+
+## Quickstart
+
 ```sh
-ffmpeg version 4.1.6-1~deb10u1 Copyright (c) 2000-2020 the FFmpeg developers
-  built with gcc 8 (Debian 8.3.0-6)
-  libavutil      56. 22.100 / 56. 22.100
-  libavcodec     58. 35.100 / 58. 35.100
-  libavformat    58. 20.100 / 58. 20.100
-  libavdevice    58.  5.100 / 58.  5.100
-  libavfilter     7. 40.101 /  7. 40.101
-  libavresample   4.  0.  0 /  4.  0.  0
-  libswscale      5.  3.100 /  5.  3.100
-  libswresample   3.  3.100 /  3.  3.100
-  libpostproc    55.  3.100 / 55.  3.100
+cp .env-example .env
+# generate real values for these two (the example ships placeholders):
+openssl rand -hex 32   # -> IMGPROXY_KEY
+openssl rand -hex 32   # -> IMGPROXY_SALT
+# also set FILE_MANAGER_BEARER_TOKENS in .env, e.g.:
+#   FILE_MANAGER_BEARER_TOKENS=dev-token
+
+docker compose up --build
 ```
-- enjoy :)
 
-<!-- CONTRIBUTING -->
-## Contributing
+The API listens on `http://localhost:9000`, imgproxy on `http://localhost:8080`.
 
-Contributions are what make the open source community such an amazing place to be learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+```sh
+TOKEN=dev-token
 
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+# Image upload
+curl -H "Authorization: Bearer $TOKEN" -F "file=@photo.jpg" \
+  http://localhost:9000/upload/image
 
-## Image optimization result
-- Original
+# QR code
+curl -H "Authorization: Bearer $TOKEN" -F "content=https://example.com" \
+  http://localhost:9000/generate/qrcode -o qr.png
 
-![](api/app/static/pictures/original/dcb8ac79618540688ea36e688a8c3635.png?raw=true)
+# Video upload (returns a task_id)
+curl -H "Authorization: Bearer $TOKEN" -F "file=@clip.mp4" \
+  http://localhost:9000/upload/video
 
-- Thumbnailed usind pillow-SIMD
+# Poll the result
+curl -H "Authorization: Bearer $TOKEN" http://localhost:9000/tasks/<task_id>
 
-![](api/app/static/pictures/thumbnail/dcb8ac79618540688ea36e688a8c3635.webp?raw=true)
+# Health
+curl http://localhost:9000/healthz
+curl http://localhost:9000/readyz
+```
 
-- Thumbnailed usind FFMPEG
+## Endpoints
 
-![](api/app/static/pictures/thumbnail/72014f9f91ab40c7b8df61ab350bcc71.webp?raw=true)
+All routes except `/healthz`/`/readyz` require `Authorization: Bearer <token>`.
 
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | `/upload/image` | multipart `file` | `{status, dimensions, raw_url, imgproxy_thumbnail_url, imgproxy_optimized_url}` |
+| POST | `/upload/video` | multipart `file` | `202 {status: "accepted", task_id, raw_key}` |
+| GET | `/tasks/{task_id}` | — | `{status: "pending"\|"completed"\|"failed", ...}` or `404` for an unknown id |
+| POST | `/generate/qrcode` | form `content` | `image/png` bytes |
+| GET | `/healthz` | — | `{status: "ok"}` |
+| GET | `/readyz` | — | `200`/`503` with a per-dependency breakdown |
 
+## Configuration
 
-## Generated Qrcode example
+Copy `.env-example` to `.env` and fill in. Fields with no default below fail
+startup (`Settings()` validation) if left unset.
 
+| Variable | Required | Notes |
+|---|---|---|
+| `REDIS_URL` | | TaskIQ broker + result backend |
+| `STORAGE_BACKEND` | | `local` \| `s3` \| `gcp` |
+| `LOCAL_STORAGE_DIR`, `LOCAL_PUBLIC_BASE_URL` | | local backend |
+| `S3_BUCKET`, `S3_ENDPOINT_URL`, `S3_PUBLIC_BASE_URL`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `S3_BUCKET` if `STORAGE_BACKEND=s3` | `S3_ENDPOINT_URL` for R2/MinIO, blank for real AWS |
+| `GCP_PROJECT`, `GCP_SERVICE_ACCOUNT_FILE`, `GCS_BUCKET`, `GCS_PUBLIC_BASE_URL` | `GCS_BUCKET` if `STORAGE_BACKEND=gcp` | |
+| `IMGPROXY_KEY`, `IMGPROXY_SALT` | ✅ always | hex-encoded, must match the `imgproxy` container's own env vars exactly |
+| `IMGPROXY_BASE_URL` | | prefixed onto signed URLs so they're complete/fetchable |
+| `FILE_MANAGER_BEARER_TOKENS` | ✅ always | comma-separated |
+| `MAX_IMAGE_UPLOAD_BYTES`, `MAX_VIDEO_UPLOAD_BYTES`, `MAX_IMAGE_PIXELS`, `MAX_QR_CONTENT_LENGTH`, `FFMPEG_TIMEOUT_SECONDS`, `TASK_STATUS_TTL_SECONDS` | | sane defaults, see `app/config.py` |
 
-It is possible to edit configuration easily to generate Qrcode image on your needs with or without logo size you need color and etc. (For generating image is used Pillow-simd)
+## Development
 
-![](api/app/static/qr/04de739e41154172b8858146f4d8edfe.png?raw=true)
+Everything — running the app, running tests, linting, type-checking — happens
+inside Docker; there's no supported local (host) Python environment.
 
+```sh
+# Run the full stack
+docker compose up --build
 
-<!-- LICENSE -->
+# Run one worker only, for debugging
+docker compose up worker
+
+# Run the test suite
+docker compose run --rm test pytest -v
+
+# Lint / format / type-check
+docker compose run --rm test ruff check .
+docker compose run --rm test ruff format .
+docker compose run --rm test mypy app
+
+# Test against a local S3-compatible backend (MinIO) instead of the default local storage
+docker compose --profile s3-dev up -d minio minio-init
+# then set STORAGE_BACKEND=s3 and the S3_* MinIO values from .env-example in .env
+```
+
+**Backend verification status**: `local` and `s3` (against real MinIO) have
+both been exercised end to end — upload, imgproxy thumbnail resolution,
+video compression, and cleanup all confirmed working against a live stack.
+`gcp` is covered by unit tests against a mocked client only (no live GCP
+project/credentials available); treat it as implemented-but-not-live-verified.
+
+See [`CLAUDE.md`](CLAUDE.md) for the full architectural rundown, non-obvious
+invariants, and known sharp edges.
+
 ## License
 
-Distributed under the MIT License. See `LICENSE` for more information.
-
-<!-- Sponsors -->
-<!-- ## Sponsored by
-
-<a href="https://www.etomer.io/"><img src="https://www.etomer.io/static/media/etomer-logo-dark.22a369ff.svg" width="150"></a> -->
-
-<!-- CONTACT -->
-## Contact
-Twitter - [@guja_py](https://twitter.com/guja_py)
-
-
-
-<!-- MARKDOWN LINKS & IMAGES -->
-
-[contributors-shield]: https://img.shields.io/github/contributors/JexPY/filemanager-fastapi.svg?style=flat-square
-[contributors-url]: https://github.com/JexPY/filemanager-fastapi/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/JexPY/filemanager-fastapi.svg?style=flat-square
-[forks-url]: https://github.com/othneildrew/Best-README-Template/network/members
-[stars-shield]: https://img.shields.io/github/stars/JexPY/filemanager-fastapi.svg?style=flat-square
-[stars-url]: https://github.com/JexPY/filemanager-fastapi/stargazers
-[issues-shield]: https://img.shields.io/github/issues/JexPY/filemanager-fastapi.svg?style=flat-square
-[issues-url]: https://github.com/JexPY/filemanager-fastapi/issues
-[license-shield]: https://img.shields.io/github/license/JexPY/filemanager-fastapi.svg?style=flat-square
-[license-url]: https://github.com/JexPY/filemanager-fastapi/blob/master/LICENSE.txt
+Distributed under the MIT License. See `LICENSE.txt` for details.
