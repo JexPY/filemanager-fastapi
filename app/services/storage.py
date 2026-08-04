@@ -208,7 +208,7 @@ class GCSStorage(StorageBackend):
         if not settings.GCS_BUCKET:
             raise StorageError("GCS_BUCKET must be set for the 'gcp' storage backend")
         self._bucket = settings.GCS_BUCKET
-        self._public_base = settings.PUBLIC_BASE_URL.rstrip("/")
+        self._public_base = settings.GCS_PUBLIC_BASE_URL.rstrip("/")
         self._client: Storage | None = None
         self._lock = asyncio.Lock()
 
@@ -270,7 +270,7 @@ _storage_lock = asyncio.Lock()
 def _build_backend() -> StorageBackend:
     backend = settings.STORAGE_BACKEND
     if backend == "local":
-        return LocalStorage(settings.LOCAL_STORAGE_DIR, settings.PUBLIC_BASE_URL)
+        return LocalStorage(settings.LOCAL_STORAGE_DIR, settings.LOCAL_PUBLIC_BASE_URL)
     return _BACKENDS[backend]()
 
 

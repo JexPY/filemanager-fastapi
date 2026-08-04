@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     # Storage backend selection: "local" | "s3" | "gcp"
     STORAGE_BACKEND: str = Field(default="local")
     LOCAL_STORAGE_DIR: str = Field(default="/data/media")
-    PUBLIC_BASE_URL: str = Field(default="")
+    # Base URL prepended to object keys returned by the local backend.
+    LOCAL_PUBLIC_BASE_URL: str = Field(default="")
 
     # Storage S3/R2
     S3_BUCKET: str = Field(default="")
@@ -27,6 +28,11 @@ class Settings(BaseSettings):
     GCP_PROJECT: str | None = Field(default=None)
     GCP_SERVICE_ACCOUNT_FILE: str | None = Field(default=None)
     GCS_BUCKET: str = Field(default="")
+    # Optional CDN / custom domain in front of the bucket. Independent of
+    # LOCAL_PUBLIC_BASE_URL -- these used to be the same field, so switching
+    # STORAGE_BACKEND from local to gcp without also touching env vars would
+    # silently reuse whatever base URL had been set for local dev.
+    GCS_PUBLIC_BASE_URL: str = Field(default="")
 
     # Imgproxy Config (must be hex encoded)
     IMGPROXY_KEY: str = Field(default="")
