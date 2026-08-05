@@ -53,6 +53,18 @@ Things that will bite you if you don't know them:
   If `mark_ready` finds no row (the owner `DELETE`d the upload mid-compression)
   the worker discards the compressed object it just wrote instead of orphaning
   it. QR codes are returned inline and never recorded.
+- **Image uploads are idempotent per owner, keyed on the input's sha256.**
+  `POST /upload/image` hashes the *input* bytes (in a threadpool — it's CPU
+  work) and, on a `(owner, content_hash)` hit against a `ready` row, returns the
+  existing record without re-decoding, re-encoding, or re-storing. The hash is
+  of the input, not the stored WebP; dedup is owner-scoped so hashes never
+  collide or leak across tenants. The record stores `width`/`height` precisely
+  so the deduplicated response stays fully shaped (dimensions included) without
+  touching the object. Video is *not* deduplicated (async, nondeterministic
+  output) — backlog. The `uploads` schema is a single greenfield
+  `CREATE TABLE IF NOT EXISTS` (columns added across this session's commits, all
+  pre-release); once it's deployed, further changes need real migrations
+  (Alembic) rather than editing the DDL in place.
 - **The storage singleton is per-process, not shared state.** `app/services/
   storage.py`'s `_storage` module-level variable is built lazily and
   independently in each OS process (api and worker each get their own). It's

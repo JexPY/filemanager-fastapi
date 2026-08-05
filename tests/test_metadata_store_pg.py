@@ -49,6 +49,8 @@ async def test_full_crud_roundtrip(pg_store: PostgresMetadataStore) -> None:
         content_type="image/webp",
         size_bytes=42,
         status=STATUS_READY,
+        width=640,
+        height=480,
         content_hash="abc123",
     )
     assert rec.id and rec.created_at is not None
@@ -56,6 +58,7 @@ async def test_full_crud_roundtrip(pg_store: PostgresMetadataStore) -> None:
     fetched = await pg_store.get(rec.id, "alice")
     assert fetched is not None and fetched.storage_key == "images/a.webp"
     assert fetched.content_hash == "abc123"
+    assert (fetched.width, fetched.height) == (640, 480)
 
     listed = await pg_store.list("alice")
     assert [r.id for r in listed] == [rec.id]

@@ -46,6 +46,9 @@ class InMemoryStorageBackend(StorageBackend):
         self.objects.pop(key, None)
         self.deleted_keys.append(key)
 
+    def public_url(self, key: str) -> str:
+        return f"{self._base_url}/{key}"
+
     async def presigned_get_url(self, key: str, expires_in: int = 3600) -> str | None:
         if not self._presign_capable:
             return None
@@ -84,6 +87,8 @@ class InMemoryMetadataStore(MetadataStore):
         content_type: str,
         size_bytes: int,
         status: str,
+        width: int | None = None,
+        height: int | None = None,
         content_hash: str | None = None,
         task_id: str | None = None,
         original_filename: str | None = None,
@@ -98,6 +103,8 @@ class InMemoryMetadataStore(MetadataStore):
             storage_key=storage_key,
             content_type=content_type,
             size_bytes=size_bytes,
+            width=width,
+            height=height,
             status=status,
             content_hash=content_hash,
             task_id=task_id,

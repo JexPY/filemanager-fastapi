@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import hmac
 import logging
 import re
@@ -125,6 +126,37 @@ async def generate_qrcode(content: str = Form(..., max_length=settings.MAX_QR_CO
     return Response(content=png_data, media_type="image/png")
 
 
+def _sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+async def _image_source_url(storage_key: str) -> str:
+    """Rebuild the imgproxy source URL for a stored image from its key alone.
+
+    For a backend that supports presigning (S3/R2/MinIO), prefer a presigned URL
+    over the plain object URL: the plain URL is unusable for a private bucket,
+    and imgproxy needs a URL it can actually fetch. For the local backend,
+    imgproxy has no HTTP path to the API's storage at all -- build_source_url
+    swaps in its local:// source scheme instead.
+    """
+    backend = await get_storage()
+    presigned_url = await backend.presigned_get_url(storage_key)
+    return build_source_url(storage_key, presigned_url or backend.public_url(storage_key))
+
+
+def _image_response(record_id: str, width: int | None, height: int | None, source_url: str) -> dict:
+    return {
+        "status": "success",
+        "id": record_id,
+        "dimensions": {"width": width, "height": height},
+        "raw_url": source_url,
+        "imgproxy_thumbnail_url": generate_signed_url(
+            source_url, processing_options="rs:fill:300:300"
+        ),
+        "imgproxy_optimized_url": generate_signed_url(source_url, processing_options="rs:auto"),
+    }
+
+
 @router.post("/upload/image")
 async def upload_image(
     request: Request,
@@ -132,6 +164,24 @@ async def upload_image(
     owner: str = Depends(verify_token),
 ):
     file_data = await _read_capped(file, request, settings.MAX_IMAGE_UPLOAD_BYTES)
+
+    # Content hash of the *input* bytes for idempotency. Hashing 25 MB is
+    # borderline CPU work, so offload it like the other CPU-bound steps.
+    content_hash = await asyncio.to_thread(_sha256_hex, file_data)
+
+    store = await get_metadata_store()
+    # Idempotency: the exact same bytes already stored (and ready) by this owner
+    # returns the existing record instead of re-decoding/re-encoding/re-storing.
+    # Owner-scoped so hashes never collide or leak across tenants. A lookup
+    # failure must not fail the upload -- fall through and process normally.
+    try:
+        existing = await store.find_ready_by_hash(owner, content_hash)
+    except MetadataError as exc:
+        logger.warning("Idempotency lookup failed (processing normally): %s", exc)
+        existing = None
+    if existing is not None:
+        source_url = await _image_source_url(existing.storage_key)
+        return _image_response(existing.id, existing.width, existing.height, source_url)
 
     # Client-side failures (bad/unsupported image) => 400, generic detail.
     try:
@@ -156,9 +206,9 @@ async def upload_image(
         ) from exc
 
     # Record the object in the system-of-record (owner-scoped, immediately
-    # ready). If this fails the stored object would be orphaned with no way to
-    # ever find or delete it, so roll it back before surfacing a generic 502.
-    store = await get_metadata_store()
+    # ready, with the content hash so a later identical upload dedupes). If this
+    # fails the stored object would be orphaned with no way to ever find or
+    # delete it, so roll it back before surfacing a generic 502.
     try:
         record = await store.create(
             owner=owner,
@@ -167,6 +217,9 @@ async def upload_image(
             content_type=content_type,
             size_bytes=obj.size,
             status=STATUS_READY,
+            width=width,
+            height=height,
+            content_hash=content_hash,
         )
     except MetadataError as exc:
         logger.error("Failed to record image upload %s: %s", obj.key, exc)
@@ -176,27 +229,8 @@ async def upload_image(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
         ) from exc
 
-    # For a backend that supports presigning (S3/R2/MinIO), prefer a
-    # presigned URL over the plain object URL: the plain URL is unusable for
-    # a private bucket, and imgproxy needs a URL it can actually fetch, so
-    # the same source is used both for the raw_url field and for imgproxy.
-    # For the local backend, imgproxy has no HTTP path to the API's storage
-    # at all -- build_source_url swaps in its local:// source scheme instead.
-    backend = await get_storage()
-    presigned_url = await backend.presigned_get_url(obj.key)
-    source_url = build_source_url(obj.key, presigned_url or obj.url)
-
-    thumbnail_url = generate_signed_url(source_url, processing_options="rs:fill:300:300")
-    original_optimized_url = generate_signed_url(source_url, processing_options="rs:auto")
-
-    return {
-        "status": "success",
-        "id": record.id,
-        "dimensions": {"width": width, "height": height},
-        "raw_url": source_url,
-        "imgproxy_thumbnail_url": thumbnail_url,
-        "imgproxy_optimized_url": original_optimized_url,
-    }
+    source_url = await _image_source_url(obj.key)
+    return _image_response(record.id, width, height, source_url)
 
 
 @router.post("/upload/video", status_code=status.HTTP_202_ACCEPTED)

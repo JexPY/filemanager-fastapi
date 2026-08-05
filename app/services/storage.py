@@ -56,6 +56,12 @@ class StorageBackend(ABC):
     @abstractmethod
     async def delete(self, key: str) -> None: ...
 
+    @abstractmethod
+    def public_url(self, key: str) -> str:
+        """The object's plain (unsigned) URL, i.e. what upload() sets on
+        StorageObject.url. Lets callers that hold only a key (e.g. serving a
+        deduplicated record) rebuild the same source URL without re-uploading."""
+
     async def aclose(self) -> None:  # noqa: B027 -- intentional no-op default, not abstract
         """Release any long-lived clients. Default is a no-op."""
 
@@ -86,13 +92,17 @@ class LocalStorage(StorageBackend):
             raise StorageError(f"Invalid object key outside storage root: {key!r}")
         return target
 
+    def public_url(self, key: str) -> str:
+        return f"{self._base}/{key}" if self._base else key
+
     async def upload(self, data: bytes, key: str, content_type: str) -> StorageObject:
         target = self._resolve(key)
         target.parent.mkdir(parents=True, exist_ok=True)
         async with aiofiles.open(target, "wb") as f:
             await f.write(data)
-        url = f"{self._base}/{key}" if self._base else key
-        return StorageObject(key=key, url=url, size=len(data), content_type=content_type)
+        return StorageObject(
+            key=key, url=self.public_url(key), size=len(data), content_type=content_type
+        )
 
     async def download(self, key: str) -> bytes:
         target = self._resolve(key)
@@ -158,6 +168,9 @@ class S3Storage(StorageBackend):
         # Real AWS: virtual-hosted style.
         host = f"s3.{self._region}.amazonaws.com" if self._region else "s3.amazonaws.com"
         return f"https://{self._bucket}.{host}/{key}"
+
+    def public_url(self, key: str) -> str:
+        return self._object_url(key)
 
     async def upload(self, data: bytes, key: str, content_type: str) -> StorageObject:
         client = await self._get_client()
@@ -233,6 +246,9 @@ class GCSStorage(StorageBackend):
         if self._public_base:
             return f"{self._public_base}/{key}"
         return f"https://storage.googleapis.com/{self._bucket}/{key}"
+
+    def public_url(self, key: str) -> str:
+        return self._object_url(key)
 
     async def upload(self, data: bytes, key: str, content_type: str) -> StorageObject:
         client = await self._get_client()

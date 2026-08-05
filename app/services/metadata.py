@@ -55,6 +55,8 @@ class UploadRecord:
     storage_key: str
     content_type: str
     size_bytes: int
+    width: int | None
+    height: int | None
     status: str
     content_hash: str | None
     task_id: str | None
@@ -71,6 +73,8 @@ class UploadRecord:
             "storage_key": self.storage_key,
             "content_type": self.content_type,
             "size_bytes": self.size_bytes,
+            "width": self.width,
+            "height": self.height,
             "content_hash": self.content_hash,
             "task_id": self.task_id,
             "original_filename": self.original_filename,
@@ -103,6 +107,8 @@ class MetadataStore(ABC):
         content_type: str,
         size_bytes: int,
         status: str,
+        width: int | None = None,
+        height: int | None = None,
         content_hash: str | None = None,
         task_id: str | None = None,
         original_filename: str | None = None,
@@ -154,6 +160,8 @@ CREATE TABLE IF NOT EXISTS uploads (
     storage_key       text NOT NULL,
     content_type      text NOT NULL,
     size_bytes        bigint NOT NULL,
+    width             integer,
+    height            integer,
     content_hash      text,
     status            text NOT NULL,
     task_id           text,
@@ -169,7 +177,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uploads_storage_key_idx ON uploads (storage_ke
 # Column order shared by every RETURNING */SELECT * below, so a Record maps to
 # UploadRecord positionally without naming columns at every call site.
 _COLUMNS = (
-    "id, owner, kind, storage_key, content_type, size_bytes, "
+    "id, owner, kind, storage_key, content_type, size_bytes, width, height, "
     "content_hash, status, task_id, original_filename, created_at, updated_at"
 )
 
@@ -182,6 +190,8 @@ def _row_to_record(row: asyncpg.Record) -> UploadRecord:
         storage_key=row["storage_key"],
         content_type=row["content_type"],
         size_bytes=row["size_bytes"],
+        width=row["width"],
+        height=row["height"],
         status=row["status"],
         content_hash=row["content_hash"],
         task_id=row["task_id"],
@@ -233,6 +243,8 @@ class PostgresMetadataStore(MetadataStore):
         content_type: str,
         size_bytes: int,
         status: str,
+        width: int | None = None,
+        height: int | None = None,
         content_hash: str | None = None,
         task_id: str | None = None,
         original_filename: str | None = None,
@@ -242,14 +254,16 @@ class PostgresMetadataStore(MetadataStore):
         try:
             row = await pool.fetchrow(
                 f"INSERT INTO uploads (id, owner, kind, storage_key, content_type, "
-                f"size_bytes, content_hash, status, task_id, original_filename) "
-                f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING {_COLUMNS}",
+                f"size_bytes, width, height, content_hash, status, task_id, original_filename) "
+                f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING {_COLUMNS}",
                 upload_id,
                 owner,
                 kind,
                 storage_key,
                 content_type,
                 size_bytes,
+                width,
+                height,
                 content_hash,
                 status,
                 task_id,

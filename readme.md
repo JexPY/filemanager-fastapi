@@ -48,6 +48,9 @@ and a Redis instance, nothing else.
   inline and not recorded.
 - **Per-token identity** — each bearer token maps to an owner; uploads,
   listing, and deletion are all scoped to that owner (audit trail + isolation).
+- **Idempotent image upload** — re-uploading identical bytes (per owner)
+  returns the existing record instead of storing a duplicate, keyed on the
+  input's SHA-256.
 - **`/healthz`, `/readyz`** — liveness and dependency-readiness probes
   (`/readyz` checks Redis, storage, and the Postgres metadata store).
 
