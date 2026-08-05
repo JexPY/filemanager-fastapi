@@ -5,7 +5,17 @@ import logging
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -291,3 +301,44 @@ async def get_task_status(task_id: str):
         return {"task_id": task_id, "status": "failed", "error": "Video processing failed"}
 
     return {"task_id": task_id, "status": "completed", "result": task_result.return_value}
+
+
+@router.get("/files")
+async def list_files(
+    owner: str = Depends(verify_token),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    kind: str | None = Query(default=None),
+):
+    """List the caller's uploads, newest first. Owner-scoped: a token only ever
+    sees its own records. `kind` optionally filters to 'image' or 'video'."""
+    store = await get_metadata_store()
+    try:
+        records = await store.list(owner, kind=kind, limit=limit, offset=offset)
+    except MetadataError as exc:
+        logger.error("Failed to list uploads for %s: %s", owner, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    return {
+        "files": [record.to_public() for record in records],
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.get("/files/{file_id}")
+async def get_file(file_id: str, owner: str = Depends(verify_token)):
+    """Fetch one of the caller's upload records. 404 (not 403) when it isn't
+    the caller's, so a record's existence never leaks across owners."""
+    store = await get_metadata_store()
+    try:
+        record = await store.get(file_id, owner)
+    except MetadataError as exc:
+        logger.error("Failed to load upload %s: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return record.to_public()
