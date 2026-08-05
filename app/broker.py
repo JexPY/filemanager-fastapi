@@ -20,8 +20,11 @@ taskiq_fastapi.init(broker, "app.main:app")
 
 
 @broker.on_event(TaskiqEvents.WORKER_SHUTDOWN)
-async def _close_worker_storage(state: TaskiqState) -> None:
-    # The worker process reuses pooled storage clients too; release them on shutdown.
+async def _close_worker_resources(state: TaskiqState) -> None:
+    # The worker process holds its own pooled storage clients and metadata pool
+    # (built lazily on first task); release both on shutdown.
+    from app.services.metadata import close_metadata_store
     from app.services.storage import close_storage
 
     await close_storage()
+    await close_metadata_store()

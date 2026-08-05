@@ -8,11 +8,12 @@ from typing import Any
 import httpx
 import pytest
 
+import app.services.metadata as metadata_module
 import app.services.storage as storage_module
 from app.broker import broker
 from app.config import settings
 from app.main import app
-from tests.fakes import InMemoryStorageBackend
+from tests.fakes import InMemoryMetadataStore, InMemoryStorageBackend
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 TEST_TOKEN = "test-token"
@@ -30,13 +31,26 @@ def fake_storage(monkeypatch: pytest.MonkeyPatch) -> InMemoryStorageBackend:
 
 
 @pytest.fixture
+def fake_metadata(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetadataStore:
+    """Pre-seeds the module-level metadata singleton the same way fake_storage
+    does for storage, so get_metadata_store() returns this fake in every module
+    that imported it -- no live Postgres needed for route/unit tests.
+    """
+    store = InMemoryMetadataStore()
+    monkeypatch.setattr(metadata_module, "_store", store)
+    return store
+
+
+@pytest.fixture
 def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setattr(settings, "FILE_MANAGER_BEARER_TOKENS", TEST_TOKEN)
     return {"Authorization": f"Bearer {TEST_TOKEN}"}
 
 
 @pytest.fixture
-async def client(fake_storage: InMemoryStorageBackend) -> AsyncIterator[httpx.AsyncClient]:
+async def client(
+    fake_storage: InMemoryStorageBackend, fake_metadata: InMemoryMetadataStore
+) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

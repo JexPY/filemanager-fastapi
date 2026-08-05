@@ -5,6 +5,7 @@ from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
 
 from app.config import settings
+from app.services.metadata import MetadataError, get_metadata_store
 from app.services.storage import StorageError, get_storage
 
 logger = logging.getLogger(__name__)
@@ -37,17 +38,28 @@ async def _check_storage() -> bool:
         return False
 
 
+async def _check_db() -> bool:
+    try:
+        store = await get_metadata_store()
+        return await store.ping()
+    except MetadataError:
+        logger.warning("readyz: metadata store check failed", exc_info=True)
+        return False
+
+
 @router.get("/readyz")
 async def readyz() -> JSONResponse:
-    """200 only if Redis and the storage backend are both reachable/usable;
-    503 otherwise. Meant for orchestrator readiness probes, not liveness."""
-    redis_ok, storage_ok = await _check_redis(), await _check_storage()
-    ready = redis_ok and storage_ok
+    """200 only if Redis, the storage backend, and the metadata store are all
+    reachable/usable; 503 otherwise. Meant for orchestrator readiness probes,
+    not liveness."""
+    redis_ok, storage_ok, db_ok = await _check_redis(), await _check_storage(), await _check_db()
+    ready = redis_ok and storage_ok and db_ok
     body = {
         "status": "ok" if ready else "unavailable",
         "checks": {
             "redis": "ok" if redis_ok else "unavailable",
             "storage": "ok" if storage_ok else "unavailable",
+            "db": "ok" if db_ok else "unavailable",
         },
     }
     status_code = status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE

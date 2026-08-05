@@ -7,6 +7,7 @@ from taskiq_fastapi import populate_dependency_context
 from app.broker import broker
 from app.middleware import RequestIDLogFilter, RequestIDMiddleware
 from app.routers import files, health
+from app.services.metadata import close_metadata_store, get_metadata_store
 from app.services.storage import close_storage
 
 _handler = logging.StreamHandler()
@@ -23,8 +24,14 @@ async def lifespan(app: FastAPI):
     if not broker.is_worker_process:
         await broker.startup()
     populate_dependency_context(broker, app)
+    # Build the metadata pool and ensure its schema at startup: fail fast on a
+    # bad DATABASE_URL, and guarantee the `uploads` table exists before the
+    # worker ever races to create it.
+    store = await get_metadata_store()
+    await store.connect()
     yield
-    # Release pooled storage clients held by the web process.
+    # Release pooled storage + metadata clients held by the web process.
+    await close_metadata_store()
     await close_storage()
     if not broker.is_worker_process:
         await broker.shutdown()

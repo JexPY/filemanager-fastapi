@@ -25,9 +25,12 @@ client --(bearer auth)--> api ---+--> image: pyvips validate/strip -> storage ->
                                                                         (raw deleted after, success or failure)
 ```
 
-Both processes import the same `app/` package and share a Redis instance and
-a storage backend (volume or bucket) — that's the entire coupling between
-them. Everything else (routes, health checks) only exists in `api`.
+Both processes import the same `app/` package and share a Redis instance, a
+storage backend (volume or bucket), and a Postgres metadata store — that's the
+entire coupling between them. `api` writes an `uploads` row on every upload and
+serves the list/get/delete routes; the `worker` updates a video's row when
+compression finishes. Everything else (routes, health checks) only exists in
+`api`.
 
 ## Non-obvious invariants
 
@@ -44,6 +47,19 @@ Things that will bite you if you don't know them:
   closed via `close_storage()` — wired into `api`'s FastAPI lifespan
   (`app/main.py`) and into the worker's `TaskiqEvents.WORKER_SHUTDOWN` event
   (`app/broker.py`), so both processes release pooled clients cleanly.
+- **The metadata store mirrors that singleton pattern exactly.** `app/services/
+  metadata.py`'s `_store` (an asyncpg-pool-backed `PostgresMetadataStore`) is
+  built lazily per process and closed via `close_metadata_store()`, wired into
+  the same two lifecycle hooks as storage. The `uploads` **table is created on
+  first pool use** (`CREATE TABLE IF NOT EXISTS`, safe from whichever process
+  gets there first); `api`'s lifespan also connects eagerly at startup so a bad
+  `DATABASE_URL` fails fast. **Postgres, not SQLite, on purpose** — two OS
+  processes write this store, and SQLite over a shared volume reintroduces the
+  cross-process locking fragility this whole per-process-singleton design
+  avoids. Unit/route tests never touch a live DB: `tests/fakes.py`'s
+  `InMemoryMetadataStore` is seeded into `_store` by the `fake_metadata` fixture,
+  the same way `fake_storage` seeds storage. Real-Postgres coverage lives in the
+  `pg_integration`-marked `tests/test_metadata_store_pg.py`.
 - **The worker imports the entire FastAPI app at startup**, not just
   `app.tasks`. `app/broker.py` calls `taskiq_fastapi.init(broker,
   "app.main:app")`, which makes the worker resolve and import `app.main` (for
@@ -108,11 +124,17 @@ docker compose up --build
 docker compose up worker
 
 # Test suite / lint / format / types (all run inside Docker -- there is no
-# supported local Python environment for this project; see below)
-docker compose run --rm test pytest -v
-docker compose run --rm test ruff check .
-docker compose run --rm test ruff format .
-docker compose run --rm test mypy app
+# supported local Python environment for this project; see below).
+# NOTE the --build: the test service bakes the source in at image-build time
+# (Dockerfile.test's `COPY . .`), it is NOT bind-mounted, so `run` without
+# --build silently re-runs your OLD code. Always rebuild after editing.
+docker compose run --rm --build test pytest -v
+docker compose run --rm --build test ruff check .
+docker compose run --rm --build test ruff format .
+docker compose run --rm --build test mypy app
+# The test service depends on redis + db, so `run` starts both; the
+# pg_integration tests exercise the real Postgres `db`. Deselect them with
+# `-m "not pg_integration"` if running without it.
 
 # Local S3-compatible backend for testing (MinIO)
 docker compose --profile s3-dev up -d minio minio-init

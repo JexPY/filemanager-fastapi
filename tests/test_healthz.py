@@ -10,12 +10,12 @@ async def test_healthz_always_returns_200(client: httpx.AsyncClient) -> None:
     assert resp.json() == {"status": "ok"}
 
 
-async def test_readyz_200_when_redis_and_storage_reachable(client: httpx.AsyncClient) -> None:
+async def test_readyz_200_when_all_dependencies_reachable(client: httpx.AsyncClient) -> None:
     resp = await client.get("/readyz")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
-    assert body["checks"] == {"redis": "ok", "storage": "ok"}
+    assert body["checks"] == {"redis": "ok", "storage": "ok", "db": "ok"}
 
 
 async def test_readyz_503_when_redis_unreachable(
@@ -40,6 +40,18 @@ async def test_readyz_503_when_storage_unreachable(
     resp = await client.get("/readyz")
     assert resp.status_code == 503
     assert resp.json()["checks"]["storage"] == "unavailable"
+
+
+async def test_readyz_503_when_db_unreachable(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_check_db() -> bool:
+        return False
+
+    monkeypatch.setattr(health_module, "_check_db", fake_check_db)
+    resp = await client.get("/readyz")
+    assert resp.status_code == 503
+    assert resp.json()["checks"]["db"] == "unavailable"
 
 
 async def test_response_includes_generated_request_id(client: httpx.AsyncClient) -> None:
