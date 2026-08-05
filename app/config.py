@@ -1,7 +1,15 @@
+import hashlib
+
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ALLOWED_STORAGE_BACKENDS = {"local", "s3", "gcp"}
+
+
+def _derive_owner(secret: str) -> str:
+    """Stable, non-reversible owner id for a bare (unlabeled) token, so audit
+    records never store or expose the secret itself."""
+    return "tok_" + hashlib.sha256(secret.encode()).hexdigest()[:12]
 
 
 class Settings(BaseSettings):
@@ -107,10 +115,35 @@ class Settings(BaseSettings):
         return self
 
     @property
-    def valid_tokens(self) -> list[str]:
+    def token_identities(self) -> dict[str, str]:
+        """Maps each accepted bearer secret to its owner identity.
+
+        Entries in FILE_MANAGER_BEARER_TOKENS are comma-separated and may be
+        either a bare `secret` (owner derived as tok_<hash>, backward compatible
+        with the old token-list format) or `label:secret` (owner = label, for a
+        human-readable audit trail). The client always sends just `secret` as
+        the bearer token; the label is server-side only. A secret that itself
+        contains a colon must therefore be given an explicit label.
+        """
+        identities: dict[str, str] = {}
         if not self.FILE_MANAGER_BEARER_TOKENS:
-            return []
-        return [t.strip() for t in self.FILE_MANAGER_BEARER_TOKENS.split(",") if t.strip()]
+            return identities
+        for raw in self.FILE_MANAGER_BEARER_TOKENS.split(","):
+            entry = raw.strip()
+            if not entry:
+                continue
+            if ":" in entry:
+                label, secret = (part.strip() for part in entry.split(":", 1))
+            else:
+                label, secret = "", entry
+            if not secret:
+                continue
+            identities[secret] = label or _derive_owner(secret)
+        return identities
+
+    @property
+    def valid_tokens(self) -> list[str]:
+        return list(self.token_identities)
 
 
 settings = Settings()

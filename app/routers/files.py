@@ -26,17 +26,24 @@ security = HTTPBearer(auto_error=False)
 def verify_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> str:
+    """Authenticates the bearer token and returns its **owner identity** (not
+    the raw token), which callers stamp on records / scope queries by."""
     # auto_error=False so a missing/malformed Authorization header lands here
     # too, instead of Starlette's default 403 -- missing and wrong credentials
     # should both be 401.
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     token = credentials.credentials
-    # Constant-time comparison against each configured token to avoid timing leaks.
-    is_valid = any(hmac.compare_digest(token, t) for t in settings.valid_tokens)
-    if not is_valid:
+    # Compare against every configured secret with no early-out, so timing
+    # doesn't leak which (or whether) a token matched. The matched owner is
+    # resolved after the full loop; configured secrets are unique.
+    matched_owner: str | None = None
+    for secret, owner in settings.token_identities.items():
+        if hmac.compare_digest(token, secret):
+            matched_owner = owner
+    if matched_owner is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    return token
+    return matched_owner
 
 
 async def _read_capped(file: UploadFile, request: Request, max_bytes: int) -> bytes:
