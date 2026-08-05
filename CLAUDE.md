@@ -162,6 +162,9 @@ missing `S3_BUCKET`/`GCS_BUCKET` for the matching `STORAGE_BACKEND`, an empty
   `tests/fakes.py` has `InMemoryStorageBackend`. Real ffmpeg/pyvips fixtures
   live in `tests/fixtures/`, generated once via the Docker test image (see
   git history for the generation script) rather than hand-crafted bytes.
+- **Commit messages**: conventional-commit style, matching the existing
+  history — each says what changed, why, and how it was verified. **Do not add
+  a `Co-Authored-By:` / AI-attribution trailer** to commits or PR bodies.
 
 ## Known sharp edges & backlog
 
