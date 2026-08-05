@@ -109,6 +109,11 @@ class MetadataStore(ABC):
     ) -> UploadRecord: ...
 
     @abstractmethod
+    async def set_task_id(self, upload_id: str, task_id: str) -> None:
+        """Attach the compression task id to a just-created video row. Called
+        after enqueue (the id only exists then); a missing row is a no-op."""
+
+    @abstractmethod
     async def get(self, upload_id: str, owner: str) -> UploadRecord | None: ...
 
     @abstractmethod
@@ -253,6 +258,17 @@ class PostgresMetadataStore(MetadataStore):
         except (asyncpg.PostgresError, OSError) as exc:
             raise MetadataError(f"Failed to record upload {storage_key!r}") from exc
         return _row_to_record(row)
+
+    async def set_task_id(self, upload_id: str, task_id: str) -> None:
+        pool = await self._get_pool()
+        try:
+            await pool.execute(
+                "UPDATE uploads SET task_id = $2, updated_at = now() WHERE id = $1",
+                upload_id,
+                task_id,
+            )
+        except (asyncpg.PostgresError, OSError) as exc:
+            raise MetadataError(f"Failed to attach task to upload {upload_id!r}") from exc
 
     async def get(self, upload_id: str, owner: str) -> UploadRecord | None:
         pool = await self._get_pool()

@@ -38,9 +38,21 @@ Things that will bite you if you don't know them:
 
 - **Only the storage *key* travels through Redis for video, never bytes.**
   `POST /upload/video` stages the raw upload in storage first, then enqueues
-  `compress_video_task(raw_storage_key, original_filename)` — two strings.
-  The worker downloads the bytes itself. Don't "optimize" this by passing
-  bytes through the task payload.
+  `compress_video_task(raw_storage_key, original_filename, upload_id)` — three
+  strings (the `upload_id` lets the worker update the right `uploads` row). The
+  worker downloads the bytes itself. Don't "optimize" this by passing bytes
+  through the task payload.
+- **Every upload is recorded, and the video record's lifecycle is a state
+  machine.** `POST /upload/image` writes one `uploads` row (`status='ready'`).
+  `POST /upload/video` writes the row `status='processing'` **before** it
+  enqueues the task — that ordering is load-bearing: the worker marks the row
+  ready *by id*, so the row must exist first (never enqueue-then-create). On
+  success the worker's `mark_ready` swaps `storage_key` from the raw key to the
+  compressed key and sets `status='ready'`; on any failure it best-effort
+  `mark_failed`s and re-raises (so `GET /tasks/{id}` still reports failed too).
+  If `mark_ready` finds no row (the owner `DELETE`d the upload mid-compression)
+  the worker discards the compressed object it just wrote instead of orphaning
+  it. QR codes are returned inline and never recorded.
 - **The storage singleton is per-process, not shared state.** `app/services/
   storage.py`'s `_storage` module-level variable is built lazily and
   independently in each OS process (api and worker each get their own). It's

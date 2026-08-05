@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import hmac
 import logging
 import re
@@ -12,8 +13,16 @@ from app.broker import broker
 from app.config import settings
 from app.services.image_vips import ImageValidationError, validate_and_strip_image
 from app.services.imgproxy import build_source_url, generate_signed_url
+from app.services.metadata import (
+    KIND_IMAGE,
+    KIND_VIDEO,
+    STATUS_PROCESSING,
+    STATUS_READY,
+    MetadataError,
+    get_metadata_store,
+)
 from app.services.qr_generator import generate_qr_image
-from app.services.storage import StorageError, get_storage, upload_file
+from app.services.storage import StorageError, delete_file, get_storage, upload_file
 from app.services.task_status import mark_task_issued, was_task_issued
 from app.tasks import compress_video_task
 
@@ -106,8 +115,12 @@ async def generate_qrcode(content: str = Form(..., max_length=settings.MAX_QR_CO
     return Response(content=png_data, media_type="image/png")
 
 
-@router.post("/upload/image", dependencies=[Depends(verify_token)])
-async def upload_image(request: Request, file: UploadFile = File(...)):
+@router.post("/upload/image")
+async def upload_image(
+    request: Request,
+    file: UploadFile = File(...),
+    owner: str = Depends(verify_token),
+):
     file_data = await _read_capped(file, request, settings.MAX_IMAGE_UPLOAD_BYTES)
 
     # Client-side failures (bad/unsupported image) => 400, generic detail.
@@ -132,6 +145,27 @@ async def upload_image(request: Request, file: UploadFile = File(...)):
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
         ) from exc
 
+    # Record the object in the system-of-record (owner-scoped, immediately
+    # ready). If this fails the stored object would be orphaned with no way to
+    # ever find or delete it, so roll it back before surfacing a generic 502.
+    store = await get_metadata_store()
+    try:
+        record = await store.create(
+            owner=owner,
+            kind=KIND_IMAGE,
+            storage_key=obj.key,
+            content_type=content_type,
+            size_bytes=obj.size,
+            status=STATUS_READY,
+        )
+    except MetadataError as exc:
+        logger.error("Failed to record image upload %s: %s", obj.key, exc)
+        with contextlib.suppress(StorageError):
+            await delete_file(obj.key)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
+        ) from exc
+
     # For a backend that supports presigning (S3/R2/MinIO), prefer a
     # presigned URL over the plain object URL: the plain URL is unusable for
     # a private bucket, and imgproxy needs a URL it can actually fetch, so
@@ -147,6 +181,7 @@ async def upload_image(request: Request, file: UploadFile = File(...)):
 
     return {
         "status": "success",
+        "id": record.id,
         "dimensions": {"width": width, "height": height},
         "raw_url": source_url,
         "imgproxy_thumbnail_url": thumbnail_url,
@@ -154,10 +189,12 @@ async def upload_image(request: Request, file: UploadFile = File(...)):
     }
 
 
-@router.post(
-    "/upload/video", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(verify_token)]
-)
-async def upload_video(request: Request, file: UploadFile = File(...)):
+@router.post("/upload/video", status_code=status.HTTP_202_ACCEPTED)
+async def upload_video(
+    request: Request,
+    file: UploadFile = File(...),
+    owner: str = Depends(verify_token),
+):
     file_data = await _read_capped(file, request, settings.MAX_VIDEO_UPLOAD_BYTES)
 
     # Stage the raw upload in storage; only its key travels through Redis.
@@ -175,15 +212,59 @@ async def upload_video(request: Request, file: UploadFile = File(...)):
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
         ) from exc
 
-    # Enqueue the task with the lightweight key reference.
-    task = await compress_video_task.kiq(
-        raw_storage_key=raw_key,
-        original_filename=original_filename,
-    )
+    # Record the upload as `processing` BEFORE enqueuing, so the worker (which
+    # marks it ready by id) can never observe the row before it exists. The
+    # raw key is the current authoritative object; the worker swaps it for the
+    # compressed key on success.
+    store = await get_metadata_store()
+    try:
+        record = await store.create(
+            owner=owner,
+            kind=KIND_VIDEO,
+            storage_key=raw_key,
+            content_type=file.content_type or "application/octet-stream",
+            size_bytes=len(file_data),
+            status=STATUS_PROCESSING,
+            original_filename=original_filename,
+        )
+    except MetadataError as exc:
+        logger.error("Failed to record video upload %s: %s", raw_key, exc)
+        with contextlib.suppress(StorageError):
+            await delete_file(raw_key)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
+        ) from exc
+
+    # Enqueue the task with the lightweight key reference + the record id.
+    try:
+        task = await compress_video_task.kiq(
+            raw_storage_key=raw_key,
+            original_filename=original_filename,
+            upload_id=record.id,
+        )
+    except Exception as exc:
+        # Enqueue failed (e.g. Redis down): don't leave a row stuck `processing`
+        # forever with no task behind it -- roll back the record and the raw
+        # object, then surface a generic 502.
+        logger.error("Failed to enqueue compression for %s: %s", record.id, exc)
+        with contextlib.suppress(MetadataError):
+            await store.delete(record.id, owner)
+        with contextlib.suppress(StorageError):
+            await delete_file(raw_key)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Video processing temporarily unavailable",
+        ) from exc
+
     await mark_task_issued(task.task_id)
+    # Best-effort: the upload is already accepted and the task queued, so a
+    # failure to record the task id must not fail the request.
+    with contextlib.suppress(MetadataError):
+        await store.set_task_id(record.id, task.task_id)
 
     return {
         "status": "accepted",
+        "id": record.id,
         "task_id": task.task_id,
         "raw_key": raw_key,
     }

@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 import uuid
@@ -8,17 +9,20 @@ import aiofiles.os
 
 from app.broker import broker
 from app.config import settings
+from app.services.metadata import MetadataError, get_metadata_store
 from app.services.storage import StorageError, delete_file, download_file, get_storage, upload_file
 
 logger = logging.getLogger(__name__)
 
 
 @broker.task
-async def compress_video_task(raw_storage_key: str, original_filename: str) -> dict:
+async def compress_video_task(raw_storage_key: str, original_filename: str, upload_id: str) -> dict:
     unique_id = uuid.uuid4().hex
     input_path = f"/tmp/{unique_id}_{os.path.basename(raw_storage_key)}"
     output_path = f"/tmp/{unique_id}_compressed.mp4"
     output_key = f"videos/{unique_id}_compressed.mp4"
+
+    store = await get_metadata_store()
 
     try:
         # Pull the raw upload from storage (only its key travels through Redis).
@@ -70,6 +74,21 @@ async def compress_video_task(raw_storage_key: str, original_filename: str) -> d
 
         obj = await upload_file(output_data, output_key, "video/mp4")
 
+        # Flip the record from `processing` to `ready`, pointing it at the
+        # compressed object. A None result means the owner DELETEd the upload
+        # while it was compressing -- don't leave the object we just wrote
+        # orphaned with no record.
+        record = await store.mark_ready(upload_id, storage_key=obj.key, size_bytes=obj.size)
+        if record is None:
+            logger.warning(
+                "Upload %s no longer exists (deleted mid-compression); discarding %s",
+                upload_id,
+                obj.key,
+            )
+            with contextlib.suppress(StorageError):
+                await delete_file(obj.key)
+            return {"status": "discarded", "upload_id": upload_id}
+
         # Prefer a presigned URL over the plain object URL when the backend
         # supports it (S3/R2/MinIO): the plain URL is unusable for a private
         # bucket.
@@ -82,7 +101,16 @@ async def compress_video_task(raw_storage_key: str, original_filename: str) -> d
             "key": obj.key,
             "size": obj.size,
             "original_filename": original_filename,
+            "upload_id": upload_id,
         }
+
+    except Exception:
+        # Any failure (download, ffmpeg, upload, mark_ready) marks the record
+        # `failed` so GET /files reflects it -- best-effort, then re-raise so the
+        # TaskIQ result is an error too (GET /tasks/{id} -> failed).
+        with contextlib.suppress(MetadataError):
+            await store.mark_failed(upload_id)
+        raise
 
     finally:
         # Cleanup temp files.

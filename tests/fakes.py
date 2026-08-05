@@ -109,6 +109,11 @@ class InMemoryMetadataStore(MetadataStore):
         self._order.append(upload_id)
         return record
 
+    async def set_task_id(self, upload_id: str, task_id: str) -> None:
+        record = self.records.get(upload_id)
+        if record is not None:
+            self.records[upload_id] = replace(record, task_id=task_id, updated_at=datetime.now(UTC))
+
     async def get(self, upload_id: str, owner: str) -> UploadRecord | None:
         record = self.records.get(upload_id)
         return record if record is not None and record.owner == owner else None

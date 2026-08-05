@@ -42,9 +42,14 @@ and a Redis instance, nothing else.
   PNG.
 - **Pluggable storage** — local filesystem, S3-compatible (real AWS, R2,
   MinIO), or Google Cloud Storage, selected via `STORAGE_BACKEND`.
-- **Bearer token auth** — constant-time comparison against a configured
-  token list.
-- **`/healthz`, `/readyz`** — liveness and dependency-readiness probes.
+- **System-of-record (Postgres)** — every image/video upload is recorded in an
+  `uploads` table, owned by the calling token, so uploads are listable and
+  deletable (see `GET /files`, `DELETE /files/{id}`). QR codes are returned
+  inline and not recorded.
+- **Per-token identity** — each bearer token maps to an owner; uploads,
+  listing, and deletion are all scoped to that owner (audit trail + isolation).
+- **`/healthz`, `/readyz`** — liveness and dependency-readiness probes
+  (`/readyz` checks Redis, storage, and the Postgres metadata store).
 
 ## Quickstart
 
@@ -90,8 +95,8 @@ All routes except `/healthz`/`/readyz` require `Authorization: Bearer <token>`.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| POST | `/upload/image` | multipart `file` | `{status, dimensions, raw_url, imgproxy_thumbnail_url, imgproxy_optimized_url}` |
-| POST | `/upload/video` | multipart `file` | `202 {status: "accepted", task_id, raw_key}` |
+| POST | `/upload/image` | multipart `file` | `{status, id, dimensions, raw_url, imgproxy_thumbnail_url, imgproxy_optimized_url}` |
+| POST | `/upload/video` | multipart `file` | `202 {status: "accepted", id, task_id, raw_key}` |
 | GET | `/tasks/{task_id}` | — | `{status: "pending"\|"completed"\|"failed", ...}` or `404` for an unknown id |
 | POST | `/generate/qrcode` | form `content` | `image/png` bytes |
 | GET | `/healthz` | — | `{status: "ok"}` |
@@ -105,13 +110,14 @@ startup (`Settings()` validation) if left unset.
 | Variable | Required | Notes |
 |---|---|---|
 | `REDIS_URL` | | TaskIQ broker + result backend |
+| `DATABASE_URL` | | Postgres metadata store (defaults to the bundled `db` service) |
 | `STORAGE_BACKEND` | | `local` \| `s3` \| `gcp` |
 | `LOCAL_STORAGE_DIR`, `LOCAL_PUBLIC_BASE_URL` | | local backend |
 | `S3_BUCKET`, `S3_ENDPOINT_URL`, `S3_PUBLIC_BASE_URL`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `S3_BUCKET` if `STORAGE_BACKEND=s3` | `S3_ENDPOINT_URL` for R2/MinIO, blank for real AWS |
 | `GCP_PROJECT`, `GCP_SERVICE_ACCOUNT_FILE`, `GCS_BUCKET`, `GCS_PUBLIC_BASE_URL` | `GCS_BUCKET` if `STORAGE_BACKEND=gcp` | |
 | `IMGPROXY_KEY`, `IMGPROXY_SALT` | ✅ always | hex-encoded, must match the `imgproxy` container's own env vars exactly |
 | `IMGPROXY_BASE_URL` | | prefixed onto signed URLs so they're complete/fetchable |
-| `FILE_MANAGER_BEARER_TOKENS` | ✅ always | comma-separated |
+| `FILE_MANAGER_BEARER_TOKENS` | ✅ always | comma-separated; each entry is `secret` (owner = `tok_<hash>`) or `label:secret` (owner = label) |
 | `MAX_IMAGE_UPLOAD_BYTES`, `MAX_VIDEO_UPLOAD_BYTES`, `MAX_IMAGE_PIXELS`, `MAX_QR_CONTENT_LENGTH`, `FFMPEG_TIMEOUT_SECONDS`, `TASK_STATUS_TTL_SECONDS` | | sane defaults, see `app/config.py` |
 
 ## Development

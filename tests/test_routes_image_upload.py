@@ -7,7 +7,7 @@ import app.services.storage as storage_module
 from app.config import settings
 from app.main import app
 from tests.conftest import fixture_bytes
-from tests.fakes import InMemoryStorageBackend
+from tests.fakes import InMemoryMetadataStore, InMemoryStorageBackend
 
 
 async def test_valid_image_upload_succeeds(
@@ -21,6 +21,7 @@ async def test_valid_image_upload_succeeds(
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "success"
+    assert body["id"]  # a metadata record id the client can list/get/delete by
     assert body["dimensions"] == {"width": 8, "height": 8}
     assert "imgproxy_thumbnail_url" in body
     assert "imgproxy_optimized_url" in body
@@ -42,7 +43,9 @@ async def test_raw_url_is_local_source_scheme_for_local_backend(
 
 
 async def test_raw_url_is_presigned_when_backend_supports_it(
-    monkeypatch: pytest.MonkeyPatch, auth_headers: dict[str, str]
+    monkeypatch: pytest.MonkeyPatch,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
 ) -> None:
     # STORAGE_BACKEND must actually be non-local here too: build_source_url's
     # local:// override is keyed on this setting, not on the fake's
