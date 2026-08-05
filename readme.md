@@ -100,6 +100,7 @@ All routes except `/healthz`/`/readyz` require `Authorization: Bearer <token>`.
 | GET | `/tasks/{task_id}` | — | `{status: "pending"\|"completed"\|"failed", ...}` or `404` for an unknown id |
 | GET | `/files` | query `limit`,`offset`,`kind` | `{files: [{id, kind, status, storage_key, size_bytes, …}], limit, offset}` — caller's uploads, newest first |
 | GET | `/files/{id}` | — | one upload record, or `404` if it isn't the caller's |
+| DELETE | `/files/{id}` | — | `204` after deleting the object + record; `404` if it isn't the caller's |
 | POST | `/generate/qrcode` | form `content` | `image/png` bytes |
 | GET | `/healthz` | — | `{status: "ok"}` |
 | GET | `/readyz` | — | `200`/`503` with a per-dependency breakdown |

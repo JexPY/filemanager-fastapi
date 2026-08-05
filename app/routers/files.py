@@ -342,3 +342,45 @@ async def get_file(file_id: str, owner: str = Depends(verify_token)):
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     return record.to_public()
+
+
+@router.delete("/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_upload(file_id: str, owner: str = Depends(verify_token)):
+    """Delete one of the caller's uploads: its storage object, then its record.
+    Owner-scoped (404 for anything that isn't the caller's, so no one can probe
+    or delete another owner's objects).
+
+    Deletes the object first and only drops the row on success, so a transient
+    storage failure leaves the record intact and retryable rather than stranding
+    an object with no record. For a video still `processing`, the current object
+    is the raw upload; the worker's mark_ready then finds no row and discards its
+    output, so no orphan is left either way.
+    """
+    store = await get_metadata_store()
+    try:
+        record = await store.get(file_id, owner)
+    except MetadataError as exc:
+        logger.error("Failed to load upload %s for delete: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    try:
+        await delete_file(record.storage_key)
+    except StorageError as exc:
+        logger.error("Failed to delete object %s: %s", record.storage_key, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
+        ) from exc
+
+    try:
+        await store.delete(file_id, owner)
+    except MetadataError as exc:
+        logger.error("Failed to delete record %s: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
