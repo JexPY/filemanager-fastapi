@@ -119,8 +119,7 @@ class InMemoryMetadataStore(MetadataStore):
         matches = [
             self.records[i]
             for i in reversed(self._order)
-            if self.records[i].owner == owner
-            and (kind is None or self.records[i].kind == kind)
+            if self.records[i].owner == owner and (kind is None or self.records[i].kind == kind)
         ]
         return matches[offset : offset + limit]
 
