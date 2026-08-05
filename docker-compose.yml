@@ -9,12 +9,15 @@ services:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://filemanager:filemanager@db:5432/filemanager
       - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
       - LOCAL_STORAGE_DIR=/data/media
     volumes:
       - media_data:/data/media
     depends_on:
       redis:
+        condition: service_healthy
+      db:
         condition: service_healthy
 
   worker:
@@ -25,6 +28,7 @@ services:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://filemanager:filemanager@db:5432/filemanager
       - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
       - LOCAL_STORAGE_DIR=/data/media
     volumes:
@@ -32,11 +36,27 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      db:
+        condition: service_healthy
 
   redis:
     image: redis:7-alpine
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      - POSTGRES_USER=filemanager
+      - POSTGRES_PASSWORD=filemanager
+      - POSTGRES_DB=filemanager
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filemanager -d filemanager"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -67,6 +87,9 @@ services:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/0
+      # Points the pg_integration tests at the `db` service; unit tests use the
+      # in-memory metadata fake and never touch this.
+      - DATABASE_URL=postgresql://filemanager:filemanager@db:5432/filemanager
       - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
       - LOCAL_STORAGE_DIR=/data/media
       # Fixed test-only values so the suite never depends on the developer's
@@ -78,6 +101,8 @@ services:
       - media_data:/data/media
     depends_on:
       redis:
+        condition: service_healthy
+      db:
         condition: service_healthy
     profiles: ["test"]
 
@@ -111,3 +136,4 @@ services:
 
 volumes:
   media_data:
+  pg_data:

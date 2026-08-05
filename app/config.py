@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     # Redis for TaskIQ
     REDIS_URL: str = Field(default="redis://redis:6379/0")
 
+    # Postgres metadata store (system-of-record for every uploaded object).
+    # Both the api and worker processes connect to this; the worker updates a
+    # video's record on compression completion.
+    DATABASE_URL: str = Field(default="postgresql://filemanager:filemanager@db:5432/filemanager")
+
     # Storage backend selection: "local" | "s3" | "gcp"
     STORAGE_BACKEND: str = Field(default="local")
     LOCAL_STORAGE_DIR: str = Field(default="/data/media")
