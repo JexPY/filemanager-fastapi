@@ -87,6 +87,10 @@ curl -H "Authorization: Bearer $TOKEN" -F "file=@clip.mp4" \
 # Poll the result
 curl -H "Authorization: Bearer $TOKEN" http://localhost:9000/tasks/<task_id>
 
+# List your uploads (owner-scoped), then delete one
+curl -H "Authorization: Bearer $TOKEN" http://localhost:9000/files
+curl -X DELETE -H "Authorization: Bearer $TOKEN" http://localhost:9000/files/<id>
+
 # Health
 curl http://localhost:9000/healthz
 curl http://localhost:9000/readyz
@@ -153,9 +157,11 @@ docker compose --profile s3-dev up -d minio minio-init
 
 **Backend verification status**: `local` and `s3` (against real MinIO) have
 both been exercised end to end — upload, imgproxy thumbnail resolution,
-video compression, and cleanup all confirmed working against a live stack.
-`gcp` is covered by unit tests against a mocked client only (no live GCP
-project/credentials available); treat it as implemented-but-not-live-verified.
+video compression, and cleanup all confirmed working against a live stack. The
+Postgres metadata store (listing, deletion, idempotency, video record
+lifecycle) is verified end to end against real PostgreSQL 17. `gcp` is covered
+by unit tests against a mocked client only (no live GCP project/credentials
+available); treat it as implemented-but-not-live-verified.
 
 See [`CLAUDE.md`](CLAUDE.md) for the full architectural rundown, non-obvious
 invariants, and known sharp edges.

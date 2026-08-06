@@ -212,6 +212,15 @@ missing `S3_BUCKET`/`GCS_BUCKET` for the matching `STORAGE_BACKEND`, an empty
   history — each says what changed, why, and how it was verified. **Do not add
   a `Co-Authored-By:` / AI-attribution trailer** to commits or PR bodies.
 
+## What the metadata pass added (was backlog, now done)
+
+The "raise-the-ceiling" pass built the system-of-record cluster on top of the
+hardening baseline: a Postgres `uploads` table, per-token identity, owner-scoped
+`GET /files` + `GET /files/{id}` + `DELETE /files/{id}`, and idempotent image
+upload. Every piece was verified end to end against a clean stack, not just unit
+tests. The invariants above (metadata singleton, video record state machine,
+idempotency) are the load-bearing details.
+
 ## Known sharp edges & backlog
 
 Honest list, not hidden anywhere else:
@@ -219,29 +228,40 @@ Honest list, not hidden anywhere else:
 - **The `-t 60` output-duration cap silently truncates** anything longer with
   no signal to the caller. Fixing this properly means either surfacing
   truncation in the task result or making the cap configurable — a
-  behavior/response-shape change, deliberately out of scope for this pass.
+  behavior/response-shape change. Still open; DB-independent, good next task.
+- **No webhooks/callbacks** — video-compression completion is poll-only
+  (`GET /tasks/{id}`). Now *easy* to add: the `uploads` row already carries
+  `owner` + `task_id`, so a completion notification has something to fire at.
+- **Video is not deduplicated** — idempotency is images-only (a video's
+  compressed output is async and nondeterministic). Would key on the raw
+  input hash per owner.
+- **Scopes are coarse** — per-token *identity* exists and scopes uploads/list/
+  delete, but any valid token can still poll any `task_id` (`GET /tasks/{id}`
+  isn't owner-scoped — the task result predates the record). No roles/scopes
+  beyond "owns its own uploads".
+- **Schema has no migration tooling** — the `uploads` table is one greenfield
+  `CREATE TABLE IF NOT EXISTS`; columns were added in place across this
+  session because nothing was deployed yet. Post-release, add Alembic; do not
+  keep editing the DDL and relying on a volume wipe.
 - **GCS backend is unit-tested only** (mocked client) — no live GCP
   project/credentials in this environment. `local` and `s3` (against real
-  MinIO) are both verified end to end.
+  MinIO) are verified end to end; the Postgres metadata store is verified
+  against real PostgreSQL 17.
 - **No streaming I/O** — uploads are fully buffered in memory (bounded by
   `MAX_IMAGE_UPLOAD_BYTES`/`MAX_VIDEO_UPLOAD_BYTES`, but still buffered, not
   streamed to storage). The single biggest scalability lever if this needs
   to handle much larger files or higher concurrency.
 - **No presigned direct-to-storage uploads** — every byte proxies through
   `api`. Would remove the API from the upload path entirely for large media.
-- **No metadata/system-of-record** — uploads aren't listable, auditable, or
-  deletable by the API's own design; `delete_file()` is only ever called
-  internally (raw-video cleanup after compression), never from a route.
-- **No webhooks** — video-compression completion is poll-only
-  (`GET /tasks/{id}`).
-- **No per-token identity/scopes** — any valid bearer token can call any
-  route, including polling any task_id.
 - **No rate limiting / concurrency caps** beyond the upload size limits.
+- **No retries/circuit breakers** around network hops (Redis, S3/GCS, imgproxy,
+  Postgres) — behavior is fail-closed and visible (e.g. `StorageError`/
+  `MetadataError` → generic 502), which is correct; this would be a reliability
+  layer on top.
 - **Production reverse-proxy/TLS is not shipped** — the old `nginx` service
   was removed (it had no config and did nothing); pick a reverse proxy /
   TLS terminator appropriate to your deployment target.
 
-None of the above are silently broken — each is a deliberate scope boundary
-of the hardening pass that produced the current state of this file. Start a
-fresh planning pass against the actual code before picking one up, rather
-than assuming this list is still accurate by the time you read it.
+None of the above are silently broken — each is a deliberate scope boundary.
+Start a fresh planning pass against the actual code before picking one up,
+rather than assuming this list is still accurate by the time you read it.
