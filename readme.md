@@ -37,7 +37,9 @@ and a Redis instance, nothing else.
   thumbnail and an auto-format optimized version.
 - **Video upload** (`POST /upload/video`) — staged in storage, then
   compressed asynchronously (H.264/AAC via FFmpeg) by a TaskIQ worker.
-  Poll `GET /tasks/{task_id}` for status.
+  Poll `GET /tasks/{task_id}` for status. Output duration is capped
+  (`VIDEO_MAX_DURATION_SECONDS`, default 60s); a longer input is truncated and
+  the completed result / `uploads` row report `duration_seconds` + `truncated`.
 - **QR code generation** (`POST /generate/qrcode`) — segno → SVG → pyvips →
   PNG.
 - **Pluggable storage** — local filesystem, S3-compatible (real AWS, R2,
@@ -132,6 +134,7 @@ startup (`Settings()` validation) if left unset.
 | `IMGPROXY_KEY`, `IMGPROXY_SALT` | ✅ always | hex-encoded, must match the `imgproxy` container's own env vars exactly |
 | `IMGPROXY_BASE_URL` | | prefixed onto signed URLs so they're complete/fetchable |
 | `FILE_MANAGER_BEARER_TOKENS` | ✅ always | comma-separated; each entry is `secret` (owner = `tok_<hash>`) or `label:secret` (owner = label) |
+| `VIDEO_MAX_DURATION_SECONDS` | | caps compressed output duration (default 60s); longer inputs are truncated and flagged `truncated: true` in the task result + `uploads` row |
 | `MAX_IMAGE_UPLOAD_BYTES`, `MAX_VIDEO_UPLOAD_BYTES`, `MAX_IMAGE_PIXELS`, `MAX_QR_CONTENT_LENGTH`, `FFMPEG_TIMEOUT_SECONDS`, `TASK_STATUS_TTL_SECONDS` | | sane defaults, see `app/config.py` |
 
 ## Development

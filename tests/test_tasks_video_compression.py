@@ -43,16 +43,51 @@ async def test_successful_compression_uploads_output_marks_ready_and_deletes_raw
     assert result["key"] in fake_storage.objects
     assert result["upload_id"] == upload_id
 
+    # tiny.mp4 is 2s, well under the 60s default cap -> not truncated, and the
+    # probed input duration is reported.
+    assert result["truncated"] is False
+    assert result["max_duration_seconds"] == settings.VIDEO_MAX_DURATION_SECONDS
+    assert result["duration_seconds"] == pytest.approx(2.0, abs=0.5)
+
     # The record is flipped to ready and now points at the compressed object.
     record = await fake_metadata.get(upload_id, OWNER)
     assert record is not None
     assert record.status == STATUS_READY
     assert record.storage_key == result["key"]
+    assert record.truncated is False
+    assert record.duration_seconds == pytest.approx(2.0, abs=0.5)
 
     # The raw upload is fully consumed by ffmpeg either way and would
     # otherwise accumulate in storage forever -- confirm it's actually gone.
     assert raw_key not in fake_storage.objects
     assert raw_key in fake_storage.deleted_keys
+
+
+async def test_input_longer_than_cap_is_flagged_truncated(
+    fake_storage: InMemoryStorageBackend,
+    fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # tiny.mp4 is 2s; a 1s cap forces truncation. The caller must be told rather
+    # than silently losing the second half.
+    monkeypatch.setattr(settings, "VIDEO_MAX_DURATION_SECONDS", 1)
+    raw_key = "raw/videos/long.mp4"
+    fake_storage.objects[raw_key] = fixture_bytes("tiny.mp4")
+    upload_id = await _seed_processing(fake_metadata, raw_key)
+
+    result = await compress_video_task(
+        raw_storage_key=raw_key, original_filename="long.mp4", upload_id=upload_id
+    )
+
+    assert result["status"] == "success"
+    assert result["truncated"] is True
+    assert result["max_duration_seconds"] == 1
+    assert result["duration_seconds"] == pytest.approx(2.0, abs=0.5)
+
+    record = await fake_metadata.get(upload_id, OWNER)
+    assert record is not None
+    assert record.truncated is True
+    assert record.duration_seconds == pytest.approx(2.0, abs=0.5)
 
 
 async def test_ffmpeg_failure_marks_record_failed_and_deletes_raw(

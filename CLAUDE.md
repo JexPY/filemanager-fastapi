@@ -120,12 +120,16 @@ Things that will bite you if you don't know them:
 - **`pyvips` `strip=True` drops *all* metadata** (EXIF/GPS, ICC profile, XMP)
   on every image re-encode. This is intentional and not configurable per
   request.
-- **Two different 60-ish-second things in the video pipeline, not one:**
-  `-t 60` in the ffmpeg command (`tasks.py`) caps *output duration*, silently
-  truncating any input longer than 60s — the caller is never told this
-  happened (backlog item). `FFMPEG_TIMEOUT_SECONDS` (default 120) is a
-  wall-clock `asyncio.wait_for` around `process.communicate()` that kills a
-  wedged ffmpeg process. Changing one does not affect the other.
+- **Two different time limits in the video pipeline, not one:**
+  `VIDEO_MAX_DURATION_SECONDS` (default 60) is the ffmpeg `-t` cap on *output
+  duration*. An input longer than it **is** truncated, but no longer silently:
+  the worker `ffprobe`s the input up front and reports `duration_seconds` +
+  `truncated` in the task result **and** on the `uploads` row (`mark_ready`
+  persists both). `FFMPEG_TIMEOUT_SECONDS` (default 120) is a wall-clock
+  `asyncio.wait_for` around `process.communicate()` that kills a wedged ffmpeg
+  process. Changing one does not affect the other. The ffprobe step is
+  best-effort — if it can't read a duration, `truncated` is reported `false`
+  (unknown) rather than failing the compression.
 - **A bogus/typo'd `task_id` returns 404, not "pending" forever** — this only
   works because `POST /upload/video` sets a short-lived Redis marker
   (`app/services/task_status.py`) when it enqueues the task.
@@ -236,10 +240,6 @@ idempotency) are the load-bearing details.
 
 Honest list, not hidden anywhere else:
 
-- **The `-t 60` output-duration cap silently truncates** anything longer with
-  no signal to the caller. Fixing this properly means either surfacing
-  truncation in the task result or making the cap configurable — a
-  behavior/response-shape change. Still open; DB-independent, good next task.
 - **No webhooks/callbacks** — video-compression completion is poll-only
   (`GET /tasks/{id}`). Now *easy* to add: the `uploads` row already carries
   `owner` + `task_id`, so a completion notification has something to fire at.

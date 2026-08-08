@@ -109,6 +109,8 @@ class InMemoryMetadataStore(MetadataStore):
             content_hash=content_hash,
             task_id=task_id,
             original_filename=original_filename,
+            duration_seconds=None,
+            truncated=False,
             created_at=now,
             updated_at=now,
         )
@@ -155,7 +157,13 @@ class InMemoryMetadataStore(MetadataStore):
         return None
 
     async def mark_ready(
-        self, upload_id: str, *, storage_key: str, size_bytes: int
+        self,
+        upload_id: str,
+        *,
+        storage_key: str,
+        size_bytes: int,
+        duration_seconds: float | None = None,
+        truncated: bool = False,
     ) -> UploadRecord | None:
         record = self.records.get(upload_id)
         if record is None:
@@ -164,6 +172,8 @@ class InMemoryMetadataStore(MetadataStore):
             record,
             storage_key=storage_key,
             size_bytes=size_bytes,
+            duration_seconds=duration_seconds,
+            truncated=truncated,
             status=STATUS_READY,
             updated_at=datetime.now(UTC),
         )

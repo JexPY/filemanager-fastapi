@@ -15,12 +15,41 @@ from app.services.storage import StorageError, delete_file, download_file, get_s
 logger = logging.getLogger(__name__)
 
 
+async def _probe_duration_seconds(input_path: str) -> float | None:
+    """Return the input's duration in seconds via ffprobe, or None if it can't
+    be determined. Best-effort: a probe failure must never fail the compression
+    itself -- it only means we can't report `truncated` for this input."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            input_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(
+            process.communicate(), timeout=settings.FFMPEG_TIMEOUT_SECONDS
+        )
+        if process.returncode != 0:
+            return None
+        return float(stdout.decode().strip())
+    except (ValueError, TimeoutError, OSError) as exc:
+        logger.warning("ffprobe could not determine duration for %s: %s", input_path, exc)
+        return None
+
+
 @broker.task
 async def compress_video_task(raw_storage_key: str, original_filename: str, upload_id: str) -> dict:
     unique_id = uuid.uuid4().hex
     input_path = f"/tmp/{unique_id}_{os.path.basename(raw_storage_key)}"
     output_path = f"/tmp/{unique_id}_compressed.mp4"
     output_key = f"videos/{unique_id}_compressed.mp4"
+    max_duration = settings.VIDEO_MAX_DURATION_SECONDS
 
     store = await get_metadata_store()
 
@@ -30,14 +59,21 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
         async with aiofiles.open(input_path, "wb") as f:
             await f.write(raw_data)
 
-        # Run FFmpeg 7 async: H.264/AAC, cap output at 60s, -crf 28, -preset fast.
+        # Probe the input duration up front so we can tell the caller when the
+        # output was truncated (input longer than the cap) instead of silently
+        # dropping footage.
+        input_duration = await _probe_duration_seconds(input_path)
+        truncated = input_duration is not None and input_duration > max_duration
+
+        # Run FFmpeg 7 async: H.264/AAC, cap output at max_duration, -crf 28,
+        # -preset fast.
         process = await asyncio.create_subprocess_exec(
             "ffmpeg",
             "-y",
             "-i",
             input_path,
             "-t",
-            "60",
+            str(max_duration),
             "-c:v",
             "libx264",
             "-crf",
@@ -78,7 +114,13 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
         # compressed object. A None result means the owner DELETEd the upload
         # while it was compressing -- don't leave the object we just wrote
         # orphaned with no record.
-        record = await store.mark_ready(upload_id, storage_key=obj.key, size_bytes=obj.size)
+        record = await store.mark_ready(
+            upload_id,
+            storage_key=obj.key,
+            size_bytes=obj.size,
+            duration_seconds=input_duration,
+            truncated=truncated,
+        )
         if record is None:
             logger.warning(
                 "Upload %s no longer exists (deleted mid-compression); discarding %s",
@@ -102,6 +144,9 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
             "size": obj.size,
             "original_filename": original_filename,
             "upload_id": upload_id,
+            "duration_seconds": input_duration,
+            "truncated": truncated,
+            "max_duration_seconds": max_duration,
         }
 
     except Exception:

@@ -146,11 +146,19 @@ async def test_video_lifecycle_and_deleted_midflight(pg_store: PostgresMetadataS
         status=STATUS_PROCESSING,
         task_id="task-1",
     )
-    ready = await pg_store.mark_ready(rec.id, storage_key="videos/v_compressed.mp4", size_bytes=50)
+    ready = await pg_store.mark_ready(
+        rec.id,
+        storage_key="videos/v_compressed.mp4",
+        size_bytes=50,
+        duration_seconds=123.5,
+        truncated=True,
+    )
     assert ready is not None
     assert ready.status == STATUS_READY
     assert ready.storage_key == "videos/v_compressed.mp4"
     assert ready.size_bytes == 50
+    assert ready.duration_seconds == 123.5
+    assert ready.truncated is True
 
     failed = await pg_store.mark_failed(rec.id)
     assert failed is not None and failed.status == STATUS_FAILED

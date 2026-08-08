@@ -68,10 +68,17 @@ class Settings(BaseSettings):
     # this just rejects absurd input before it ever reaches segno.
     MAX_QR_CONTENT_LENGTH: int = Field(default=2000)
 
-    # Kills a wedged ffmpeg process after this many seconds. Distinct from the
-    # hardcoded `-t 60` in tasks.py, which caps *output duration* (silently
-    # truncating long inputs) -- this caps *wall-clock processing time*.
+    # Kills a wedged ffmpeg process after this many seconds. Distinct from
+    # VIDEO_MAX_DURATION_SECONDS below, which caps *output duration* -- this caps
+    # *wall-clock processing time*.
     FFMPEG_TIMEOUT_SECONDS: int = Field(default=120)
+
+    # Caps compressed *output* duration (ffmpeg `-t`). An input longer than this
+    # is truncated; the worker ffprobes the input and reports `truncated`/
+    # `duration_seconds` in the task result and on the uploads row, so the caller
+    # is told rather than silently losing footage. Distinct from
+    # FFMPEG_TIMEOUT_SECONDS (wall-clock kill).
+    VIDEO_MAX_DURATION_SECONDS: int = Field(default=60)
 
     # How long a "this task id was actually issued" marker lives in Redis, so
     # GET /tasks/{id} can 404 a bogus/typo'd id instead of reporting "pending"

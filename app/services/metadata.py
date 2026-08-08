@@ -64,6 +64,8 @@ class UploadRecord:
     content_hash: str | None
     task_id: str | None
     original_filename: str | None
+    duration_seconds: float | None
+    truncated: bool
     created_at: datetime
     updated_at: datetime
 
@@ -81,6 +83,8 @@ class UploadRecord:
             "content_hash": self.content_hash,
             "task_id": self.task_id,
             "original_filename": self.original_filename,
+            "duration_seconds": self.duration_seconds,
+            "truncated": self.truncated,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -140,10 +144,18 @@ class MetadataStore(ABC):
 
     @abstractmethod
     async def mark_ready(
-        self, upload_id: str, *, storage_key: str, size_bytes: int
+        self,
+        upload_id: str,
+        *,
+        storage_key: str,
+        size_bytes: int,
+        duration_seconds: float | None = None,
+        truncated: bool = False,
     ) -> UploadRecord | None:
         """Flip a processing row to ready. None means the row is gone (deleted
-        mid-flight) -- the caller owns cleaning up whatever it just wrote."""
+        mid-flight) -- the caller owns cleaning up whatever it just wrote.
+        `duration_seconds`/`truncated` are the worker's ffprobe findings for a
+        video (the input's duration and whether the output was capped)."""
 
     @abstractmethod
     async def mark_failed(self, upload_id: str) -> UploadRecord | None: ...
@@ -166,7 +178,8 @@ class MetadataStore(ABC):
 # UploadRecord positionally without naming columns at every call site.
 _COLUMNS = (
     "id, owner, kind, storage_key, content_type, size_bytes, width, height, "
-    "content_hash, status, task_id, original_filename, created_at, updated_at"
+    "content_hash, status, task_id, original_filename, duration_seconds, truncated, "
+    "created_at, updated_at"
 )
 
 
@@ -184,6 +197,8 @@ def _row_to_record(row: asyncpg.Record) -> UploadRecord:
         content_hash=row["content_hash"],
         task_id=row["task_id"],
         original_filename=row["original_filename"],
+        duration_seconds=row["duration_seconds"],
+        truncated=row["truncated"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -327,17 +342,26 @@ class PostgresMetadataStore(MetadataStore):
         return _row_to_record(row) if row is not None else None
 
     async def mark_ready(
-        self, upload_id: str, *, storage_key: str, size_bytes: int
+        self,
+        upload_id: str,
+        *,
+        storage_key: str,
+        size_bytes: int,
+        duration_seconds: float | None = None,
+        truncated: bool = False,
     ) -> UploadRecord | None:
         pool = await self._get_pool()
         try:
             row = await pool.fetchrow(
                 f"UPDATE uploads SET storage_key = $2, size_bytes = $3, "
+                f"duration_seconds = $4, truncated = $5, "
                 f"status = '{STATUS_READY}', updated_at = now() "
                 f"WHERE id = $1 RETURNING {_COLUMNS}",
                 upload_id,
                 storage_key,
                 size_bytes,
+                duration_seconds,
+                truncated,
             )
         except (asyncpg.PostgresError, OSError) as exc:
             raise MetadataError(f"Failed to mark upload {upload_id!r} ready") from exc
