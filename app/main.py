@@ -24,9 +24,9 @@ async def lifespan(app: FastAPI):
     if not broker.is_worker_process:
         await broker.startup()
     populate_dependency_context(broker, app)
-    # Build the metadata pool and ensure its schema at startup: fail fast on a
-    # bad DATABASE_URL, and guarantee the `uploads` table exists before the
-    # worker ever races to create it.
+    # Build the metadata pool at startup so a bad DATABASE_URL fails fast. The
+    # `uploads` schema itself is owned by Alembic and applied by the `migrate`
+    # step before this process starts -- not created here.
     store = await get_metadata_store()
     await store.connect()
     yield

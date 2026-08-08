@@ -21,6 +21,10 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY app/ ./app/
+# Alembic config + migrations: the `migrate` compose service runs
+# `alembic upgrade head` from this image before the api/worker start.
+COPY alembic.ini ./
+COPY migrations/ ./migrations/
 
 # chown before switching users so a fresh media_data volume (mounted at
 # /data/media, used only when STORAGE_BACKEND=local) inherits this

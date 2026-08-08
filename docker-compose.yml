@@ -1,4 +1,21 @@
 services:
+  # One-shot schema migration. Runs `alembic upgrade head` to completion, then
+  # exits; api and worker wait for it (service_completed_successfully) so the
+  # `uploads` table always exists before either touches the DB. This replaces
+  # the store's old self-creation of the schema on first pool use.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://filemanager:filemanager@db:5432/filemanager
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+
   api:
     build:
       context: .
@@ -19,6 +36,8 @@ services:
         condition: service_healthy
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   worker:
     build:
@@ -38,6 +57,8 @@ services:
         condition: service_healthy
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   redis:
     image: redis:7-alpine
@@ -104,6 +125,8 @@ services:
         condition: service_healthy
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     profiles: ["test"]
 
   minio:

@@ -45,7 +45,8 @@ and a Redis instance, nothing else.
 - **System-of-record (Postgres)** — every image/video upload is recorded in an
   `uploads` table, owned by the calling token, so uploads are listable and
   deletable (see `GET /files`, `DELETE /files/{id}`). QR codes are returned
-  inline and not recorded.
+  inline and not recorded. The schema is managed by **Alembic** (`migrations/`);
+  a one-shot `migrate` compose service applies it before api/worker start.
 - **Per-token identity** — each bearer token maps to an owner; uploads,
   listing, and deletion are all scoped to that owner (audit trail + isolation).
 - **Idempotent image upload** — re-uploading identical bytes (per owner)
@@ -66,6 +67,9 @@ openssl rand -hex 32   # -> IMGPROXY_SALT
 
 docker compose up --build
 ```
+
+On startup the one-shot `migrate` service runs `alembic upgrade head` to create
+the `uploads` schema; api and worker wait for it to finish before booting.
 
 The API listens on `http://localhost:9000`, imgproxy on `http://localhost:8080`.
 

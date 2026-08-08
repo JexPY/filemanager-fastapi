@@ -61,10 +61,8 @@ Things that will bite you if you don't know them:
   collide or leak across tenants. The record stores `width`/`height` precisely
   so the deduplicated response stays fully shaped (dimensions included) without
   touching the object. Video is *not* deduplicated (async, nondeterministic
-  output) — backlog. The `uploads` schema is a single greenfield
-  `CREATE TABLE IF NOT EXISTS` (columns added across this session's commits, all
-  pre-release); once it's deployed, further changes need real migrations
-  (Alembic) rather than editing the DDL in place.
+  output) — backlog. The `uploads` schema is owned by **Alembic** (see
+  `migrations/`); further changes are new revisions, never in-place DDL edits.
 - **The storage singleton is per-process, not shared state.** `app/services/
   storage.py`'s `_storage` module-level variable is built lazily and
   independently in each OS process (api and worker each get their own). It's
@@ -74,10 +72,12 @@ Things that will bite you if you don't know them:
 - **The metadata store mirrors that singleton pattern exactly.** `app/services/
   metadata.py`'s `_store` (an asyncpg-pool-backed `PostgresMetadataStore`) is
   built lazily per process and closed via `close_metadata_store()`, wired into
-  the same two lifecycle hooks as storage. The `uploads` **table is created on
-  first pool use** (`CREATE TABLE IF NOT EXISTS`, safe from whichever process
-  gets there first); `api`'s lifespan also connects eagerly at startup so a bad
-  `DATABASE_URL` fails fast. **Postgres, not SQLite, on purpose** — two OS
+  the same two lifecycle hooks as storage. The `uploads` **schema is owned by
+  Alembic**, applied by a dedicated one-shot `migrate` compose service
+  (`alembic upgrade head`) that api and worker wait on
+  (`service_completed_successfully`) — the store no longer self-creates it, it
+  just opens the pool. `api`'s lifespan still connects eagerly at startup so a
+  bad `DATABASE_URL` fails fast. **Postgres, not SQLite, on purpose** — two OS
   processes write this store, and SQLite over a shared volume reintroduces the
   cross-process locking fragility this whole per-process-singleton design
   avoids. Unit/route tests never touch a live DB: `tests/fakes.py`'s
@@ -141,11 +141,22 @@ openssl rand -hex 32   # -> IMGPROXY_KEY in .env
 openssl rand -hex 32   # -> IMGPROXY_SALT in .env (must differ from the key)
 # also set FILE_MANAGER_BEARER_TOKENS in .env
 
-# Run the full stack
+# Run the full stack (the one-shot `migrate` service applies Alembic migrations
+# before api/worker start -- they wait on it via service_completed_successfully)
 docker compose up --build
 
 # Run a single worker only
 docker compose up worker
+
+# Database migrations (Alembic owns the `uploads` schema; migrations/ holds the
+# revisions). The `migrate` service runs `alembic upgrade head` automatically on
+# `up`, but you can also drive it directly:
+docker compose run --rm migrate                         # upgrade head (default cmd)
+docker compose run --rm migrate alembic downgrade -1    # roll back one revision
+docker compose run --rm migrate alembic current         # show applied revision
+# Author a new revision after building the migrate image (hand-write the SQL --
+# there is no ORM model layer, so autogenerate is not used):
+docker compose run --rm migrate alembic revision -m "add whatever column"
 
 # Test suite / lint / format / types (all run inside Docker -- there is no
 # supported local Python environment for this project; see below).
@@ -239,10 +250,6 @@ Honest list, not hidden anywhere else:
   delete, but any valid token can still poll any `task_id` (`GET /tasks/{id}`
   isn't owner-scoped — the task result predates the record). No roles/scopes
   beyond "owns its own uploads".
-- **Schema has no migration tooling** — the `uploads` table is one greenfield
-  `CREATE TABLE IF NOT EXISTS`; columns were added in place across this
-  session because nothing was deployed yet. Post-release, add Alembic; do not
-  keep editing the DDL and relying on a volume wipe.
 - **GCS backend is unit-tested only** (mocked client) — no live GCP
   project/credentials in this environment. `local` and `s3` (against real
   MinIO) are verified end to end; the Postgres metadata store is verified

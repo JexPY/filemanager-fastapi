@@ -12,6 +12,9 @@ in-memory fake for tests, plus a per-process singleton driven by
 ``get_metadata_store()`` / ``close_metadata_store()`` and wired into the same
 FastAPI-lifespan / worker-shutdown hooks as storage. Both the api and worker
 processes get their own pool; the worker is the one that marks a video ready.
+The ``uploads`` schema is owned by Alembic (see migrations/), applied by a
+dedicated ``migrate`` step before either process starts -- the store no longer
+self-creates it.
 
 Postgres, not SQLite, on purpose: two OS processes (api and worker) write this
 store, and SQLite over a shared volume reintroduces exactly the cross-process
@@ -91,7 +94,8 @@ class UploadRecord:
 class MetadataStore(ABC):
     @abstractmethod
     async def connect(self) -> None:
-        """Establish the backend and ensure the schema exists. Idempotent."""
+        """Establish the backend (build the pool / fail-fast on a bad DSN).
+        Idempotent. The schema is owned by Alembic, not created here."""
 
     @abstractmethod
     async def ping(self) -> bool:
@@ -152,27 +156,11 @@ class MetadataStore(ABC):
 # Postgres backend (asyncpg)
 # ---------------------------------------------------------------------------
 
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS uploads (
-    id                text PRIMARY KEY,
-    owner             text NOT NULL,
-    kind              text NOT NULL,
-    storage_key       text NOT NULL,
-    content_type      text NOT NULL,
-    size_bytes        bigint NOT NULL,
-    width             integer,
-    height            integer,
-    content_hash      text,
-    status            text NOT NULL,
-    task_id           text,
-    original_filename text,
-    created_at        timestamptz NOT NULL DEFAULT now(),
-    updated_at        timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS uploads_owner_created_idx ON uploads (owner, created_at DESC);
-CREATE INDEX IF NOT EXISTS uploads_owner_hash_idx ON uploads (owner, content_hash);
-CREATE UNIQUE INDEX IF NOT EXISTS uploads_storage_key_idx ON uploads (storage_key);
-"""
+# The `uploads` schema is owned by Alembic (migrations/), NOT self-created here
+# anymore. `alembic upgrade head` runs as a dedicated step before the api and
+# worker start (the compose `migrate` service; wired into CI too). The store
+# assumes the table already exists; `connect()` just builds the pool and
+# fail-fast-validates the DSN. See CLAUDE.md "Non-obvious invariants".
 
 # Column order shared by every RETURNING */SELECT * below, so a Record maps to
 # UploadRecord positionally without naming columns at every call site.
@@ -208,16 +196,14 @@ class PostgresMetadataStore(MetadataStore):
         self._lock = asyncio.Lock()
 
     async def _get_pool(self) -> asyncpg.Pool:
-        # Build the pool once and ensure the schema on the same first touch, so
-        # whichever process (api or worker) reaches the store first creates the
-        # table. CREATE TABLE IF NOT EXISTS makes that safe from both.
+        # Build the pool once, lazily. The schema itself is owned by Alembic and
+        # created by the `migrate` step before either process starts, so nothing
+        # is executed against the DB here beyond opening the pool.
         if self._pool is None:
             async with self._lock:
                 if self._pool is None:
                     try:
                         pool = await asyncpg.create_pool(dsn=self._dsn, min_size=1, max_size=10)
-                        async with pool.acquire() as conn:
-                            await conn.execute(_SCHEMA_SQL)
                     except (asyncpg.PostgresError, OSError) as exc:
                         raise MetadataError("Failed to initialize metadata store") from exc
                     self._pool = pool

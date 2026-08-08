@@ -29,7 +29,10 @@ pytestmark = pytest.mark.pg_integration
 @pytest.fixture
 async def pg_store() -> AsyncIterator[PostgresMetadataStore]:
     store = PostgresMetadataStore(settings.DATABASE_URL)
-    await store.connect()  # builds the pool and ensures the schema
+    # Builds the pool only; the `uploads` schema is applied by the compose
+    # `migrate` service (alembic upgrade head), which the `test` service waits
+    # on before pytest runs.
+    await store.connect()
     conn = await asyncpg.connect(settings.DATABASE_URL)
     try:
         await conn.execute("TRUNCATE uploads")
