@@ -129,6 +129,13 @@ class InMemoryMetadataStore(MetadataStore):
         record = self.records.get(upload_id)
         return record if record is not None and record.owner == owner else None
 
+    async def get_by_task_id(self, task_id: str, owner: str) -> UploadRecord | None:
+        for i in reversed(self._order):
+            record = self.records[i]
+            if record.task_id == task_id and record.owner == owner:
+                return record
+        return None
+
     async def list(
         self, owner: str, *, kind: str | None = None, limit: int = 50, offset: int = 0
     ) -> list[UploadRecord]:

@@ -141,11 +141,15 @@ Things that will bite you if you don't know them:
   process. Changing one does not affect the other. The ffprobe step is
   best-effort — if it can't read a duration, `truncated` is reported `false`
   (unknown) rather than failing the compression.
-- **A bogus/typo'd `task_id` returns 404, not "pending" forever** — this only
-  works because `POST /upload/video` sets a short-lived Redis marker
-  (`app/services/task_status.py`) when it enqueues the task.
-  `is_result_ready()` alone can't tell "still running" apart from "never
-  existed."
+- **`GET /tasks/{id}` is owner-scoped and 404s a bogus/typo'd id, via the
+  uploads record — not a Redis marker.** The route resolves the task through
+  `get_by_task_id(task_id, owner)`: no matching row (unknown id *or* another
+  owner's task) → 404, so existence never leaks across tenants. The row is also
+  the durable proof the task was issued, which distinguishes "still running"
+  (row exists, result not ready → `pending`) from "never existed" (no row →
+  404) — `is_result_ready()` alone cannot. This replaced the old short-lived
+  Redis issuance marker (`app/services/task_status.py`, now removed); the record
+  is created before enqueue, so it's always present and it's durable (no TTL).
 
 ## Commands (all verified this session, against the real stack)
 
@@ -254,10 +258,10 @@ Honest list, not hidden anywhere else:
 - **No webhooks/callbacks** — video-compression completion is poll-only
   (`GET /tasks/{id}`). Now *easy* to add: the `uploads` row already carries
   `owner` + `task_id`, so a completion notification has something to fire at.
-- **Scopes are coarse** — per-token *identity* exists and scopes uploads/list/
-  delete, but any valid token can still poll any `task_id` (`GET /tasks/{id}`
-  isn't owner-scoped — the task result predates the record). No roles/scopes
-  beyond "owns its own uploads".
+- **Scopes are coarse** — per-token *identity* exists and scopes uploads,
+  listing, deletion, **and now `GET /tasks/{id}`** to the owner, but there are
+  no roles/scopes beyond "owns its own uploads" (e.g. no read-only vs.
+  read-write tokens, no admin).
 - **GCS backend is unit-tested only** (mocked client) — no live GCP
   project/credentials in this environment. `local` and `s3` (against real
   MinIO) are verified end to end; the Postgres metadata store is verified

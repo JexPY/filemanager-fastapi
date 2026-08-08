@@ -131,6 +131,12 @@ class MetadataStore(ABC):
     async def get(self, upload_id: str, owner: str) -> UploadRecord | None: ...
 
     @abstractmethod
+    async def get_by_task_id(self, task_id: str, owner: str) -> UploadRecord | None:
+        """Owner-scoped lookup by compression task id, so `GET /tasks/{id}` can
+        reject another owner's task with a 404 (existence never leaks). The row
+        is also the durable proof the task was ever issued."""
+
+    @abstractmethod
     async def list(
         self, owner: str, *, kind: str | None = None, limit: int = 50, offset: int = 0
     ) -> list[UploadRecord]: ...
@@ -303,6 +309,18 @@ class PostgresMetadataStore(MetadataStore):
             )
         except (asyncpg.PostgresError, OSError) as exc:
             raise MetadataError(f"Failed to load upload {upload_id!r}") from exc
+        return _row_to_record(row) if row is not None else None
+
+    async def get_by_task_id(self, task_id: str, owner: str) -> UploadRecord | None:
+        pool = await self._get_pool()
+        try:
+            row = await pool.fetchrow(
+                f"SELECT {_COLUMNS} FROM uploads WHERE task_id = $1 AND owner = $2",
+                task_id,
+                owner,
+            )
+        except (asyncpg.PostgresError, OSError) as exc:
+            raise MetadataError(f"Failed to load task {task_id!r}") from exc
         return _row_to_record(row) if row is not None else None
 
     async def list(

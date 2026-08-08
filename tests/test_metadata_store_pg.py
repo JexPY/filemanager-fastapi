@@ -136,6 +136,23 @@ async def test_find_ready_by_hash(pg_store: PostgresMetadataStore) -> None:
     assert await pg_store.find_ready_by_hash("alice", "missing") is None
 
 
+async def test_get_by_task_id_is_owner_scoped(pg_store: PostgresMetadataStore) -> None:
+    rec = await pg_store.create(
+        owner="alice",
+        kind=KIND_VIDEO,
+        storage_key="raw/videos/v.mp4",
+        content_type="video/mp4",
+        size_bytes=1,
+        status=STATUS_PROCESSING,
+    )
+    await pg_store.set_task_id(rec.id, "task-xyz")
+
+    found = await pg_store.get_by_task_id("task-xyz", "alice")
+    assert found is not None and found.id == rec.id
+    assert await pg_store.get_by_task_id("task-xyz", "bob") is None
+    assert await pg_store.get_by_task_id("nope", "alice") is None
+
+
 async def test_find_active_video_by_hash(pg_store: PostgresMetadataStore) -> None:
     processing = await pg_store.create(
         owner="alice",

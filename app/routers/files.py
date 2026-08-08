@@ -34,7 +34,6 @@ from app.services.metadata import (
 )
 from app.services.qr_generator import generate_qr_image
 from app.services.storage import StorageError, delete_file, get_storage, upload_file
-from app.services.task_status import mark_task_issued, was_task_issued
 from app.tasks import compress_video_task
 
 logger = logging.getLogger(__name__)
@@ -326,9 +325,10 @@ async def upload_video(
             detail="Video processing temporarily unavailable",
         ) from exc
 
-    await mark_task_issued(task.task_id)
-    # Best-effort: the upload is already accepted and the task queued, so a
-    # failure to record the task id must not fail the request.
+    # Link the record to its task id so GET /tasks/{id} can resolve ownership +
+    # existence from the record. Best-effort: the upload is already accepted and
+    # the task queued, so a failure to record the task id must not fail the
+    # request (the poller would just 404 until a retry sets it).
     with contextlib.suppress(MetadataError):
         await store.set_task_id(record.id, task.task_id)
 
@@ -340,15 +340,27 @@ async def upload_video(
     }
 
 
-@router.get("/tasks/{task_id}", dependencies=[Depends(verify_token)])
-async def get_task_status(task_id: str):
+@router.get("/tasks/{task_id}")
+async def get_task_status(task_id: str, owner: str = Depends(verify_token)):
+    # Owner-scoped via the uploads record: a task_id that isn't this owner's
+    # (or never existed) is a 404, so no one can poll another owner's task and
+    # existence never leaks across tenants. The record is also the durable proof
+    # the task was issued -- it distinguishes "still running" (record exists,
+    # result not ready -> pending) from "never existed" (no record -> 404),
+    # which is_result_ready alone cannot.
+    store = await get_metadata_store()
+    try:
+        record = await store.get_by_task_id(task_id, owner)
+    except MetadataError as exc:
+        logger.error("Failed to resolve task %s: %s", task_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown task id")
+
     is_ready = await broker.result_backend.is_result_ready(task_id)
     if not is_ready:
-        # is_result_ready alone can't tell "still running" apart from "this
-        # task id never existed" -- both look like "not ready". The marker
-        # set at enqueue time (mark_task_issued) resolves the ambiguity.
-        if not await was_task_issued(task_id):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown task id")
         return {"task_id": task_id, "status": "pending"}
 
     task_result = await broker.result_backend.get_result(task_id)

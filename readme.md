@@ -137,7 +137,7 @@ startup (`Settings()` validation) if left unset.
 | `IMGPROXY_BASE_URL` | | prefixed onto signed URLs so they're complete/fetchable |
 | `FILE_MANAGER_BEARER_TOKENS` | ✅ always | comma-separated; each entry is `secret` (owner = `tok_<hash>`) or `label:secret` (owner = label) |
 | `VIDEO_MAX_DURATION_SECONDS` | | caps compressed output duration (default 60s); longer inputs are truncated and flagged `truncated: true` in the task result + `uploads` row |
-| `MAX_IMAGE_UPLOAD_BYTES`, `MAX_VIDEO_UPLOAD_BYTES`, `MAX_IMAGE_PIXELS`, `MAX_QR_CONTENT_LENGTH`, `FFMPEG_TIMEOUT_SECONDS`, `TASK_STATUS_TTL_SECONDS` | | sane defaults, see `app/config.py` |
+| `MAX_IMAGE_UPLOAD_BYTES`, `MAX_VIDEO_UPLOAD_BYTES`, `MAX_IMAGE_PIXELS`, `MAX_QR_CONTENT_LENGTH`, `FFMPEG_TIMEOUT_SECONDS` | | sane defaults, see `app/config.py` |
 
 ## Development
 
