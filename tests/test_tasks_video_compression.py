@@ -1,5 +1,8 @@
+from typing import Any
+
 import pytest
 
+import app.tasks as tasks_module
 from app.config import settings
 from app.services.metadata import (
     KIND_VIDEO,
@@ -14,7 +17,9 @@ from tests.fakes import InMemoryMetadataStore, InMemoryStorageBackend
 OWNER = "alice"
 
 
-async def _seed_processing(store: InMemoryMetadataStore, raw_key: str) -> str:
+async def _seed_processing(
+    store: InMemoryMetadataStore, raw_key: str, callback_url: str | None = None
+) -> str:
     record = await store.create(
         owner=OWNER,
         kind=KIND_VIDEO,
@@ -22,8 +27,22 @@ async def _seed_processing(store: InMemoryMetadataStore, raw_key: str) -> str:
         content_type="video/mp4",
         size_bytes=1,
         status=STATUS_PROCESSING,
+        callback_url=callback_url,
     )
     return record.id
+
+
+@pytest.fixture
+def captured_webhooks(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Capture deliver_webhook calls instead of making a real HTTP request."""
+    calls: list[dict[str, Any]] = []
+
+    async def fake_deliver(**kwargs: Any) -> bool:
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(tasks_module, "deliver_webhook", fake_deliver)
+    return calls
 
 
 async def test_successful_compression_uploads_output_marks_ready_and_deletes_raw(
@@ -130,6 +149,62 @@ async def test_ffmpeg_timeout_marks_record_failed_and_deletes_raw(
     assert record is not None and record.status == STATUS_FAILED
     assert raw_key not in fake_storage.objects
     assert raw_key in fake_storage.deleted_keys
+
+
+async def test_success_fires_completed_webhook_when_callback_set(
+    fake_storage: InMemoryStorageBackend,
+    fake_metadata: InMemoryMetadataStore,
+    captured_webhooks: list[dict[str, Any]],
+) -> None:
+    raw_key = "raw/videos/cb.mp4"
+    fake_storage.objects[raw_key] = fixture_bytes("tiny.mp4")
+    upload_id = await _seed_processing(fake_metadata, raw_key, callback_url="https://h/hook")
+
+    await compress_video_task(
+        raw_storage_key=raw_key, original_filename="cb.mp4", upload_id=upload_id
+    )
+
+    assert len(captured_webhooks) == 1
+    call = captured_webhooks[0]
+    assert call["url"] == "https://h/hook"
+    assert call["event"] == "video.completed"
+    assert call["delivery_id"] == upload_id
+    assert call["data"]["status"] == STATUS_READY
+
+
+async def test_failure_fires_failed_webhook_when_callback_set(
+    fake_storage: InMemoryStorageBackend,
+    fake_metadata: InMemoryMetadataStore,
+    captured_webhooks: list[dict[str, Any]],
+) -> None:
+    raw_key = "raw/videos/cbfail.mp4"
+    fake_storage.objects[raw_key] = b"not a video"
+    upload_id = await _seed_processing(fake_metadata, raw_key, callback_url="https://h/hook")
+
+    with pytest.raises(RuntimeError, match="FFmpeg failed"):
+        await compress_video_task(
+            raw_storage_key=raw_key, original_filename="cbfail.mp4", upload_id=upload_id
+        )
+
+    assert len(captured_webhooks) == 1
+    assert captured_webhooks[0]["event"] == "video.failed"
+    assert captured_webhooks[0]["data"]["status"] == STATUS_FAILED
+
+
+async def test_no_webhook_when_no_callback_url(
+    fake_storage: InMemoryStorageBackend,
+    fake_metadata: InMemoryMetadataStore,
+    captured_webhooks: list[dict[str, Any]],
+) -> None:
+    raw_key = "raw/videos/nocb.mp4"
+    fake_storage.objects[raw_key] = fixture_bytes("tiny.mp4")
+    upload_id = await _seed_processing(fake_metadata, raw_key)  # no callback_url
+
+    await compress_video_task(
+        raw_storage_key=raw_key, original_filename="nocb.mp4", upload_id=upload_id
+    )
+
+    assert captured_webhooks == []
 
 
 async def test_upload_deleted_midflight_discards_output_instead_of_orphaning_it(

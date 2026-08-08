@@ -66,6 +66,7 @@ class UploadRecord:
     original_filename: str | None
     duration_seconds: float | None
     truncated: bool
+    callback_url: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -85,6 +86,7 @@ class UploadRecord:
             "original_filename": self.original_filename,
             "duration_seconds": self.duration_seconds,
             "truncated": self.truncated,
+            "callback_url": self.callback_url,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -120,6 +122,7 @@ class MetadataStore(ABC):
         content_hash: str | None = None,
         task_id: str | None = None,
         original_filename: str | None = None,
+        callback_url: str | None = None,
     ) -> UploadRecord: ...
 
     @abstractmethod
@@ -193,7 +196,7 @@ class MetadataStore(ABC):
 _COLUMNS = (
     "id, owner, kind, storage_key, content_type, size_bytes, width, height, "
     "content_hash, status, task_id, original_filename, duration_seconds, truncated, "
-    "created_at, updated_at"
+    "callback_url, created_at, updated_at"
 )
 
 
@@ -213,6 +216,7 @@ def _row_to_record(row: asyncpg.Record) -> UploadRecord:
         original_filename=row["original_filename"],
         duration_seconds=row["duration_seconds"],
         truncated=row["truncated"],
+        callback_url=row["callback_url"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -263,14 +267,17 @@ class PostgresMetadataStore(MetadataStore):
         content_hash: str | None = None,
         task_id: str | None = None,
         original_filename: str | None = None,
+        callback_url: str | None = None,
     ) -> UploadRecord:
         pool = await self._get_pool()
         upload_id = uuid.uuid4().hex
         try:
             row = await pool.fetchrow(
                 f"INSERT INTO uploads (id, owner, kind, storage_key, content_type, "
-                f"size_bytes, width, height, content_hash, status, task_id, original_filename) "
-                f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING {_COLUMNS}",
+                f"size_bytes, width, height, content_hash, status, task_id, original_filename, "
+                f"callback_url) "
+                f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) "
+                f"RETURNING {_COLUMNS}",
                 upload_id,
                 owner,
                 kind,
@@ -283,6 +290,7 @@ class PostgresMetadataStore(MetadataStore):
                 status,
                 task_id,
                 original_filename,
+                callback_url,
             )
         except (asyncpg.PostgresError, OSError) as exc:
             raise MetadataError(f"Failed to record upload {storage_key!r}") from exc

@@ -9,10 +9,28 @@ import aiofiles.os
 
 from app.broker import broker
 from app.config import settings
-from app.services.metadata import MetadataError, get_metadata_store
+from app.services.metadata import MetadataError, UploadRecord, get_metadata_store
 from app.services.storage import StorageError, delete_file, download_file, get_storage, upload_file
+from app.services.webhooks import deliver_webhook
 
 logger = logging.getLogger(__name__)
+
+
+async def _fire_webhook(record: UploadRecord, event: str) -> None:
+    """Best-effort completion webhook for a video record. No callback_url -> a
+    no-op. deliver_webhook never raises, but guard anyway so nothing here can
+    ever affect the task's own outcome."""
+    if not record.callback_url:
+        return
+    try:
+        await deliver_webhook(
+            url=record.callback_url,
+            event=event,
+            data=record.to_public(),
+            delivery_id=record.id,
+        )
+    except Exception:  # noqa: BLE001 -- delivery must never affect the task result
+        logger.exception("Unexpected error delivering webhook for upload %s", record.id)
 
 
 async def _probe_duration_seconds(input_path: str) -> float | None:
@@ -137,6 +155,10 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
         backend = await get_storage()
         presigned_url = await backend.presigned_get_url(obj.key)
 
+        # Push completion to the client's callback (if any), so they don't have
+        # to poll GET /tasks/{id}. Best-effort; never affects the task result.
+        await _fire_webhook(record, "video.completed")
+
         return {
             "status": "success",
             "url": presigned_url or obj.url,
@@ -152,9 +174,13 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
     except Exception:
         # Any failure (download, ffmpeg, upload, mark_ready) marks the record
         # `failed` so GET /files reflects it -- best-effort, then re-raise so the
-        # TaskIQ result is an error too (GET /tasks/{id} -> failed).
+        # TaskIQ result is an error too (GET /tasks/{id} -> failed). Fire a
+        # `video.failed` webhook too, so a callback client learns about failures.
+        failed_record: UploadRecord | None = None
         with contextlib.suppress(MetadataError):
-            await store.mark_failed(upload_id)
+            failed_record = await store.mark_failed(upload_id)
+        if failed_record is not None:
+            await _fire_webhook(failed_record, "video.failed")
         raise
 
     finally:

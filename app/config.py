@@ -80,6 +80,30 @@ class Settings(BaseSettings):
     # FFMPEG_TIMEOUT_SECONDS (wall-clock kill).
     VIDEO_MAX_DURATION_SECONDS: int = Field(default=60)
 
+    # --- Webhooks (video-completion push delivery) -----------------------
+    # Callbacks are OFF unless BOTH a signing secret and an allow-list of target
+    # hosts are set. A client passes `callback_url` on POST /upload/video; the
+    # worker POSTs a signed payload there when compression finishes.
+    #
+    # HMAC-SHA256 secret the worker signs each delivery with (X-Webhook-Signature
+    # header). Receivers recompute it to verify authenticity. No default -- a
+    # blank value disables webhooks.
+    WEBHOOK_SIGNING_SECRET: str = Field(default="")
+    # Comma-separated exact hostnames permitted as callback targets (SSRF egress
+    # control). Blank disables webhooks. A callback_url whose host isn't listed is
+    # rejected at upload time with 400.
+    WEBHOOK_ALLOWED_HOSTS: str = Field(default="")
+    # Permit http:// callbacks. Default https-only.
+    WEBHOOK_ALLOW_INSECURE_HTTP: bool = Field(default=False)
+    # Permit callback hosts that resolve to private/loopback/link-local IPs. Off
+    # by default (SSRF guard); turn on only for in-network receivers in dev/test.
+    WEBHOOK_ALLOW_PRIVATE_IPS: bool = Field(default=False)
+    # Per-attempt HTTP timeout, total delivery attempts, and the exponential
+    # backoff base between attempts (delay = base * 2**(attempt-1), capped).
+    WEBHOOK_TIMEOUT_SECONDS: float = Field(default=10.0)
+    WEBHOOK_MAX_ATTEMPTS: int = Field(default=4)
+    WEBHOOK_RETRY_BACKOFF_SECONDS: float = Field(default=1.0)
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @field_validator("STORAGE_BACKEND")
@@ -146,6 +170,18 @@ class Settings(BaseSettings):
     @property
     def valid_tokens(self) -> list[str]:
         return list(self.token_identities)
+
+    @property
+    def webhook_allowed_hosts(self) -> frozenset[str]:
+        """Lower-cased set of hostnames permitted as webhook callback targets."""
+        return frozenset(
+            h.strip().lower() for h in self.WEBHOOK_ALLOWED_HOSTS.split(",") if h.strip()
+        )
+
+    @property
+    def webhooks_enabled(self) -> bool:
+        """Callbacks require BOTH a signing secret and a non-empty host allow-list."""
+        return bool(self.WEBHOOK_SIGNING_SECRET) and bool(self.webhook_allowed_hosts)
 
 
 settings = Settings()

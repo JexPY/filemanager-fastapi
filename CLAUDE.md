@@ -53,6 +53,23 @@ Things that will bite you if you don't know them:
   If `mark_ready` finds no row (the owner `DELETE`d the upload mid-compression)
   the worker discards the compressed object it just wrote instead of orphaning
   it. QR codes are returned inline and never recorded.
+- **Video completion can push a signed webhook, and the SSRF guard lives in the
+  api, not the worker.** A client may pass `callback_url` on `POST /upload/video`
+  (stored in the `uploads.callback_url` column). The **api** admits it at upload
+  time (`app/services/webhooks.py::validate_callback_url`): https-only unless
+  `WEBHOOK_ALLOW_INSECURE_HTTP`, host must be on the explicit
+  `WEBHOOK_ALLOWED_HOSTS` allow-list, and (unless `WEBHOOK_ALLOW_PRIVATE_IPS`)
+  must not resolve to a private/loopback/link-local address — a bad URL is a
+  `400` before anything is staged. The **worker** then POSTs the record's
+  `to_public()` on the terminal state (`video.completed` / `video.failed`),
+  HMAC-SHA256-signed over `timestamp.body` (`X-Webhook-Signature`), with
+  `X-Webhook-Id` = the upload id as a stable idempotency key across retries.
+  Delivery (`deliver_webhook`) is **best-effort and never raises** — it can't
+  fail or mask the compression result. **Webhooks are off unless BOTH
+  `WEBHOOK_SIGNING_SECRET` and `WEBHOOK_ALLOWED_HOSTS` are set**
+  (`settings.webhooks_enabled`); with them unset, any `callback_url` is a 400.
+  The allow-list is the authoritative egress control; the IP check is defence in
+  depth (a DNS-rebind of an allow-listed host is out of scope).
 - **Image uploads are idempotent per owner, keyed on the input's sha256.**
   `POST /upload/image` hashes the *input* bytes (in a threadpool — it's CPU
   work) and, on a `(owner, content_hash)` hit against a `ready` row, returns the
@@ -255,9 +272,12 @@ idempotency) are the load-bearing details.
 
 Honest list, not hidden anywhere else:
 
-- **No webhooks/callbacks** — video-compression completion is poll-only
-  (`GET /tasks/{id}`). Now *easy* to add: the `uploads` row already carries
-  `owner` + `task_id`, so a completion notification has something to fire at.
+- **Webhook delivery is fire-and-log, not a durable queue** — an exhausted
+  delivery (all `WEBHOOK_MAX_ATTEMPTS` failed) is only logged (`logger.error`),
+  not persisted for later replay. A real dead-letter queue + a manual redelivery
+  endpoint is the next step. Also: delivery is awaited inline in the worker task,
+  so a slow/dead receiver ties up that worker slot for up to the retry budget
+  (bounded by the per-attempt timeout × attempts + backoff).
 - **Scopes are coarse** — per-token *identity* exists and scopes uploads,
   listing, deletion, **and now `GET /tasks/{id}`** to the owner, but there are
   no roles/scopes beyond "owns its own uploads" (e.g. no read-only vs.

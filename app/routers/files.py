@@ -34,6 +34,7 @@ from app.services.metadata import (
 )
 from app.services.qr_generator import generate_qr_image
 from app.services.storage import StorageError, delete_file, get_storage, upload_file
+from app.services.webhooks import WebhookValidationError, validate_callback_url
 from app.tasks import compress_video_task
 
 logger = logging.getLogger(__name__)
@@ -237,9 +238,18 @@ async def upload_video(
     request: Request,
     response: Response,
     file: UploadFile = File(...),
+    callback_url: str | None = Form(default=None),
     owner: str = Depends(verify_token),
 ):
     file_data = await _read_capped(file, request, settings.MAX_VIDEO_UPLOAD_BYTES)
+
+    # Admit the optional webhook target up front (before staging/enqueue) so a
+    # bad or disallowed URL is a clean 400, not a silent non-delivery later.
+    if callback_url is not None:
+        try:
+            callback_url = validate_callback_url(callback_url)
+        except WebhookValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     # Idempotency (video): hash the raw input bytes and, on a match against this
     # owner's existing `ready`-or-`processing` video, skip staging + enqueue and
@@ -295,6 +305,7 @@ async def upload_video(
             status=STATUS_PROCESSING,
             content_hash=content_hash,
             original_filename=original_filename,
+            callback_url=callback_url,
         )
     except MetadataError as exc:
         logger.error("Failed to record video upload %s: %s", raw_key, exc)
