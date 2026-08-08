@@ -136,6 +136,38 @@ async def test_find_ready_by_hash(pg_store: PostgresMetadataStore) -> None:
     assert await pg_store.find_ready_by_hash("alice", "missing") is None
 
 
+async def test_find_active_video_by_hash(pg_store: PostgresMetadataStore) -> None:
+    processing = await pg_store.create(
+        owner="alice",
+        kind=KIND_VIDEO,
+        storage_key="raw/videos/p.mp4",
+        content_type="video/mp4",
+        size_bytes=1,
+        status=STATUS_PROCESSING,
+        content_hash="vhash",
+    )
+    # A still-processing video matches (attach to the in-flight job).
+    found = await pg_store.find_active_video_by_hash("alice", "vhash")
+    assert found is not None and found.id == processing.id
+
+    # Owner-scoped, and an image with the same hash is not a video match.
+    assert await pg_store.find_active_video_by_hash("bob", "vhash") is None
+    await pg_store.create(
+        owner="alice",
+        kind=KIND_IMAGE,
+        storage_key="images/i.webp",
+        content_type="image/webp",
+        size_bytes=1,
+        status=STATUS_READY,
+        content_hash="ihash",
+    )
+    assert await pg_store.find_active_video_by_hash("alice", "ihash") is None
+
+    # A failed video does NOT match -- a bad input can be retried.
+    await pg_store.mark_failed(processing.id)
+    assert await pg_store.find_active_video_by_hash("alice", "vhash") is None
+
+
 async def test_video_lifecycle_and_deleted_midflight(pg_store: PostgresMetadataStore) -> None:
     rec = await pg_store.create(
         owner="alice",

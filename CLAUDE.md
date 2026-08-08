@@ -60,9 +60,20 @@ Things that will bite you if you don't know them:
   of the input, not the stored WebP; dedup is owner-scoped so hashes never
   collide or leak across tenants. The record stores `width`/`height` precisely
   so the deduplicated response stays fully shaped (dimensions included) without
-  touching the object. Video is *not* deduplicated (async, nondeterministic
-  output) — backlog. The `uploads` schema is owned by **Alembic** (see
-  `migrations/`); further changes are new revisions, never in-place DDL edits.
+  touching the object.
+- **Video uploads are also idempotent per owner, keyed on the raw input's
+  sha256** — but the match set differs from images. `POST /upload/video` hashes
+  the raw bytes and looks for this owner's latest *video* row that is `ready`
+  **or** still `processing` (`find_active_video_by_hash`): a `ready` hit returns
+  `200 {status:"duplicate"}` (already available), a `processing` hit returns
+  `202 {status:"duplicate", record_status:"processing"}` (attach to the
+  in-flight job — don't compress the same bytes twice). `failed` rows are
+  excluded so a bad input can be retried. Dedup is best-effort like images: two
+  *simultaneous* identical uploads can still both slip through (no unique
+  constraint), which is acceptable. The hash keys the *input* (the compressed
+  output is nondeterministic), stored in the same `content_hash` column images
+  use. The `uploads` schema is owned by **Alembic** (see `migrations/`); further
+  changes are new revisions, never in-place DDL edits.
 - **The storage singleton is per-process, not shared state.** `app/services/
   storage.py`'s `_storage` module-level variable is built lazily and
   independently in each OS process (api and worker each get their own). It's
@@ -243,9 +254,6 @@ Honest list, not hidden anywhere else:
 - **No webhooks/callbacks** — video-compression completion is poll-only
   (`GET /tasks/{id}`). Now *easy* to add: the `uploads` row already carries
   `owner` + `task_id`, so a completion notification has something to fire at.
-- **Video is not deduplicated** — idempotency is images-only (a video's
-  compressed output is async and nondeterministic). Would key on the raw
-  input hash per owner.
 - **Scopes are coarse** — per-token *identity* exists and scopes uploads/list/
   delete, but any valid token can still poll any `task_id` (`GET /tasks/{id}`
   isn't owner-scoped — the task result predates the record). No roles/scopes

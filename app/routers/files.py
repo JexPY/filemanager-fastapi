@@ -236,10 +236,35 @@ async def upload_image(
 @router.post("/upload/video", status_code=status.HTTP_202_ACCEPTED)
 async def upload_video(
     request: Request,
+    response: Response,
     file: UploadFile = File(...),
     owner: str = Depends(verify_token),
 ):
     file_data = await _read_capped(file, request, settings.MAX_VIDEO_UPLOAD_BYTES)
+
+    # Idempotency (video): hash the raw input bytes and, on a match against this
+    # owner's existing `ready`-or-`processing` video, skip staging + enqueue and
+    # return the existing job. `ready` -> 200 (already available); `processing`
+    # -> 202 (attach to the in-flight compression, don't compress twice). Keyed
+    # on the *raw input*, since the compressed output is nondeterministic. A
+    # lookup failure must not fail the upload -- fall through and process.
+    content_hash = await asyncio.to_thread(_sha256_hex, file_data)
+    store = await get_metadata_store()
+    try:
+        duplicate = await store.find_active_video_by_hash(owner, content_hash)
+    except MetadataError as exc:
+        logger.warning("Video idempotency lookup failed (processing normally): %s", exc)
+        duplicate = None
+    if duplicate is not None:
+        response.status_code = (
+            status.HTTP_200_OK if duplicate.status == STATUS_READY else status.HTTP_202_ACCEPTED
+        )
+        return {
+            "status": "duplicate",
+            "id": duplicate.id,
+            "task_id": duplicate.task_id,
+            "record_status": duplicate.status,
+        }
 
     # Stage the raw upload in storage; only its key travels through Redis.
     original_filename = file.filename or "video.mp4"
@@ -259,8 +284,8 @@ async def upload_video(
     # Record the upload as `processing` BEFORE enqueuing, so the worker (which
     # marks it ready by id) can never observe the row before it exists. The
     # raw key is the current authoritative object; the worker swaps it for the
-    # compressed key on success.
-    store = await get_metadata_store()
+    # compressed key on success. The content hash is stored so a later identical
+    # upload dedupes (find_active_video_by_hash above).
     try:
         record = await store.create(
             owner=owner,
@@ -269,6 +294,7 @@ async def upload_video(
             content_type=file.content_type or "application/octet-stream",
             size_bytes=len(file_data),
             status=STATUS_PROCESSING,
+            content_hash=content_hash,
             original_filename=original_filename,
         )
     except MetadataError as exc:

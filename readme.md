@@ -51,9 +51,11 @@ and a Redis instance, nothing else.
   a one-shot `migrate` compose service applies it before api/worker start.
 - **Per-token identity** — each bearer token maps to an owner; uploads,
   listing, and deletion are all scoped to that owner (audit trail + isolation).
-- **Idempotent image upload** — re-uploading identical bytes (per owner)
-  returns the existing record instead of storing a duplicate, keyed on the
-  input's SHA-256.
+- **Idempotent upload (image + video)** — re-uploading identical bytes (per
+  owner) returns the existing record instead of storing/processing a duplicate,
+  keyed on the input's SHA-256. For video, a still-`processing` match attaches to
+  the in-flight compression (202) rather than compressing the same input twice;
+  a `ready` match returns 200.
 - **`/healthz`, `/readyz`** — liveness and dependency-readiness probes
   (`/readyz` checks Redis, storage, and the Postgres metadata store).
 

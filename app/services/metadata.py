@@ -143,6 +143,14 @@ class MetadataStore(ABC):
     async def find_ready_by_hash(self, owner: str, content_hash: str) -> UploadRecord | None: ...
 
     @abstractmethod
+    async def find_active_video_by_hash(self, owner: str, content_hash: str) -> UploadRecord | None:
+        """Latest video record for this owner+hash that is still usable -- `ready`
+        or still `processing` -- for video-upload idempotency. Excludes `failed`
+        rows so a previously-failed identical input can be retried, and a
+        still-`processing` hit lets a duplicate upload attach to the in-flight
+        job instead of compressing the same bytes twice."""
+
+    @abstractmethod
     async def mark_ready(
         self,
         upload_id: str,
@@ -339,6 +347,21 @@ class PostgresMetadataStore(MetadataStore):
             )
         except (asyncpg.PostgresError, OSError) as exc:
             raise MetadataError("Failed to look up upload by hash") from exc
+        return _row_to_record(row) if row is not None else None
+
+    async def find_active_video_by_hash(self, owner: str, content_hash: str) -> UploadRecord | None:
+        pool = await self._get_pool()
+        try:
+            row = await pool.fetchrow(
+                f"SELECT {_COLUMNS} FROM uploads "
+                f"WHERE owner = $1 AND content_hash = $2 AND kind = '{KIND_VIDEO}' "
+                f"AND status IN ('{STATUS_READY}', '{STATUS_PROCESSING}') "
+                f"ORDER BY created_at DESC LIMIT 1",
+                owner,
+                content_hash,
+            )
+        except (asyncpg.PostgresError, OSError) as exc:
+            raise MetadataError("Failed to look up video by hash") from exc
         return _row_to_record(row) if row is not None else None
 
     async def mark_ready(

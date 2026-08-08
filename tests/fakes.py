@@ -6,7 +6,9 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 from app.services.metadata import (
+    KIND_VIDEO,
     STATUS_FAILED,
+    STATUS_PROCESSING,
     STATUS_READY,
     MetadataStore,
     UploadRecord,
@@ -152,6 +154,18 @@ class InMemoryMetadataStore(MetadataStore):
                 record.owner == owner
                 and record.content_hash == content_hash
                 and record.status == STATUS_READY
+            ):
+                return record
+        return None
+
+    async def find_active_video_by_hash(self, owner: str, content_hash: str) -> UploadRecord | None:
+        for i in reversed(self._order):
+            record = self.records[i]
+            if (
+                record.owner == owner
+                and record.content_hash == content_hash
+                and record.kind == KIND_VIDEO
+                and record.status in (STATUS_READY, STATUS_PROCESSING)
             ):
                 return record
         return None
