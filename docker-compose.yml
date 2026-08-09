@@ -16,12 +16,29 @@ services:
       db:
         condition: service_healthy
 
+  # nginx is the entry proxy on :9000. Clients (and the local-playback
+  # verification) go through it, NOT the api directly -- only nginx interprets
+  # the app's X-Accel-Redirect and serves the video bytes. The api's own host
+  # port (9001) is kept for direct debugging.
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "9000:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Read-only: nginx serves bytes but never writes the media volume.
+      - media_data:/data/media:ro
+    depends_on:
+      - api
+
   api:
     build:
       context: .
       dockerfile: Dockerfile.api
+    # Behind nginx (:9000). Direct host access on 9001 is for debugging only and
+    # does NOT serve local video (X-Accel-Redirect needs nginx).
     ports:
-      - "9000:80"
+      - "9001:80"
     env_file:
       - .env
     environment:
@@ -29,6 +46,9 @@ services:
       - DATABASE_URL=postgresql://filemanager:filemanager@db:5432/filemanager
       - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
       - LOCAL_STORAGE_DIR=/data/media
+      # xaccel -> local video playback is served by nginx (sendfile + Range),
+      # app out of the byte path. Use `direct` only for a no-nginx dev setup.
+      - LOCAL_MEDIA_SERVE_MODE=${LOCAL_MEDIA_SERVE_MODE:-xaccel}
     volumes:
       - media_data:/data/media
     depends_on:
