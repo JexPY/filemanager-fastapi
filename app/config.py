@@ -79,6 +79,19 @@ class Settings(BaseSettings):
     # *wall-clock processing time*.
     FFMPEG_TIMEOUT_SECONDS: int = Field(default=120)
 
+    # --- Video playback -------------------------------------------------
+    # TTL (seconds) for the freshly-minted signed GET URL the /files/{id}/download
+    # endpoint 302s to on the s3/gcp backends. Size it to a generous viewing
+    # session: the player caches the *resolved* signed URL, so a seek after this
+    # elapses can hit an expired signature (see readme "Playback & visibility").
+    # Default 6h. GCS clamps its own V4 cap at 7 days.
+    VIDEO_PLAYBACK_URL_TTL_SECONDS: int = Field(default=21600)
+    # How the `local` backend serves video bytes: `xaccel` (prod -- return an
+    # X-Accel-Redirect that nginx serves with sendfile + native Range, app out of
+    # the byte path) or `direct` (dev without nginx -- Starlette FileResponse,
+    # which also honours Range for on-disk files).
+    LOCAL_MEDIA_SERVE_MODE: str = Field(default="xaccel")
+
     # Caps compressed *output* duration (ffmpeg `-t`). An input longer than this
     # is truncated; the worker ffprobes the input and reports `truncated`/
     # `duration_seconds` in the task result and on the uploads row, so the caller
@@ -120,6 +133,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"STORAGE_BACKEND must be one of {sorted(ALLOWED_STORAGE_BACKENDS)}, got {v!r}"
             )
+        return normalized
+
+    @field_validator("LOCAL_MEDIA_SERVE_MODE")
+    @classmethod
+    def _validate_local_media_serve_mode(cls, v: str) -> str:
+        normalized = v.strip().lower()
+        if normalized not in {"xaccel", "direct"}:
+            raise ValueError(f"LOCAL_MEDIA_SERVE_MODE must be 'xaccel' or 'direct', got {v!r}")
         return normalized
 
     @model_validator(mode="after")

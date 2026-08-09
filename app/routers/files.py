@@ -6,6 +6,7 @@ import logging
 import re
 import secrets
 import uuid
+from pathlib import Path
 
 from fastapi import (
     APIRouter,
@@ -18,7 +19,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -120,6 +121,76 @@ def _public_url(path: str) -> str:
     client prefixes its own origin."""
     base = settings.PUBLIC_BASE_URL.rstrip("/")
     return f"{base}{path}" if base else path
+
+
+def _storage_public_base_configured() -> bool:
+    """Whether the active backend has a public base URL set -- i.e. a stable,
+    embeddable/cacheable object URL (a CDN domain or a deliberately public
+    bucket/prefix) exists for `public` media. Without one, `public` playback
+    falls back to the same signed-URL delivery as `private` (still tokenless)."""
+    backend = settings.STORAGE_BACKEND
+    if backend == "local":
+        return bool(settings.LOCAL_PUBLIC_BASE_URL)
+    if backend == "s3":
+        return bool(settings.S3_PUBLIC_BASE_URL)
+    if backend == "gcp":
+        return bool(settings.GCS_PUBLIC_BASE_URL)
+    return False
+
+
+def _assert_safe_media_key(storage_key: str) -> None:
+    """The storage key is UUID-based and already sanitized on write, but it's
+    interpolated into an nginx-honoured X-Accel-Redirect / an on-disk path, so
+    treat it as untrusted here: no traversal, no absolute paths."""
+    if ".." in storage_key or storage_key.startswith("/"):
+        raise StorageError(f"Unsafe storage key for playback: {storage_key!r}")
+
+
+def _xaccel_response(storage_key: str) -> Response:
+    """local + xaccel: hand the byte transfer to nginx. The empty-body response's
+    X-Accel-Redirect points at nginx's `internal;` /internal-media/ location,
+    which serves the file with sendfile (zero-copy) + native Range. The location
+    being `internal;` is the load-bearing security property -- it can't be
+    requested directly, so this route's auth is never bypassed."""
+    _assert_safe_media_key(storage_key)
+    return Response(
+        status_code=status.HTTP_200_OK,
+        headers={
+            "X-Accel-Redirect": f"/internal-media/{storage_key}",
+            "Content-Type": "video/mp4",
+            "Content-Disposition": "inline",
+        },
+    )
+
+
+def _local_file_response(storage_key: str) -> Response:
+    """local + direct (dev without nginx): Starlette FileResponse, which honours
+    Range for on-disk files. Prod uses xaccel; this keeps local dev playable."""
+    _assert_safe_media_key(storage_key)
+    path = Path(settings.LOCAL_STORAGE_DIR) / storage_key
+    if not path.is_file():
+        raise StorageError(f"Object not found: {storage_key!r}")
+    return FileResponse(path, media_type="video/mp4")
+
+
+async def resolve_playback(storage_key: str) -> Response:
+    """Resolve a video's byte path, keyed on STORAGE_BACKEND (mirrors
+    imgproxy.build_source_url's keying): local -> nginx X-Accel (or FileResponse
+    in dev); s3/gcp -> 302 to a freshly-minted signed GET URL sized to a viewing
+    session. Range works in every path and the app stays out of the byte path
+    (nginx or the object store moves the bytes). Raises StorageError (-> 502) if
+    the backend can't produce a usable URL."""
+    backend_name = settings.STORAGE_BACKEND
+    if backend_name == "local":
+        if settings.LOCAL_MEDIA_SERVE_MODE == "direct":
+            return _local_file_response(storage_key)
+        return _xaccel_response(storage_key)
+
+    backend = await get_storage()
+    signed = await backend.presigned_get_url(storage_key, settings.VIDEO_PLAYBACK_URL_TTL_SECONDS)
+    if not signed:
+        raise StorageError(f"Backend {backend_name!r} cannot sign a playback URL")
+    return RedirectResponse(url=signed, status_code=status.HTTP_302_FOUND)
 
 
 @router.post("/generate/qrcode", dependencies=[Depends(verify_token)])
@@ -552,6 +623,103 @@ async def revoke_share_link(file_id: str, owner: str = Depends(verify_token)):
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
         ) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _resolve_owner_optional(credentials: HTTPAuthorizationCredentials | None) -> str | None:
+    """Owner identity for a bearer token if one was presented and valid, else None.
+    The download endpoint needs this (not the verify_token dependency) because a
+    `public` video is fetchable with no token at all."""
+    if credentials is None:
+        return None
+    token = credentials.credentials
+    matched_owner: str | None = None
+    for secret, owner in settings.token_identities.items():
+        if hmac.compare_digest(token, secret):
+            matched_owner = owner
+    return matched_owner
+
+
+@router.get("/files/{file_id}/download")
+async def download_file_endpoint(
+    file_id: str,
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+):
+    """The permanent, backend-agnostic playback URL -- the one clients embed.
+    Visibility decides the auth *and* the URL form:
+
+    * `public` -> if a public base URL is configured for the backend, 302 to the
+      stable `public_url(key)` (no token, cacheable behind a CDN, app out of the
+      read path); otherwise fall back to the signed-URL/resolver path, still
+      tokenless. No per-request presigning for public media -- a unique signature
+      would defeat CDN caching.
+    * `private` -> requires the owner bearer; a non-owner or missing token gets
+      404 (not 403), matching the rest of the owner-scoping so existence never
+      leaks. Then resolved per backend (local X-Accel / s3 presigned / gcs signed).
+
+    Video-scoped (kind != video -> 400). The API only *issues* the redirect/header;
+    it never proxies the bytes for the public/feed case.
+    """
+    store = await get_metadata_store()
+    try:
+        record = await store.get_by_id(file_id)
+    except MetadataError as exc:
+        logger.error("Failed to load upload %s for download: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    if record.kind != KIND_VIDEO:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Downloads are only for videos"
+        )
+
+    if record.visibility == VISIBILITY_PUBLIC:
+        # Stable, embeddable URL when one exists; else tokenless signed delivery.
+        if _storage_public_base_configured():
+            backend = await get_storage()
+            return RedirectResponse(
+                url=backend.public_url(record.storage_key), status_code=status.HTTP_302_FOUND
+            )
+    else:
+        # Private: owner-only, and a non-owner is a 404 (existence never leaks).
+        owner = _resolve_owner_optional(credentials)
+        if owner is None or owner != record.owner:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    try:
+        return await resolve_playback(record.storage_key)
+    except StorageError as exc:
+        logger.error("Failed to resolve playback for %s: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Playback backend unavailable"
+        ) from exc
+
+
+@router.get("/share/{share_token}")
+async def download_via_share(share_token: str):
+    """Permanent capability link: a valid share token serves the video regardless
+    of its `visibility`, with no bearer token. Unguessable + revocable (it lives
+    in our namespace, so it has an off switch, unlike a never-expiry presigned
+    URL). Unknown token -> 404."""
+    store = await get_metadata_store()
+    try:
+        record = await store.get_by_share_token(share_token)
+    except MetadataError as exc:
+        logger.error("Failed to resolve share token: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if record is None or record.kind != KIND_VIDEO:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    try:
+        return await resolve_playback(record.storage_key)
+    except StorageError as exc:
+        logger.error("Failed to resolve playback via share token: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Playback backend unavailable"
+        ) from exc
 
 
 @router.delete("/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
