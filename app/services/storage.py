@@ -22,7 +22,7 @@ import aiofiles
 import aiohttp
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
-from gcloud.aio.storage import Storage
+from gcloud.aio.storage import Bucket, Storage
 
 from app.config import settings
 
@@ -273,6 +273,25 @@ class GCSStorage(StorageBackend):
             await client.delete(self._bucket, key)
         except aiohttp.ClientError as exc:
             raise StorageError(f"GCS delete failed for {key!r}") from exc
+
+    async def presigned_get_url(self, key: str, expires_in: int = 3600) -> str:
+        """V4 signed GET URL for a private GCS object.
+
+        Signed **locally** from the service-account key already loaded by the
+        client (gcloud-aio-storage's ``Blob.get_signed_url`` uses the key's
+        ``private_key``/``client_email`` when present) -- no CDN, no extra Google
+        product, no network round-trip for signing. This is the GCS analogue of
+        S3's presigned GET and is what makes private video playback on the ``gcp``
+        backend possible; without it GCS can only serve objects that are public.
+        GCS caps a V4 signature at 7 days (604800s); a longer request is clamped.
+        """
+        client = await self._get_client()
+        expires_in = min(expires_in, 604800)
+        try:
+            blob = Bucket(client, self._bucket).new_blob(key)
+            return await blob.get_signed_url(expires_in)
+        except (aiohttp.ClientError, ValueError, KeyError) as exc:
+            raise StorageError(f"GCS presign failed for {key!r}") from exc
 
     async def aclose(self) -> None:
         if self._client is not None:

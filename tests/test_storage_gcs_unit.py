@@ -11,6 +11,7 @@ from typing import Any
 import aiohttp
 import pytest
 
+import app.services.storage as storage_module
 from app.config import settings
 from app.services.storage import GCSStorage, StorageError
 
@@ -81,3 +82,85 @@ async def test_unrelated_exception_is_not_swallowed_as_storage_error(
 
     with pytest.raises(AttributeError):
         await backend.upload(b"x", "key", "text/plain")
+
+
+# --- V4 signed URLs (no live GCP: sign locally is mocked) ------------------
+#
+# The real signing (gcloud-aio-storage's Blob.get_signed_url) needs a service
+# account private key, which isn't present here. These verify the plumbing:
+# that presigned_get_url constructs a blob for the right key, asks it to sign
+# for the requested (clamped) expiration, and returns/​wraps the result.
+
+
+class _FakeSignBlob:
+    def __init__(self, name: str, url: str = "https://signed.example/x?sig=abc") -> None:
+        self.name = name
+        self._url = url
+        self.signed_for: int | None = None
+
+    async def get_signed_url(self, expiration: int, **kwargs: Any) -> str:
+        self.signed_for = expiration
+        return self._url
+
+
+class _FakeSignBucket:
+    last_blob: _FakeSignBlob | None = None
+
+    def __init__(self, client: Any, bucket: str) -> None:
+        self.bucket = bucket
+
+    def new_blob(self, key: str) -> _FakeSignBlob:
+        blob = _FakeSignBlob(key)
+        _FakeSignBucket.last_blob = blob
+        return blob
+
+
+async def test_presigned_get_url_signs_locally_and_returns_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "GCS_BUCKET", "test-bucket")
+    monkeypatch.setattr(storage_module, "Bucket", _FakeSignBucket)
+    backend = GCSStorage()
+    backend._client = object()  # bypass _get_client()'s network build
+
+    url = await backend.presigned_get_url("videos/v_compressed.mp4", expires_in=3600)
+    assert url == "https://signed.example/x?sig=abc"
+    assert _FakeSignBucket.last_blob is not None
+    assert _FakeSignBucket.last_blob.name == "videos/v_compressed.mp4"
+    assert _FakeSignBucket.last_blob.signed_for == 3600
+
+
+async def test_presigned_get_url_clamps_expiration_to_7_days(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "GCS_BUCKET", "test-bucket")
+    monkeypatch.setattr(storage_module, "Bucket", _FakeSignBucket)
+    backend = GCSStorage()
+    backend._client = object()
+
+    await backend.presigned_get_url("videos/v.mp4", expires_in=10_000_000)
+    assert _FakeSignBucket.last_blob is not None
+    assert _FakeSignBucket.last_blob.signed_for == 604800  # GCS V4 hard cap
+
+
+async def test_presigned_get_url_wraps_signing_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BoomBucket:
+        def __init__(self, client: Any, bucket: str) -> None:
+            pass
+
+        def new_blob(self, key: str) -> Any:
+            class _BoomBlob:
+                async def get_signed_url(self, expiration: int, **kwargs: Any) -> str:
+                    raise ValueError("private key is invalid or unsupported")
+
+            return _BoomBlob()
+
+    monkeypatch.setattr(settings, "GCS_BUCKET", "test-bucket")
+    monkeypatch.setattr(storage_module, "Bucket", _BoomBucket)
+    backend = GCSStorage()
+    backend._client = object()
+
+    with pytest.raises(StorageError):
+        await backend.presigned_get_url("videos/v.mp4")
