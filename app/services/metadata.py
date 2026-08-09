@@ -47,6 +47,11 @@ STATUS_FAILED = "failed"
 KIND_IMAGE = "image"
 KIND_VIDEO = "video"
 
+# Playback visibility of a record. `private` is owner-only (authenticated
+# /files/{id}/download); `public` is anyone-with-the-link (no token).
+VISIBILITY_PRIVATE = "private"
+VISIBILITY_PUBLIC = "public"
+
 # Webhook delivery states persisted on a row (for the dead-letter / redelivery
 # path). NULL means no callback_url or never attempted.
 WEBHOOK_PENDING = "pending"
@@ -78,6 +83,8 @@ class UploadRecord:
     webhook_attempts: int
     webhook_last_error: str | None
     webhook_updated_at: datetime | None
+    visibility: str
+    share_token: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -105,6 +112,10 @@ class UploadRecord:
             "webhook_updated_at": (
                 self.webhook_updated_at.isoformat() if self.webhook_updated_at else None
             ),
+            # `visibility` is safe to expose; `share_token` is a secret capability
+            # and is deliberately omitted here -- it's returned only by the
+            # share-mint endpoint, never in listings/webhooks/GET /files/{id}.
+            "visibility": self.visibility,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -219,6 +230,30 @@ class MetadataStore(ABC):
         """Persist the outcome of a webhook delivery cycle on the row (the
         dead-letter record). `status` is one of WEBHOOK_PENDING/DELIVERED/FAILED."""
 
+    @abstractmethod
+    async def set_visibility(
+        self, upload_id: str, owner: str, visibility: str
+    ) -> UploadRecord | None:
+        """Owner-scoped visibility change (VISIBILITY_PRIVATE/PUBLIC). None means
+        no such row for this owner (unknown id or another owner's -> 404 upstream)."""
+
+    @abstractmethod
+    async def set_share_token(
+        self, upload_id: str, owner: str, token: str
+    ) -> UploadRecord | None:
+        """Owner-scoped mint/rotate of the share capability token. None means no
+        such row for this owner."""
+
+    @abstractmethod
+    async def clear_share_token(self, upload_id: str, owner: str) -> UploadRecord | None:
+        """Owner-scoped revoke of the share token (sets it NULL). None means no
+        such row for this owner."""
+
+    @abstractmethod
+    async def get_by_share_token(self, token: str) -> UploadRecord | None:
+        """Unscoped lookup by share token -- the token *is* the grant (like
+        get_by_id for the worker), so no owner scoping. Unknown token -> None."""
+
     async def aclose(self) -> None:  # noqa: B027 -- intentional no-op default, not abstract
         """Release any pooled clients. Default is a no-op."""
 
@@ -239,7 +274,7 @@ _COLUMNS = (
     "id, owner, kind, storage_key, content_type, size_bytes, width, height, "
     "content_hash, status, task_id, original_filename, duration_seconds, truncated, "
     "callback_url, poster_upload_id, webhook_status, webhook_attempts, webhook_last_error, "
-    "webhook_updated_at, created_at, updated_at"
+    "webhook_updated_at, visibility, share_token, created_at, updated_at"
 )
 
 
@@ -265,6 +300,8 @@ def _row_to_record(row: asyncpg.Record) -> UploadRecord:
         webhook_attempts=row["webhook_attempts"],
         webhook_last_error=row["webhook_last_error"],
         webhook_updated_at=row["webhook_updated_at"],
+        visibility=row["visibility"],
+        share_token=row["share_token"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -521,6 +558,62 @@ class PostgresMetadataStore(MetadataStore):
             )
         except (asyncpg.PostgresError, OSError) as exc:
             raise MetadataError(f"Failed to record webhook state for {upload_id!r}") from exc
+        return _row_to_record(row) if row is not None else None
+
+    async def set_visibility(
+        self, upload_id: str, owner: str, visibility: str
+    ) -> UploadRecord | None:
+        pool = await self._get_pool()
+        try:
+            row = await pool.fetchrow(
+                f"UPDATE uploads SET visibility = $3, updated_at = now() "
+                f"WHERE id = $1 AND owner = $2 RETURNING {_COLUMNS}",
+                upload_id,
+                owner,
+                visibility,
+            )
+        except (asyncpg.PostgresError, OSError) as exc:
+            raise MetadataError(f"Failed to set visibility on upload {upload_id!r}") from exc
+        return _row_to_record(row) if row is not None else None
+
+    async def set_share_token(
+        self, upload_id: str, owner: str, token: str
+    ) -> UploadRecord | None:
+        pool = await self._get_pool()
+        try:
+            row = await pool.fetchrow(
+                f"UPDATE uploads SET share_token = $3, updated_at = now() "
+                f"WHERE id = $1 AND owner = $2 RETURNING {_COLUMNS}",
+                upload_id,
+                owner,
+                token,
+            )
+        except (asyncpg.PostgresError, OSError) as exc:
+            raise MetadataError(f"Failed to set share token on upload {upload_id!r}") from exc
+        return _row_to_record(row) if row is not None else None
+
+    async def clear_share_token(self, upload_id: str, owner: str) -> UploadRecord | None:
+        pool = await self._get_pool()
+        try:
+            row = await pool.fetchrow(
+                f"UPDATE uploads SET share_token = NULL, updated_at = now() "
+                f"WHERE id = $1 AND owner = $2 RETURNING {_COLUMNS}",
+                upload_id,
+                owner,
+            )
+        except (asyncpg.PostgresError, OSError) as exc:
+            raise MetadataError(f"Failed to clear share token on upload {upload_id!r}") from exc
+        return _row_to_record(row) if row is not None else None
+
+    async def get_by_share_token(self, token: str) -> UploadRecord | None:
+        pool = await self._get_pool()
+        try:
+            row = await pool.fetchrow(
+                f"SELECT {_COLUMNS} FROM uploads WHERE share_token = $1",
+                token,
+            )
+        except (asyncpg.PostgresError, OSError) as exc:
+            raise MetadataError("Failed to look up upload by share token") from exc
         return _row_to_record(row) if row is not None else None
 
     async def aclose(self) -> None:

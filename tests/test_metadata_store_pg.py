@@ -20,6 +20,7 @@ from app.services.metadata import (
     STATUS_FAILED,
     STATUS_PROCESSING,
     STATUS_READY,
+    MetadataError,
     PostgresMetadataStore,
 )
 
@@ -286,3 +287,94 @@ async def test_mark_webhook_persists_deadletter_state(
     assert updated.webhook_last_error == "HTTP 500"
     assert updated.webhook_updated_at is not None
     assert await pg_store.mark_webhook("does-not-exist", status="failed") is None
+
+
+async def test_visibility_defaults_private_and_is_owner_scoped(
+    pg_store: PostgresMetadataStore,
+) -> None:
+    rec = await pg_store.create(
+        owner="alice",
+        kind=KIND_VIDEO,
+        storage_key="videos/v.mp4",
+        content_type="video/mp4",
+        size_bytes=1,
+        status=STATUS_READY,
+    )
+    # New rows default private, with no share token.
+    assert rec.visibility == "private"
+    assert rec.share_token is None
+
+    made_public = await pg_store.set_visibility(rec.id, "alice", "public")
+    assert made_public is not None and made_public.visibility == "public"
+    # Persisted (round-trips through the column, not just RETURNING).
+    refetched = await pg_store.get(rec.id, "alice")
+    assert refetched is not None and refetched.visibility == "public"
+
+    # Owner-scoped: another owner can't change it.
+    assert await pg_store.set_visibility(rec.id, "bob", "private") is None
+    still_public = await pg_store.get(rec.id, "alice")
+    assert still_public is not None and still_public.visibility == "public"
+
+
+async def test_share_token_set_lookup_clear(pg_store: PostgresMetadataStore) -> None:
+    rec = await pg_store.create(
+        owner="alice",
+        kind=KIND_VIDEO,
+        storage_key="videos/v.mp4",
+        content_type="video/mp4",
+        size_bytes=1,
+        status=STATUS_READY,
+    )
+    set_rec = await pg_store.set_share_token(rec.id, "alice", "tok-abc")
+    assert set_rec is not None and set_rec.share_token == "tok-abc"
+
+    # Unscoped lookup: the token is the grant (no owner arg).
+    by_token = await pg_store.get_by_share_token("tok-abc")
+    assert by_token is not None and by_token.id == rec.id
+    assert await pg_store.get_by_share_token("nope") is None
+
+    # Owner-scoped mint/clear.
+    assert await pg_store.set_share_token(rec.id, "bob", "tok-x") is None
+    cleared = await pg_store.clear_share_token(rec.id, "alice")
+    assert cleared is not None and cleared.share_token is None
+    assert await pg_store.get_by_share_token("tok-abc") is None
+    assert await pg_store.clear_share_token(rec.id, "bob") is None
+
+
+async def test_share_token_is_unique(pg_store: PostgresMetadataStore) -> None:
+    a = await pg_store.create(
+        owner="alice",
+        kind=KIND_VIDEO,
+        storage_key="videos/a.mp4",
+        content_type="video/mp4",
+        size_bytes=1,
+        status=STATUS_READY,
+    )
+    b = await pg_store.create(
+        owner="alice",
+        kind=KIND_VIDEO,
+        storage_key="videos/b.mp4",
+        content_type="video/mp4",
+        size_bytes=1,
+        status=STATUS_READY,
+    )
+    await pg_store.set_share_token(a.id, "alice", "dup")
+    # The UNIQUE index rejects the same token on a second row (surfaced as a
+    # sanitized MetadataError, not a raw asyncpg error).
+    with pytest.raises(MetadataError):
+        await pg_store.set_share_token(b.id, "alice", "dup")
+
+
+async def test_multiple_null_share_tokens_allowed(pg_store: PostgresMetadataStore) -> None:
+    # NULLs are distinct in Postgres, so the UNIQUE index permits many rows with
+    # no share token (the common case).
+    for key in ("videos/1.mp4", "videos/2.mp4", "videos/3.mp4"):
+        await pg_store.create(
+            owner="alice",
+            kind=KIND_VIDEO,
+            storage_key=key,
+            content_type="video/mp4",
+            size_bytes=1,
+            status=STATUS_READY,
+        )
+    assert len(await pg_store.list("alice")) == 3

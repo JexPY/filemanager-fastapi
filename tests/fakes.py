@@ -120,6 +120,8 @@ class InMemoryMetadataStore(MetadataStore):
             webhook_attempts=0,
             webhook_last_error=None,
             webhook_updated_at=None,
+            visibility="private",
+            share_token=None,
             created_at=now,
             updated_at=now,
         )
@@ -247,6 +249,41 @@ class InMemoryMetadataStore(MetadataStore):
         )
         self.records[upload_id] = updated
         return updated
+
+    async def set_visibility(
+        self, upload_id: str, owner: str, visibility: str
+    ) -> UploadRecord | None:
+        record = self.records.get(upload_id)
+        if record is None or record.owner != owner:
+            return None
+        updated = replace(record, visibility=visibility, updated_at=datetime.now(UTC))
+        self.records[upload_id] = updated
+        return updated
+
+    async def set_share_token(
+        self, upload_id: str, owner: str, token: str
+    ) -> UploadRecord | None:
+        record = self.records.get(upload_id)
+        if record is None or record.owner != owner:
+            return None
+        updated = replace(record, share_token=token, updated_at=datetime.now(UTC))
+        self.records[upload_id] = updated
+        return updated
+
+    async def clear_share_token(self, upload_id: str, owner: str) -> UploadRecord | None:
+        record = self.records.get(upload_id)
+        if record is None or record.owner != owner:
+            return None
+        updated = replace(record, share_token=None, updated_at=datetime.now(UTC))
+        self.records[upload_id] = updated
+        return updated
+
+    async def get_by_share_token(self, token: str) -> UploadRecord | None:
+        for i in reversed(self._order):
+            record = self.records[i]
+            if record.share_token == token:
+                return record
+        return None
 
     async def aclose(self) -> None:
         self.closed = True
