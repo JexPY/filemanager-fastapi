@@ -11,11 +11,13 @@ WORKDIR /app
 
 # Ensure we get ffmpeg 7 (which should be default or available in 3.14-slim based on Debian Trixie/Fork)
 #
-# libvips is also required here even though tasks.py itself never touches
-# pyvips: taskiq_fastapi.init(broker, "app.main:app") in broker.py makes the
-# worker import the full FastAPI app (for dependency-injection context) at
-# startup, which transitively imports app.routers.files -> image_vips ->
-# pyvips. Without libvips installed, the worker process crashes on boot.
+# libvips is required here on two counts. (1) tasks.py now calls pyvips
+# DIRECTLY: generate_poster_task runs an extracted video frame through
+# image_vips.validate_and_strip_image (the same validate/strip -> WebP path the
+# image route uses). (2) Even without that, taskiq_fastapi.init(broker,
+# "app.main:app") in broker.py makes the worker import the full FastAPI app at
+# startup, which transitively imports app.routers.files -> image_vips -> pyvips.
+# Either way, without libvips installed the worker process crashes on boot.
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libvips \

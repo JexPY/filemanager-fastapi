@@ -215,3 +215,74 @@ async def test_video_lifecycle_and_deleted_midflight(pg_store: PostgresMetadataS
     # Deleted before the worker's update lands -> update reports the row is gone.
     await pg_store.delete(rec.id, "alice")
     assert await pg_store.mark_ready(rec.id, storage_key="x", size_bytes=1) is None
+
+
+async def test_get_by_id_is_unscoped(pg_store: PostgresMetadataStore) -> None:
+    rec = await pg_store.create(
+        owner="alice",
+        kind=KIND_VIDEO,
+        storage_key="videos/v_compressed.mp4",
+        content_type="video/mp4",
+        size_bytes=1,
+        status=STATUS_READY,
+    )
+    # Worker-internal lookup: resolves without an owner (the api already admitted).
+    found = await pg_store.get_by_id(rec.id)
+    assert found is not None and found.id == rec.id
+    assert await pg_store.get_by_id("does-not-exist") is None
+
+
+async def test_set_poster_links_and_handles_missing_video(
+    pg_store: PostgresMetadataStore,
+) -> None:
+    video = await pg_store.create(
+        owner="alice",
+        kind=KIND_VIDEO,
+        storage_key="videos/v_compressed.mp4",
+        content_type="video/mp4",
+        size_bytes=1,
+        status=STATUS_READY,
+    )
+    poster = await pg_store.create(
+        owner="alice",
+        kind=KIND_IMAGE,
+        storage_key="posters/p.webp",
+        content_type="image/webp",
+        size_bytes=1,
+        status=STATUS_READY,
+    )
+    linked = await pg_store.set_poster(video.id, poster.id)
+    assert linked is not None and linked.poster_upload_id == poster.id
+    # Persisted (round-trips through the column, not just the RETURNING row).
+    refetched = await pg_store.get(video.id, "alice")
+    assert refetched is not None and refetched.poster_upload_id == poster.id
+    # A gone video reports None (the mid-generation race).
+    await pg_store.delete(video.id, "alice")
+    assert await pg_store.set_poster(video.id, poster.id) is None
+
+
+async def test_mark_webhook_persists_deadletter_state(
+    pg_store: PostgresMetadataStore,
+) -> None:
+    rec = await pg_store.create(
+        owner="alice",
+        kind=KIND_VIDEO,
+        storage_key="videos/v_compressed.mp4",
+        content_type="video/mp4",
+        size_bytes=1,
+        status=STATUS_READY,
+        callback_url="https://h/hook",
+    )
+    # Fresh rows carry the defaulted state.
+    assert rec.webhook_status is None
+    assert rec.webhook_attempts == 0
+
+    updated = await pg_store.mark_webhook(
+        rec.id, status="failed", attempts=4, last_error="HTTP 500"
+    )
+    assert updated is not None
+    assert updated.webhook_status == "failed"
+    assert updated.webhook_attempts == 4
+    assert updated.webhook_last_error == "HTTP 500"
+    assert updated.webhook_updated_at is not None
+    assert await pg_store.mark_webhook("does-not-exist", status="failed") is None

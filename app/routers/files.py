@@ -35,7 +35,7 @@ from app.services.metadata import (
 from app.services.qr_generator import generate_qr_image
 from app.services.storage import StorageError, delete_file, get_storage, upload_file
 from app.services.webhooks import WebhookValidationError, validate_callback_url
-from app.tasks import compress_video_task
+from app.tasks import compress_video_task, deliver_webhook_task, generate_poster_task
 
 logger = logging.getLogger(__name__)
 
@@ -466,4 +466,125 @@ async def delete_upload(file_id: str, owner: str = Depends(verify_token)):
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
         ) from exc
 
+    # Cascade: a video's poster is a derived object with no standalone meaning,
+    # so remove it with its parent. Best-effort -- a poster-cleanup failure must
+    # not fail the delete that already succeeded (it would just leave the poster
+    # image row/object, findable and deletable on its own).
+    if record.kind == KIND_VIDEO and record.poster_upload_id:
+        with contextlib.suppress(StorageError, MetadataError):
+            poster = await store.get(record.poster_upload_id, owner)
+            if poster is not None:
+                await delete_file(poster.storage_key)
+                await store.delete(poster.id, owner)
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/files/{file_id}/poster", status_code=status.HTTP_202_ACCEPTED)
+async def generate_poster(
+    file_id: str,
+    response: Response,
+    owner: str = Depends(verify_token),
+    at_seconds: float | None = Form(default=None),
+):
+    """Generate a poster (thumbnail) image for one of the caller's *ready*
+    videos, on request. Owner-scoped. Idempotent on the happy path: if a poster
+    already exists it's returned inline (200) rather than regenerated. Otherwise
+    a poster task is enqueued (202) and the client polls GET /files/{file_id}
+    until `poster_upload_id` is set (then GET /files/{poster_id} for the image).
+
+    `at_seconds` optionally picks the frame timestamp; the default is ~10% into
+    the clip (avoiding a black lead-in frame). Two simultaneous requests can each
+    generate a poster (best-effort, like the upload-idempotency paths); the last
+    link wins and the loser is a harmless standalone image row.
+    """
+    store = await get_metadata_store()
+    try:
+        record = await store.get(file_id, owner)
+    except MetadataError as exc:
+        logger.error("Failed to load upload %s for poster: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    if record.kind != KIND_VIDEO:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Posters are only for videos"
+        )
+    if record.status != STATUS_READY:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Video is not ready")
+    if at_seconds is not None and at_seconds < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="at_seconds must be non-negative"
+        )
+
+    # Already has a live poster -> return it, don't regenerate. (If the linked
+    # poster row was deleted out from under the video, fall through and remake.)
+    if record.poster_upload_id is not None:
+        existing = await store.get(record.poster_upload_id, owner)
+        if existing is not None:
+            response.status_code = status.HTTP_200_OK
+            return {"status": "ready", "video_id": file_id, "poster": existing.to_public()}
+
+    try:
+        task = await generate_poster_task.kiq(upload_id=file_id, at_seconds=at_seconds)
+    except Exception as exc:
+        logger.error("Failed to enqueue poster generation for %s: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Poster generation temporarily unavailable",
+        ) from exc
+
+    return {
+        "status": "accepted",
+        "video_id": file_id,
+        "task_id": task.task_id,
+        "poll": f"/files/{file_id}",
+    }
+
+
+@router.post("/files/{file_id}/redeliver", status_code=status.HTTP_202_ACCEPTED)
+async def redeliver_webhook(file_id: str, owner: str = Depends(verify_token)):
+    """Re-enqueue the terminal-state webhook for one of the caller's uploads --
+    the manual replay path for a dead-lettered (exhausted) delivery. Owner-scoped.
+    Re-sends the current terminal event (`video.completed`/`video.failed`) with
+    the same stable X-Webhook-Id, so a receiver that already saw it can dedupe.
+    """
+    store = await get_metadata_store()
+    try:
+        record = await store.get(file_id, owner)
+    except MetadataError as exc:
+        logger.error("Failed to load upload %s for redeliver: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    if not settings.webhooks_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Webhooks are not enabled on this server",
+        )
+    if not record.callback_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No callback_url is configured for this upload",
+        )
+    if record.status == STATUS_PROCESSING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Video is still processing; no terminal event to deliver yet",
+        )
+
+    event = "video.completed" if record.status == STATUS_READY else "video.failed"
+    try:
+        task = await deliver_webhook_task.kiq(upload_id=file_id, event=event)
+    except Exception as exc:
+        logger.error("Failed to enqueue webhook redelivery for %s: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Webhook redelivery temporarily unavailable",
+        ) from exc
+
+    return {"status": "accepted", "id": file_id, "event": event, "task_id": task.task_id}

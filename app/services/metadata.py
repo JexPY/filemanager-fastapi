@@ -47,6 +47,12 @@ STATUS_FAILED = "failed"
 KIND_IMAGE = "image"
 KIND_VIDEO = "video"
 
+# Webhook delivery states persisted on a row (for the dead-letter / redelivery
+# path). NULL means no callback_url or never attempted.
+WEBHOOK_PENDING = "pending"
+WEBHOOK_DELIVERED = "delivered"
+WEBHOOK_FAILED = "failed"
+
 
 @dataclass(frozen=True)
 class UploadRecord:
@@ -67,6 +73,11 @@ class UploadRecord:
     duration_seconds: float | None
     truncated: bool
     callback_url: str | None
+    poster_upload_id: str | None
+    webhook_status: str | None
+    webhook_attempts: int
+    webhook_last_error: str | None
+    webhook_updated_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -87,6 +98,13 @@ class UploadRecord:
             "duration_seconds": self.duration_seconds,
             "truncated": self.truncated,
             "callback_url": self.callback_url,
+            "poster_upload_id": self.poster_upload_id,
+            "webhook_status": self.webhook_status,
+            "webhook_attempts": self.webhook_attempts,
+            "webhook_last_error": self.webhook_last_error,
+            "webhook_updated_at": (
+                self.webhook_updated_at.isoformat() if self.webhook_updated_at else None
+            ),
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -177,6 +195,30 @@ class MetadataStore(ABC):
     @abstractmethod
     async def mark_failed(self, upload_id: str) -> UploadRecord | None: ...
 
+    @abstractmethod
+    async def get_by_id(self, upload_id: str) -> UploadRecord | None:
+        """Unscoped lookup by id, for worker-internal tasks (poster/webhook
+        delivery) that already ran through an owner-scoped admission in the api.
+        Route handlers must use the owner-scoped `get` instead."""
+
+    @abstractmethod
+    async def set_poster(self, video_id: str, poster_upload_id: str) -> UploadRecord | None:
+        """Point a video row at its poster image record. None means the video row
+        is gone (owner DELETEd it mid-generation) -- the caller owns cleaning up
+        the poster it just wrote, mirroring mark_ready's race handling."""
+
+    @abstractmethod
+    async def mark_webhook(
+        self,
+        upload_id: str,
+        *,
+        status: str,
+        attempts: int = 0,
+        last_error: str | None = None,
+    ) -> UploadRecord | None:
+        """Persist the outcome of a webhook delivery cycle on the row (the
+        dead-letter record). `status` is one of WEBHOOK_PENDING/DELIVERED/FAILED."""
+
     async def aclose(self) -> None:  # noqa: B027 -- intentional no-op default, not abstract
         """Release any pooled clients. Default is a no-op."""
 
@@ -196,7 +238,8 @@ class MetadataStore(ABC):
 _COLUMNS = (
     "id, owner, kind, storage_key, content_type, size_bytes, width, height, "
     "content_hash, status, task_id, original_filename, duration_seconds, truncated, "
-    "callback_url, created_at, updated_at"
+    "callback_url, poster_upload_id, webhook_status, webhook_attempts, webhook_last_error, "
+    "webhook_updated_at, created_at, updated_at"
 )
 
 
@@ -217,6 +260,11 @@ def _row_to_record(row: asyncpg.Record) -> UploadRecord:
         duration_seconds=row["duration_seconds"],
         truncated=row["truncated"],
         callback_url=row["callback_url"],
+        poster_upload_id=row["poster_upload_id"],
+        webhook_status=row["webhook_status"],
+        webhook_attempts=row["webhook_attempts"],
+        webhook_last_error=row["webhook_last_error"],
+        webhook_updated_at=row["webhook_updated_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -426,6 +474,53 @@ class PostgresMetadataStore(MetadataStore):
             )
         except (asyncpg.PostgresError, OSError) as exc:
             raise MetadataError(f"Failed to mark upload {upload_id!r} failed") from exc
+        return _row_to_record(row) if row is not None else None
+
+    async def get_by_id(self, upload_id: str) -> UploadRecord | None:
+        pool = await self._get_pool()
+        try:
+            row = await pool.fetchrow(
+                f"SELECT {_COLUMNS} FROM uploads WHERE id = $1",
+                upload_id,
+            )
+        except (asyncpg.PostgresError, OSError) as exc:
+            raise MetadataError(f"Failed to load upload {upload_id!r}") from exc
+        return _row_to_record(row) if row is not None else None
+
+    async def set_poster(self, video_id: str, poster_upload_id: str) -> UploadRecord | None:
+        pool = await self._get_pool()
+        try:
+            row = await pool.fetchrow(
+                f"UPDATE uploads SET poster_upload_id = $2, updated_at = now() "
+                f"WHERE id = $1 RETURNING {_COLUMNS}",
+                video_id,
+                poster_upload_id,
+            )
+        except (asyncpg.PostgresError, OSError) as exc:
+            raise MetadataError(f"Failed to set poster on upload {video_id!r}") from exc
+        return _row_to_record(row) if row is not None else None
+
+    async def mark_webhook(
+        self,
+        upload_id: str,
+        *,
+        status: str,
+        attempts: int = 0,
+        last_error: str | None = None,
+    ) -> UploadRecord | None:
+        pool = await self._get_pool()
+        try:
+            row = await pool.fetchrow(
+                f"UPDATE uploads SET webhook_status = $2, webhook_attempts = $3, "
+                f"webhook_last_error = $4, webhook_updated_at = now() "
+                f"WHERE id = $1 RETURNING {_COLUMNS}",
+                upload_id,
+                status,
+                attempts,
+                last_error,
+            )
+        except (asyncpg.PostgresError, OSError) as exc:
+            raise MetadataError(f"Failed to record webhook state for {upload_id!r}") from exc
         return _row_to_record(row) if row is not None else None
 
     async def aclose(self) -> None:

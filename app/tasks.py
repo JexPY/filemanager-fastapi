@@ -9,28 +9,36 @@ import aiofiles.os
 
 from app.broker import broker
 from app.config import settings
-from app.services.metadata import MetadataError, UploadRecord, get_metadata_store
+from app.services.image_vips import validate_and_strip_image
+from app.services.metadata import (
+    KIND_IMAGE,
+    KIND_VIDEO,
+    STATUS_READY,
+    WEBHOOK_DELIVERED,
+    WEBHOOK_FAILED,
+    WEBHOOK_PENDING,
+    MetadataError,
+    UploadRecord,
+    get_metadata_store,
+)
 from app.services.storage import StorageError, delete_file, download_file, get_storage, upload_file
 from app.services.webhooks import deliver_webhook
 
 logger = logging.getLogger(__name__)
 
 
-async def _fire_webhook(record: UploadRecord, event: str) -> None:
-    """Best-effort completion webhook for a video record. No callback_url -> a
-    no-op. deliver_webhook never raises, but guard anyway so nothing here can
-    ever affect the task's own outcome."""
+async def _enqueue_webhook(record: UploadRecord, event: str) -> None:
+    """Enqueue delivery of a terminal-state webhook onto its own TaskIQ task, so
+    a slow/dead receiver never blocks the compression worker slot. No
+    callback_url -> a no-op. Best-effort: a failure to enqueue (e.g. Redis
+    hiccup) must never affect the compression task's own outcome -- the owner can
+    still replay via POST /files/{id}/redeliver."""
     if not record.callback_url:
         return
     try:
-        await deliver_webhook(
-            url=record.callback_url,
-            event=event,
-            data=record.to_public(),
-            delivery_id=record.id,
-        )
-    except Exception:  # noqa: BLE001 -- delivery must never affect the task result
-        logger.exception("Unexpected error delivering webhook for upload %s", record.id)
+        await deliver_webhook_task.kiq(upload_id=record.id, event=event)
+    except Exception:  # noqa: BLE001 -- enqueue must never affect the task result
+        logger.exception("Failed to enqueue webhook delivery for upload %s", record.id)
 
 
 async def _probe_duration_seconds(input_path: str) -> float | None:
@@ -155,9 +163,10 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
         backend = await get_storage()
         presigned_url = await backend.presigned_get_url(obj.key)
 
-        # Push completion to the client's callback (if any), so they don't have
-        # to poll GET /tasks/{id}. Best-effort; never affects the task result.
-        await _fire_webhook(record, "video.completed")
+        # Push completion to the client's callback (if any) on its own task, so
+        # they don't have to poll GET /tasks/{id} and a slow receiver can't block
+        # this worker slot. Best-effort; never affects the task result.
+        await _enqueue_webhook(record, "video.completed")
 
         return {
             "status": "success",
@@ -180,7 +189,7 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
         with contextlib.suppress(MetadataError):
             failed_record = await store.mark_failed(upload_id)
         if failed_record is not None:
-            await _fire_webhook(failed_record, "video.failed")
+            await _enqueue_webhook(failed_record, "video.failed")
         raise
 
     finally:
@@ -201,3 +210,160 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
             logger.warning(
                 "Failed to delete raw video %s after processing: %s", raw_storage_key, exc
             )
+
+
+@broker.task
+async def deliver_webhook_task(upload_id: str, event: str) -> dict:
+    """Deliver a terminal-state webhook on its own worker slot, decoupled from
+    compression. Re-loads the record by id (so the payload always reflects
+    current state, incl. a later poster/redelivery), signs + POSTs it, and
+    persists the delivery outcome on the row as a durable dead-letter record
+    (webhook_status/attempts/last_error). Never raises."""
+    store = await get_metadata_store()
+    try:
+        record = await store.get_by_id(upload_id)
+    except MetadataError:
+        logger.exception("Webhook task could not load upload %s", upload_id)
+        return {"status": "skipped", "reason": "load failed", "upload_id": upload_id}
+    if record is None or not record.callback_url:
+        return {"status": "skipped", "reason": "no callback", "upload_id": upload_id}
+
+    with contextlib.suppress(MetadataError):
+        await store.mark_webhook(upload_id, status=WEBHOOK_PENDING)
+
+    result = await deliver_webhook(
+        url=record.callback_url,
+        event=event,
+        data=record.to_public(),
+        delivery_id=record.id,
+    )
+    webhook_status = WEBHOOK_DELIVERED if result.delivered else WEBHOOK_FAILED
+    with contextlib.suppress(MetadataError):
+        await store.mark_webhook(
+            upload_id,
+            status=webhook_status,
+            attempts=result.attempts,
+            last_error=result.last_error,
+        )
+    return {
+        "status": webhook_status,
+        "upload_id": upload_id,
+        "event": event,
+        "attempts": result.attempts,
+    }
+
+
+async def _poster_seek_seconds(input_path: str) -> float:
+    """Where to grab the poster frame from: ~10% in (so it's not a black
+    lead-in frame), clamped just inside the clip. Falls back to the very first
+    frame (0s) when the duration can't be probed."""
+    duration = await _probe_duration_seconds(input_path)
+    if duration is None or duration <= 0:
+        return 0.0
+    return min(duration * 0.1, max(duration - 0.1, 0.0))
+
+
+@broker.task
+async def generate_poster_task(upload_id: str, at_seconds: float | None = None) -> dict:
+    """Extract a poster frame from a *ready* video and store it as its own image
+    `uploads` record, linked back from the video via poster_upload_id. Reuses
+    the image pipeline end to end: ffmpeg single-frame extract -> pyvips
+    validate/strip -> WebP. The api admits+enqueues this (owner-scoped); the
+    worker has the video bytes and ffmpeg/pyvips."""
+    store = await get_metadata_store()
+    video = await store.get_by_id(upload_id)
+    if video is None:
+        return {"status": "skipped", "reason": "video gone", "upload_id": upload_id}
+    if video.kind != KIND_VIDEO or video.status != STATUS_READY:
+        # The route guards this; be defensive if state changed after enqueue.
+        return {"status": "skipped", "reason": "not a ready video", "upload_id": upload_id}
+
+    unique_id = uuid.uuid4().hex
+    src_key = video.storage_key  # the compressed mp4
+    input_path = f"/tmp/{unique_id}_{os.path.basename(src_key)}"
+    frame_path = f"/tmp/{unique_id}_poster.png"
+
+    try:
+        raw_data = await download_file(src_key)
+        async with aiofiles.open(input_path, "wb") as f:
+            await f.write(raw_data)
+
+        seek = at_seconds if at_seconds is not None else await _poster_seek_seconds(input_path)
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{seek:.3f}",
+            "-i",
+            input_path,
+            "-frames:v",
+            "1",
+            "-f",
+            "image2",
+            "-c:v",
+            "png",
+            frame_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=settings.FFMPEG_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise RuntimeError(
+                f"Poster ffmpeg timed out after {settings.FFMPEG_TIMEOUT_SECONDS}s"
+            ) from None
+        if process.returncode != 0:
+            raise RuntimeError(f"Poster extract failed: {stderr.decode(errors='replace')}")
+
+        async with aiofiles.open(frame_path, "rb") as f:
+            frame_bytes = await f.read()
+
+        # Reuse the exact image validate/strip path (CPU-bound -> threadpool).
+        webp_bytes, content_type, width, height = await asyncio.to_thread(
+            validate_and_strip_image, frame_bytes
+        )
+        poster_key = f"posters/{unique_id}.webp"
+        obj = await upload_file(webp_bytes, poster_key, content_type)
+
+        poster = await store.create(
+            owner=video.owner,
+            kind=KIND_IMAGE,
+            storage_key=obj.key,
+            content_type=content_type,
+            size_bytes=obj.size,
+            status=STATUS_READY,
+            width=width,
+            height=height,
+        )
+
+        # Link the video to its poster. None means the owner DELETEd the video
+        # mid-generation -- discard the poster we just wrote (object + record)
+        # instead of orphaning it, mirroring compress_video_task's mark_ready.
+        linked = await store.set_poster(upload_id, poster.id)
+        if linked is None:
+            logger.warning(
+                "Video %s gone during poster generation; discarding %s", upload_id, obj.key
+            )
+            with contextlib.suppress(StorageError):
+                await delete_file(obj.key)
+            with contextlib.suppress(MetadataError):
+                await store.delete(poster.id, video.owner)
+            return {"status": "discarded", "upload_id": upload_id}
+
+        return {
+            "status": "success",
+            "upload_id": upload_id,
+            "poster_id": poster.id,
+            "key": obj.key,
+            "width": width,
+            "height": height,
+        }
+
+    finally:
+        for path in (input_path, frame_path):
+            if await aiofiles.os.path.exists(path):
+                await aiofiles.os.remove(path)

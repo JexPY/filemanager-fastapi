@@ -34,14 +34,20 @@ async def _seed_processing(
 
 @pytest.fixture
 def captured_webhooks(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Capture deliver_webhook calls instead of making a real HTTP request."""
+    """Capture the webhook-delivery task *enqueue* instead of hitting Redis/HTTP.
+    Delivery no longer runs inline in the compression task -- it's enqueued onto
+    its own TaskIQ task (deliver_webhook_task) so a slow receiver can't block the
+    worker slot. The compression task only fires the enqueue."""
     calls: list[dict[str, Any]] = []
 
-    async def fake_deliver(**kwargs: Any) -> bool:
-        calls.append(kwargs)
-        return True
+    class _FakeTask:
+        task_id = "webhook-task-0"
 
-    monkeypatch.setattr(tasks_module, "deliver_webhook", fake_deliver)
+    async def fake_kiq(**kwargs: Any) -> _FakeTask:
+        calls.append(kwargs)
+        return _FakeTask()
+
+    monkeypatch.setattr(tasks_module.deliver_webhook_task, "kiq", fake_kiq)
     return calls
 
 
@@ -166,10 +172,8 @@ async def test_success_fires_completed_webhook_when_callback_set(
 
     assert len(captured_webhooks) == 1
     call = captured_webhooks[0]
-    assert call["url"] == "https://h/hook"
+    assert call["upload_id"] == upload_id
     assert call["event"] == "video.completed"
-    assert call["delivery_id"] == upload_id
-    assert call["data"]["status"] == STATUS_READY
 
 
 async def test_failure_fires_failed_webhook_when_callback_set(
@@ -187,8 +191,8 @@ async def test_failure_fires_failed_webhook_when_callback_set(
         )
 
     assert len(captured_webhooks) == 1
+    assert captured_webhooks[0]["upload_id"] == upload_id
     assert captured_webhooks[0]["event"] == "video.failed"
-    assert captured_webhooks[0]["data"]["status"] == STATUS_FAILED
 
 
 async def test_no_webhook_when_no_callback_url(

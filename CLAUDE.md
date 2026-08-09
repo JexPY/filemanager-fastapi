@@ -60,16 +60,39 @@ Things that will bite you if you don't know them:
   `WEBHOOK_ALLOW_INSECURE_HTTP`, host must be on the explicit
   `WEBHOOK_ALLOWED_HOSTS` allow-list, and (unless `WEBHOOK_ALLOW_PRIVATE_IPS`)
   must not resolve to a private/loopback/link-local address — a bad URL is a
-  `400` before anything is staged. The **worker** then POSTs the record's
-  `to_public()` on the terminal state (`video.completed` / `video.failed`),
-  HMAC-SHA256-signed over `timestamp.body` (`X-Webhook-Signature`), with
-  `X-Webhook-Id` = the upload id as a stable idempotency key across retries.
-  Delivery (`deliver_webhook`) is **best-effort and never raises** — it can't
-  fail or mask the compression result. **Webhooks are off unless BOTH
+  `400` before anything is staged. Delivery then runs on **its own TaskIQ task**
+  (`deliver_webhook_task`), not inline in the compression task: on a terminal
+  state the compression task best-effort *enqueues* `(upload_id, event)` (two
+  strings — key-not-bytes again) and the delivery task re-loads the record,
+  POSTs its `to_public()` HMAC-SHA256-signed over `timestamp.body`
+  (`X-Webhook-Signature`), with `X-Webhook-Id` = the upload id as a stable
+  idempotency key across retries. This decoupling means a slow/dead receiver
+  ties up a *delivery* slot, never the compression slot. `deliver_webhook` is
+  **best-effort and never raises**; it returns a `WebhookDeliveryResult` that the
+  delivery task persists on the row (`webhook_status` `pending`/`delivered`/
+  `failed`, `webhook_attempts`, `webhook_last_error`) — so an exhausted delivery
+  is a **durable dead-letter record**, not just a log line, replayable via
+  `POST /files/{id}/redeliver` (owner-scoped; re-enqueues the current terminal
+  event with the same `X-Webhook-Id`). **Webhooks are off unless BOTH
   `WEBHOOK_SIGNING_SECRET` and `WEBHOOK_ALLOWED_HOSTS` are set**
   (`settings.webhooks_enabled`); with them unset, any `callback_url` is a 400.
   The allow-list is the authoritative egress control; the IP check is defence in
   depth (a DNS-rebind of an allow-listed host is out of scope).
+- **Video posters are on-request and are their own image record.**
+  `POST /files/{id}/poster` (owner-scoped) admits a *ready* video (400 non-video,
+  409 not-ready) and enqueues `generate_poster_task`; the client polls
+  `GET /files/{id}` until `poster_upload_id` is set. The worker downloads the
+  compressed video, `ffmpeg -ss` extracts one frame (default ~10% in via an
+  ffprobe of the clip, or an explicit `at_seconds`), runs it through the **exact**
+  image `validate_and_strip_image` path (pyvips → WebP), stores it under
+  `posters/<uuid>.webp`, and creates a normal `kind=image` `uploads` row; then
+  `set_poster` links the video → poster. If the video was DELETEd mid-generation
+  `set_poster` returns None and the task discards the poster it just wrote
+  (symmetric with `mark_ready`). The happy path is idempotent (an existing
+  poster is returned, not regenerated); two *simultaneous* requests can each
+  generate one (best-effort, like the upload-dedup races) and the loser is a
+  harmless standalone image row. `DELETE /files/{video}` cascades to the poster
+  (object + row, best-effort).
 - **Image uploads are idempotent per owner, keyed on the input's sha256.**
   `POST /upload/image` hashes the *input* bytes (in a threadpool — it's CPU
   work) and, on a `(owner, content_hash)` hit against a `ready` row, returns the
@@ -117,10 +140,12 @@ Things that will bite you if you don't know them:
   "app.main:app")`, which makes the worker resolve and import `app.main` (for
   FastAPI-style dependency injection in tasks, even though no task uses it
   today). This transitively imports `app.routers.files` → `image_vips` →
-  `pyvips`, which is why `Dockerfile.worker` installs libvips even though
-  `tasks.py` never calls it directly. Forgetting this is exactly how the
-  worker ended up unable to boot at all during this pass (see git history) —
-  if you add a new import to `app/routers/*.py` that needs a new system
+  `pyvips`, which is one reason `Dockerfile.worker` installs libvips. The other,
+  now, is direct: `generate_poster_task` in `tasks.py` calls
+  `image_vips.validate_and_strip_image` itself (frame → WebP). Either way the
+  worker needs libvips; forgetting this is exactly how the worker ended up
+  unable to boot at all during an earlier pass (see git history) — if you add a
+  new import to `app/routers/*.py` **or `app/tasks.py`** that needs a new system
   library, the worker needs it too.
 - **`taskiq worker` is run *without* `--fs-discover`.** That flag recursively
   scans the working directory for task modules, and inside the container that
@@ -241,7 +266,7 @@ missing `S3_BUCKET`/`GCS_BUCKET` for the matching `STORAGE_BACKEND`, an empty
   server-side (`logger.warning`/`.error`) first. Never add a route that does
   `detail=str(e)` on an arbitrary exception.
 - **Storage keys**: `images/<uuid>.webp`, `raw/videos/<uuid>.<ext>`,
-  `videos/<uuid>_compressed.mp4`. Video extensions are sanitized
+  `videos/<uuid>_compressed.mp4`, `posters/<uuid>.webp`. Video extensions are sanitized
   (`_sanitize_extension` in `files.py`) to `[a-z0-9]`, ≤8 chars, before
   reaching the key — never interpolate a client-supplied filename into a key
   unsanitized.
@@ -272,12 +297,17 @@ idempotency) are the load-bearing details.
 
 Honest list, not hidden anywhere else:
 
-- **Webhook delivery is fire-and-log, not a durable queue** — an exhausted
-  delivery (all `WEBHOOK_MAX_ATTEMPTS` failed) is only logged (`logger.error`),
-  not persisted for later replay. A real dead-letter queue + a manual redelivery
-  endpoint is the next step. Also: delivery is awaited inline in the worker task,
-  so a slow/dead receiver ties up that worker slot for up to the retry budget
-  (bounded by the per-attempt timeout × attempts + backoff).
+- **Webhook delivery is decoupled + dead-lettered, but replay is manual and the
+  delivery task still blocks on its own retry budget.** Delivery moved to its own
+  `deliver_webhook_task` (a slow receiver no longer ties up the *compression*
+  slot) and an exhausted delivery is now a durable dead-letter record on the row
+  (`webhook_status='failed'`, replayable via `POST /files/{id}/redeliver`).
+  Remaining gaps: the delivery task still `await`s the full retry budget inline
+  (so a dead receiver holds a *delivery* worker slot for that long — no separate
+  low-priority delivery queue), and redelivery is owner-triggered, not automatic
+  (no scheduled re-attempt of dead-lettered rows). A dedicated deliveries table
+  (vs. row-state) would also be needed if a single upload ever needed multiple
+  callbacks/events.
 - **Scopes are coarse** — per-token *identity* exists and scopes uploads,
   listing, deletion, **and now `GET /tasks/{id}`** to the owner, but there are
   no roles/scopes beyond "owns its own uploads" (e.g. no read-only vs.

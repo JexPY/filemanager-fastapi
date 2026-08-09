@@ -61,7 +61,13 @@ and a Redis instance, nothing else.
 - **Signed completion webhooks** — pass `callback_url` on a video upload and the
   worker POSTs a signed `video.completed`/`video.failed` payload when it's done,
   so you don't have to poll. HMAC-SHA256 signed; SSRF-guarded by a host
-  allow-list (see **Webhooks**).
+  allow-list; delivered on its **own** task (a slow receiver never blocks
+  compression), with the outcome persisted so an exhausted delivery can be
+  replayed via `POST /files/{id}/redeliver` (see **Webhooks**).
+- **Video posters (on request)** — `POST /files/{id}/poster` extracts a frame
+  from a ready video and stores it as its own WebP image record, linked back
+  from the video via `poster_upload_id`. Reuses the exact image validate/strip
+  pipeline. Optional `at_seconds` picks the frame (default ~10% in).
 - **`/healthz`, `/readyz`** — liveness and dependency-readiness probes
   (`/readyz` checks Redis, storage, and the Postgres metadata store).
 
@@ -101,6 +107,10 @@ curl -H "Authorization: Bearer $TOKEN" -F "file=@clip.mp4" \
 # Poll the result
 curl -H "Authorization: Bearer $TOKEN" http://localhost:9000/tasks/<task_id>
 
+# Request a poster for a ready video, then poll the video until poster_upload_id is set
+curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:9000/files/<video_id>/poster
+curl -H "Authorization: Bearer $TOKEN" http://localhost:9000/files/<video_id>
+
 # List your uploads (owner-scoped), then delete one
 curl -H "Authorization: Bearer $TOKEN" http://localhost:9000/files
 curl -X DELETE -H "Authorization: Bearer $TOKEN" http://localhost:9000/files/<id>
@@ -121,7 +131,9 @@ All routes except `/healthz`/`/readyz` require `Authorization: Bearer <token>`.
 | GET | `/tasks/{task_id}` | — | `{status: "pending"\|"completed"\|"failed", ...}`; `404` for an unknown id **or another owner's task** |
 | GET | `/files` | query `limit`,`offset`,`kind` | `{files: [{id, kind, status, storage_key, size_bytes, …}], limit, offset}` — caller's uploads, newest first |
 | GET | `/files/{id}` | — | one upload record, or `404` if it isn't the caller's |
-| DELETE | `/files/{id}` | — | `204` after deleting the object + record; `404` if it isn't the caller's |
+| DELETE | `/files/{id}` | — | `204` after deleting the object + record (a video's poster is deleted too); `404` if it isn't the caller's |
+| POST | `/files/{id}/poster` | optional form `at_seconds` | `202 {status: "accepted", video_id, task_id, poll}` for a ready video; `200 {status: "ready", poster}` if one already exists; `400` non-video, `409` not ready, `404` if not the caller's |
+| POST | `/files/{id}/redeliver` | — | `202 {status: "accepted", id, event, task_id}` re-enqueues the terminal webhook; `400` if no `callback_url`/webhooks off, `409` while still processing, `404` if not the caller's |
 | POST | `/generate/qrcode` | form `content` | `image/png` bytes |
 | GET | `/healthz` | — | `{status: "ok"}` |
 | GET | `/readyz` | — | `200`/`503` with a per-dependency breakdown |
@@ -158,10 +170,18 @@ and `WEBHOOK_ALLOWED_HOSTS` are set; until then any `callback_url` is rejected
 `400`. A `callback_url` is admitted at upload time only if it is `https`
 (unless `WEBHOOK_ALLOW_INSECURE_HTTP`), its host is on `WEBHOOK_ALLOWED_HOSTS`,
 and — unless `WEBHOOK_ALLOW_PRIVATE_IPS` — it doesn't resolve to a
-private/loopback address (SSRF egress control). Delivery retries with
-exponential backoff up to `WEBHOOK_MAX_ATTEMPTS` and is best-effort: an
-exhausted delivery is logged, never retried durably, and never affects the
-compression result.
+private/loopback address (SSRF egress control).
+
+**Delivery + replay.** Delivery runs on its **own** TaskIQ task (the compression
+task only enqueues it), so a slow or dead receiver never ties up a compression
+worker slot. It retries with exponential backoff up to `WEBHOOK_MAX_ATTEMPTS`
+and is best-effort — it never affects the compression result. The outcome of the
+last cycle is persisted on the `uploads` row (`webhook_status` of
+`pending`/`delivered`/`failed`, plus `webhook_attempts` and `webhook_last_error`,
+all visible via `GET /files/{id}`). An exhausted delivery (`webhook_status:
+"failed"`) is a durable dead-letter record you can replay any time with
+`POST /files/{id}/redeliver`, which re-sends the current terminal event with the
+same stable `X-Webhook-Id` so an already-processed receiver can dedupe.
 
 ## Configuration
 

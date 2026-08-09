@@ -14,10 +14,13 @@ Two independent concerns live here:
   the worker's outbound POST safe against SSRF); the IP check is defence in depth.
   Rejections raise `WebhookValidationError` with a client-safe message -> 400.
 
-* **Delivery** (`deliver_webhook`, runs in the worker): HMAC-SHA256 signs the
-  body, POSTs with retries + exponential backoff, and is entirely best-effort --
-  it never raises, so a dead webhook can't fail or mask the compression result.
-  Exhausted deliveries are logged (a durable dead-letter queue is backlog).
+* **Delivery** (`deliver_webhook`, runs in the worker's own webhook task): HMAC-
+  SHA256 signs the body, POSTs with retries + exponential backoff, and is
+  entirely best-effort -- it never raises, so a dead webhook can't fail or mask
+  the compression result. It returns a WebhookDeliveryResult; the delivery task
+  persists that outcome on the uploads row (webhook_status/attempts/last_error),
+  so an exhausted delivery is a durable dead-letter record that the owner can
+  replay via POST /files/{id}/redeliver -- not just a log line.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ import json
 import logging
 import socket
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -43,6 +47,17 @@ logger = logging.getLogger(__name__)
 
 class WebhookValidationError(ValueError):
     """A client-supplied callback_url that fails admission. Message is client-safe."""
+
+
+@dataclass(frozen=True)
+class WebhookDeliveryResult:
+    """Outcome of one delivery cycle, so the caller can persist a dead-letter
+    record: whether a 2xx was seen, how many attempts it took, and a short
+    reason for the last failure (None on success)."""
+
+    delivered: bool
+    attempts: int
+    last_error: str | None
 
 
 def _reject_if_private(host: str) -> None:
@@ -104,9 +119,12 @@ def _backoff_seconds(attempt: int) -> float:
     return min(settings.WEBHOOK_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)), 30.0)
 
 
-async def deliver_webhook(*, url: str, event: str, data: dict[str, Any], delivery_id: str) -> bool:
-    """Best-effort signed POST to `url`. Returns True on a 2xx, False once all
-    attempts are exhausted. Never raises -- callers can ignore the result."""
+async def deliver_webhook(
+    *, url: str, event: str, data: dict[str, Any], delivery_id: str
+) -> WebhookDeliveryResult:
+    """Best-effort signed POST to `url`. Returns a WebhookDeliveryResult
+    (delivered on a 2xx, else exhausted). Never raises -- callers can ignore
+    the result or persist it as a dead-letter record."""
     payload = {
         "id": delivery_id,
         "event": event,
@@ -127,6 +145,8 @@ async def deliver_webhook(*, url: str, event: str, data: dict[str, Any], deliver
     }
     timeout = aiohttp.ClientTimeout(total=settings.WEBHOOK_TIMEOUT_SECONDS)
 
+    last_error = "no attempt made"
+    attempt = 0
     for attempt in range(1, settings.WEBHOOK_MAX_ATTEMPTS + 1):
         try:
             async with (
@@ -141,7 +161,8 @@ async def deliver_webhook(*, url: str, event: str, data: dict[str, Any], deliver
                         attempt,
                         resp.status,
                     )
-                    return True
+                    return WebhookDeliveryResult(delivered=True, attempts=attempt, last_error=None)
+                last_error = f"HTTP {resp.status}"
                 logger.warning(
                     "Webhook %s got non-2xx from %s (attempt %d, status %d)",
                     delivery_id,
@@ -150,6 +171,7 @@ async def deliver_webhook(*, url: str, event: str, data: dict[str, Any], deliver
                     resp.status,
                 )
         except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
             logger.warning(
                 "Webhook %s delivery to %s failed (attempt %d): %s",
                 delivery_id,
@@ -161,9 +183,10 @@ async def deliver_webhook(*, url: str, event: str, data: dict[str, Any], deliver
             await asyncio.sleep(_backoff_seconds(attempt))
 
     logger.error(
-        "Webhook %s exhausted %d attempts to %s; dead-lettered (logged only)",
+        "Webhook %s exhausted %d attempts to %s; dead-lettered (last error: %s)",
         delivery_id,
         settings.WEBHOOK_MAX_ATTEMPTS,
         url,
+        last_error,
     )
-    return False
+    return WebhookDeliveryResult(delivered=False, attempts=attempt, last_error=last_error)

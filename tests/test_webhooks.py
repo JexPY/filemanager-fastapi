@@ -107,11 +107,13 @@ async def test_deliver_signs_and_posts(webhooks_on: None) -> None:
         return web.Response(status=200)
 
     async with _receiver(handler) as url:
-        ok = await deliver_webhook(
+        result = await deliver_webhook(
             url=url, event="video.completed", data={"id": "u1"}, delivery_id="u1"
         )
 
-    assert ok is True
+    assert result.delivered is True
+    assert result.attempts == 1
+    assert result.last_error is None
     ts = seen["headers"]["X-Webhook-Timestamp"]
     expected = (
         "sha256="
@@ -130,9 +132,10 @@ async def test_deliver_retries_then_succeeds(webhooks_on: None) -> None:
         return web.Response(status=200 if attempts["n"] >= 3 else 500)
 
     async with _receiver(handler) as url:
-        ok = await deliver_webhook(url=url, event="video.completed", data={}, delivery_id="u2")
+        result = await deliver_webhook(url=url, event="video.completed", data={}, delivery_id="u2")
 
-    assert ok is True
+    assert result.delivered is True
+    assert result.attempts == 3
     assert attempts["n"] == 3
 
 
@@ -147,9 +150,11 @@ async def test_deliver_gives_up_after_max_attempts(
         return web.Response(status=500)
 
     async with _receiver(handler) as url:
-        ok = await deliver_webhook(url=url, event="video.failed", data={}, delivery_id="u3")
+        result = await deliver_webhook(url=url, event="video.failed", data={}, delivery_id="u3")
 
-    assert ok is False
+    assert result.delivered is False
+    assert result.attempts == 2
+    assert result.last_error == "HTTP 500"
     assert attempts["n"] == 2
 
 

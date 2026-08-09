@@ -115,6 +115,11 @@ class InMemoryMetadataStore(MetadataStore):
             duration_seconds=None,
             truncated=False,
             callback_url=callback_url,
+            poster_upload_id=None,
+            webhook_status=None,
+            webhook_attempts=0,
+            webhook_last_error=None,
+            webhook_updated_at=None,
             created_at=now,
             updated_at=now,
         )
@@ -208,6 +213,38 @@ class InMemoryMetadataStore(MetadataStore):
         if record is None:
             return None
         updated = replace(record, status=STATUS_FAILED, updated_at=datetime.now(UTC))
+        self.records[upload_id] = updated
+        return updated
+
+    async def get_by_id(self, upload_id: str) -> UploadRecord | None:
+        return self.records.get(upload_id)
+
+    async def set_poster(self, video_id: str, poster_upload_id: str) -> UploadRecord | None:
+        record = self.records.get(video_id)
+        if record is None:
+            return None
+        updated = replace(record, poster_upload_id=poster_upload_id, updated_at=datetime.now(UTC))
+        self.records[video_id] = updated
+        return updated
+
+    async def mark_webhook(
+        self,
+        upload_id: str,
+        *,
+        status: str,
+        attempts: int = 0,
+        last_error: str | None = None,
+    ) -> UploadRecord | None:
+        record = self.records.get(upload_id)
+        if record is None:
+            return None
+        updated = replace(
+            record,
+            webhook_status=status,
+            webhook_attempts=attempts,
+            webhook_last_error=last_error,
+            webhook_updated_at=datetime.now(UTC),
+        )
         self.records[upload_id] = updated
         return updated
 
