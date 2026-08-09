@@ -10,7 +10,8 @@ once uploaded (see Sharp edges below).
 
 ## Architecture, in one glance
 
-Two process types, one codebase, selected by which CMD runs:
+Two process types, one codebase, selected by which CMD runs (plus **nginx** as
+the entry proxy — see below):
 
 - **`api`** — `uvicorn app.main:app`. Handles all HTTP requests.
 - **`worker`** — `taskiq worker app.broker:broker app.tasks`. Runs FFmpeg.
@@ -28,9 +29,12 @@ client --(bearer auth)--> api ---+--> image: pyvips validate/strip -> storage ->
 Both processes import the same `app/` package and share a Redis instance, a
 storage backend (volume or bucket), and a Postgres metadata store — that's the
 entire coupling between them. `api` writes an `uploads` row on every upload and
-serves the list/get/delete routes; the `worker` updates a video's row when
-compression finishes. Everything else (routes, health checks) only exists in
-`api`.
+serves the list/get/delete/download/share routes; the `worker` updates a video's
+row when compression finishes. Everything else (routes, health checks) only
+exists in `api`. **nginx** is the entry reverse proxy (`:9000`; api is behind it
+on `:9001`): it proxies every route to `api` and, for `local`-backend video
+playback, serves the bytes itself from `media_data` via the app's
+`X-Accel-Redirect` (sendfile + Range) — the app stays out of the byte path.
 
 ## Non-obvious invariants
 
@@ -93,6 +97,55 @@ Things that will bite you if you don't know them:
   generate one (best-effort, like the upload-dedup races) and the loser is a
   harmless standalone image row. `DELETE /files/{video}` cascades to the poster
   (object + row, best-effort).
+- **Video playback is one stable URL; visibility picks the auth *and* the URL
+  form; the backend picks the byte path; a signed URL is a hidden, disposable
+  detail.** `GET /files/{id}/download` is the permanent, backend-agnostic URL
+  clients embed (video-only → 400 otherwise). It does **not** use the
+  `verify_token` dependency — a `public` video is fetchable with no token, so
+  auth is resolved inline from an *optional* bearer (`_resolve_owner_optional`).
+  `visibility` (`private`|`public`, on the `uploads` row, owner-set via
+  `PATCH /files/{id}`) decides: **private** → owner bearer required, non-owner or
+  missing token → **404 not 403** (existence never leaks, like the rest of the
+  owner-scoping); **public** → tokenless, and if a `*_PUBLIC_BASE_URL` is set for
+  the backend a 302 to the stable `public_url(key)` (never a per-request presign
+  — a unique signature would defeat CDN caching), else it falls back to the same
+  signed-URL delivery as private (still tokenless). The per-backend byte path
+  lives in one resolver (`resolve_playback`) **keyed on `settings.STORAGE_BACKEND`,
+  mirroring `imgproxy.build_source_url`**: `local` → nginx `X-Accel-Redirect`
+  (dev fallback `LOCAL_MEDIA_SERVE_MODE=direct` → Starlette `FileResponse`),
+  `s3` → 302 to a freshly-minted presigned GET (`VIDEO_PLAYBACK_URL_TTL_SECONDS`),
+  `gcp` → 302 to a GCS V4 signed URL. Range works in every path and the app is
+  **out of the byte path** (nginx or the object store moves the bytes). **HLS is
+  out of scope** (progressive + Range only).
+- **The nginx `internal;` location is the load-bearing security property for
+  local playback.** `local`+`xaccel` returns an empty body with
+  `X-Accel-Redirect: /internal-media/<storage_key>`; nginx serves the file from
+  the read-only `media_data` volume with `sendfile` + native Range. The
+  `/internal-media/` location in `nginx/nginx.conf` **MUST stay `internal;`** —
+  it can only be entered via an upstream X-Accel-Redirect, never a direct client
+  request, so the download route's visibility/ownership auth is never bypassed.
+  The storage key is UUID-based and already sanitized, but the resolver still
+  treats it as untrusted when interpolating (`_assert_safe_media_key`: no `..`,
+  no leading `/`). **nginx is now the entry proxy on :9000** (api moved to :9001,
+  debug-only); only nginx interprets X-Accel, so local video playback does not
+  work hitting the api directly.
+- **The share token is a secret capability — unlisted, revocable, and never in
+  `to_public()`.** `POST /files/{id}/share` mints/rotates a
+  `secrets.token_urlsafe(32)` (owner-scoped) and is the **only** response that
+  returns it (+ the shareable URL); it is deliberately excluded from
+  `to_public()` (so it never leaks via listings, `GET /files/{id}`, webhooks, or
+  their logs). `GET /share/{token}` resolves it via the **unscoped**
+  `get_by_share_token` (the token *is* the grant, like `get_by_id`) and serves
+  the video regardless of `visibility`, tokenless; unknown/revoked → 404.
+  `DELETE /files/{id}/share` clears it. The `share_token` column has a **UNIQUE
+  index** (Postgres NULLs are distinct, so unlimited rows may have none while a
+  minted token is guaranteed unique) — see migration `0006`.
+- **GCS can now sign private playback URLs.** `GCSStorage.presigned_get_url`
+  does V4 signing **locally** from the service-account key already loaded
+  (gcloud-aio-storage's `Blob.get_signed_url`) — no CDN, no extra Google product,
+  no network round-trip for signing (clamped to GCS's 7-day cap). Before this,
+  GCS inherited the base `presigned_get_url` returning `None`, so private GCS
+  objects had no fetchable URL at all. Verified by mock only (no live GCP here).
 - **Image uploads are idempotent per owner, keyed on the input's sha256.**
   `POST /upload/image` hashes the *input* bytes (in a threadpool — it's CPU
   work) and, on a `(owner, content_hash)` hit against a `ready` row, returns the
@@ -248,8 +301,9 @@ expected noise, not a real problem.
 
 `app/config.py`'s `Settings()` validates at import time and **fails fast** on:
 missing `S3_BUCKET`/`GCS_BUCKET` for the matching `STORAGE_BACKEND`, an empty
-`FILE_MANAGER_BEARER_TOKENS`, and a missing/invalid-hex `IMGPROXY_KEY` or
-`IMGPROXY_SALT`. See `.env-example` for the full variable list with comments;
+`FILE_MANAGER_BEARER_TOKENS`, a missing/invalid-hex `IMGPROXY_KEY` or
+`IMGPROXY_SALT`, and an invalid `LOCAL_MEDIA_SERVE_MODE` (must be
+`xaccel`|`direct`). See `.env-example` for the full variable list with comments;
 `readme.md` has the same as a table.
 
 ## Conventions
@@ -293,6 +347,19 @@ upload. Every piece was verified end to end against a clean stack, not just unit
 tests. The invariants above (metadata singleton, video record state machine,
 idempotency) are the load-bearing details.
 
+## What the visibility/playback pass added (was backlog, now done)
+
+The "stream-and-share" pass gave video a real URL story: one stable,
+backend-agnostic `GET /files/{id}/download` (+ `GET /share/{token}`) with working
+HTTP Range on **all three** backends (local via nginx X-Accel, s3 via presigned
+302, gcp via a newly-added V4 signed URL), an owner-controlled visibility model
+(`private`/`public` + an unlisted, revocable share token; migration `0006`), and
+nginx re-introduced as the entry proxy. The load-bearing details are the four
+invariants above (the download-resolution switch, the `internal;` security
+property, visibility = auth-form + byte-path split, share-token secrecy). Parked
+by design: HLS/ABR, streaming *upload*, and CDN signed-cookies for
+private-at-scale playback (see backlog).
+
 ## Known sharp edges & backlog
 
 Honest list, not hidden anywhere else:
@@ -313,9 +380,20 @@ Honest list, not hidden anywhere else:
   no roles/scopes beyond "owns its own uploads" (e.g. no read-only vs.
   read-write tokens, no admin).
 - **GCS backend is unit-tested only** (mocked client) — no live GCP
-  project/credentials in this environment. `local` and `s3` (against real
-  MinIO) are verified end to end; the Postgres metadata store is verified
-  against real PostgreSQL 17.
+  project/credentials in this environment. This now includes the V4
+  signed-playback-URL path (`GCSStorage.presigned_get_url`), asserted by mock.
+  `local` and `s3` (against real MinIO) are verified end to end — including
+  **video playback with Range** (local via nginx X-Accel → 206; s3 via
+  302→presigned→Range → 206) and the full visibility/share matrix; the Postgres
+  metadata store is verified against real PostgreSQL 17.
+- **Private-at-scale playback + resume-safety is parked.** The `private` path is
+  a 302 to a signed URL; the player caches the *resolved* signed URL, so a seek
+  after `VIDEO_PLAYBACK_URL_TTL_SECONDS` can hit an expired signature (sized-TTL
+  is the mitigation). The bulletproof upgrade — CDN **signed cookies** / a fully
+  CDN-fronted private path where the player only ever talks to the stable URL —
+  is a later pass, warranted only when high-read private media or a hard
+  never-break-on-resume promise appears. CDN wiring itself is a deploy concern:
+  `*_PUBLIC_BASE_URL` = the CDN domain, zero code change.
 - **No streaming I/O** — uploads are fully buffered in memory (bounded by
   `MAX_IMAGE_UPLOAD_BYTES`/`MAX_VIDEO_UPLOAD_BYTES`, but still buffered, not
   streamed to storage). The single biggest scalability lever if this needs
@@ -327,9 +405,10 @@ Honest list, not hidden anywhere else:
   Postgres) — behavior is fail-closed and visible (e.g. `StorageError`/
   `MetadataError` → generic 502), which is correct; this would be a reliability
   layer on top.
-- **Production reverse-proxy/TLS is not shipped** — the old `nginx` service
-  was removed (it had no config and did nothing); pick a reverse proxy /
-  TLS terminator appropriate to your deployment target.
+- **TLS termination is not shipped** — nginx is back as a real entry proxy
+  (`nginx/nginx.conf`: proxy_pass + the `internal;` X-Accel location for local
+  playback), but it terminates plain HTTP only. Add a TLS terminator
+  (nginx `listen 443 ssl`, or an upstream LB/ingress) for production.
 
 None of the above are silently broken — each is a deliberate scope boundary.
 Start a fresh planning pass against the actual code before picking one up,
