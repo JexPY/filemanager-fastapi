@@ -238,9 +238,7 @@ class MetadataStore(ABC):
         no such row for this owner (unknown id or another owner's -> 404 upstream)."""
 
     @abstractmethod
-    async def set_share_token(
-        self, upload_id: str, owner: str, token: str
-    ) -> UploadRecord | None:
+    async def set_share_token(self, upload_id: str, owner: str, token: str) -> UploadRecord | None:
         """Owner-scoped mint/rotate of the share capability token. None means no
         such row for this owner."""
 
@@ -576,9 +574,7 @@ class PostgresMetadataStore(MetadataStore):
             raise MetadataError(f"Failed to set visibility on upload {upload_id!r}") from exc
         return _row_to_record(row) if row is not None else None
 
-    async def set_share_token(
-        self, upload_id: str, owner: str, token: str
-    ) -> UploadRecord | None:
+    async def set_share_token(self, upload_id: str, owner: str, token: str) -> UploadRecord | None:
         pool = await self._get_pool()
         try:
             row = await pool.fetchrow(

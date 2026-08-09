@@ -260,9 +260,7 @@ class InMemoryMetadataStore(MetadataStore):
         self.records[upload_id] = updated
         return updated
 
-    async def set_share_token(
-        self, upload_id: str, owner: str, token: str
-    ) -> UploadRecord | None:
+    async def set_share_token(self, upload_id: str, owner: str, token: str) -> UploadRecord | None:
         record = self.records.get(upload_id)
         if record is None or record.owner != owner:
             return None

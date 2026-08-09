@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     # imgproxy_*_url response fields are just paths, not fetchable URLs.
     IMGPROXY_BASE_URL: str = Field(default="")
 
+    # The API's own externally-reachable origin (scheme+host, e.g.
+    # https://media.example.com), used to build absolute share/download URLs in
+    # responses. Blank -> those responses return relative paths and the client
+    # prefixes its own origin.
+    PUBLIC_BASE_URL: str = Field(default="")
+
     # Auth
     FILE_MANAGER_BEARER_TOKENS: str = Field(default="")
 

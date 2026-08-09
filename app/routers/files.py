@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import logging
 import re
+import secrets
 import uuid
 
 from fastapi import (
@@ -19,6 +20,7 @@ from fastapi import (
 )
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
 
 from app.broker import broker
 from app.config import settings
@@ -29,6 +31,8 @@ from app.services.metadata import (
     KIND_VIDEO,
     STATUS_PROCESSING,
     STATUS_READY,
+    VISIBILITY_PRIVATE,
+    VISIBILITY_PUBLIC,
     MetadataError,
     get_metadata_store,
 )
@@ -108,6 +112,14 @@ def _sanitize_extension(filename: str) -> str:
     raw_ext = filename.rsplit(".", 1)[-1] if "." in filename else ""
     cleaned = _NON_ALNUM_RE.sub("", raw_ext.lower())[:_MAX_EXTENSION_LENGTH]
     return cleaned or _DEFAULT_EXTENSION
+
+
+def _public_url(path: str) -> str:
+    """Turn an app-relative path (e.g. /share/<token>) into an absolute URL when
+    PUBLIC_BASE_URL is configured, otherwise return the path unchanged so the
+    client prefixes its own origin."""
+    base = settings.PUBLIC_BASE_URL.rstrip("/")
+    return f"{base}{path}" if base else path
 
 
 @router.post("/generate/qrcode", dependencies=[Depends(verify_token)])
@@ -425,6 +437,121 @@ async def get_file(file_id: str, owner: str = Depends(verify_token)):
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     return record.to_public()
+
+
+class _VisibilityBody(BaseModel):
+    visibility: str
+
+
+@router.patch("/files/{file_id}")
+async def set_file_visibility(
+    file_id: str, body: _VisibilityBody, owner: str = Depends(verify_token)
+):
+    """Set a video's playback visibility (`private` | `public`). Owner-scoped
+    (404, not 403, for anything that isn't the caller's, so existence never leaks).
+    Video-only -- images are served through imgproxy and have no visibility model
+    here. `public` makes /files/{id}/download and any share link fetchable without
+    a token; `private` restricts /download to the owner.
+    """
+    if body.visibility not in (VISIBILITY_PRIVATE, VISIBILITY_PUBLIC):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"visibility must be '{VISIBILITY_PRIVATE}' or '{VISIBILITY_PUBLIC}'",
+        )
+    store = await get_metadata_store()
+    try:
+        record = await store.get(file_id, owner)
+    except MetadataError as exc:
+        logger.error("Failed to load upload %s for visibility: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    if record.kind != KIND_VIDEO:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Visibility only applies to videos"
+        )
+
+    try:
+        updated = await store.set_visibility(file_id, owner, body.visibility)
+    except MetadataError as exc:
+        logger.error("Failed to set visibility on %s: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    # updated is None only on a delete race between the load and the update;
+    # treat it as gone.
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return updated.to_public()
+
+
+@router.post("/files/{file_id}/share")
+async def create_share_link(file_id: str, owner: str = Depends(verify_token)):
+    """Mint (or rotate) an unlisted, revocable share token for one of the caller's
+    videos. A valid token serves the video regardless of visibility via
+    GET /share/{token}. This is the ONLY endpoint that returns the token + the
+    shareable URL -- it's a secret capability and never appears in to_public()
+    (listings/webhooks/GET /files/{id}). Calling again rotates the token, which
+    revokes the previous link.
+    """
+    store = await get_metadata_store()
+    try:
+        record = await store.get(file_id, owner)
+    except MetadataError as exc:
+        logger.error("Failed to load upload %s for share: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    if record.kind != KIND_VIDEO:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Share links only apply to videos"
+        )
+
+    token = secrets.token_urlsafe(32)
+    try:
+        updated = await store.set_share_token(file_id, owner, token)
+    except MetadataError as exc:
+        logger.error("Failed to set share token on %s: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return {
+        "id": file_id,
+        "share_token": token,
+        "share_url": _public_url(f"/share/{token}"),
+    }
+
+
+@router.delete("/files/{file_id}/share", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_share_link(file_id: str, owner: str = Depends(verify_token)):
+    """Revoke the caller's video share link (clears the token; the old URL now
+    404s). Owner-scoped. Idempotent -- revoking when there's no token is a no-op
+    204, but a non-owner / unknown id is still 404."""
+    store = await get_metadata_store()
+    try:
+        record = await store.get(file_id, owner)
+    except MetadataError as exc:
+        logger.error("Failed to load upload %s for share revoke: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    try:
+        await store.clear_share_token(file_id, owner)
+    except MetadataError as exc:
+        logger.error("Failed to clear share token on %s: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.delete("/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
