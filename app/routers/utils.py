@@ -91,10 +91,17 @@ def _public_url(path: str) -> str:
     return f"{base}{path}" if base else path
 
 
-def _storage_public_base_configured() -> bool:
-    """Does the current storage backend have a public base URL configured?"""
-    if settings.STORAGE_BACKEND == "local":
-        return bool(settings.LOCAL_PUBLIC_BASE_URL)
+def _public_playback_url_available() -> bool:
+    """Whether GET /files/{id}/download may 302 a *public* video straight to a
+    stable, directly-servable public_url(key) instead of X-Accel / presigning.
+
+    True only for the object-store backends (s3/gcp) with a *_PUBLIC_BASE_URL --
+    a CDN / public-bucket domain that actually serves the object. **Never for
+    local**: the media volume is exposed only through nginx's internal X-Accel
+    location (never a public path -- that's the visibility security property),
+    so a 302 to LOCAL_PUBLIC_BASE_URL/<key> would dead-end on a 404. Local public
+    videos are served tokenless via the same X-Accel path as private ones.
+    """
     if settings.STORAGE_BACKEND == "s3":
         return bool(settings.S3_PUBLIC_BASE_URL)
     if settings.STORAGE_BACKEND == "gcp":

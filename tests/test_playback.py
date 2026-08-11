@@ -49,10 +49,10 @@ async def test_local_public_download_is_xaccel_no_token(
     fake_metadata: InMemoryMetadataStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Hermetic against the developer's .env: with no public base URL configured
-    # for the local backend, a public video resolves via nginx X-Accel. The
-    # configured-base -> 302 branch is covered by
-    # test_public_with_public_base_302s_to_stable_url below.
+    # Local always serves a public video via nginx X-Accel -- the media volume
+    # has no public URL to 302 to. LOCAL_PUBLIC_BASE_URL is irrelevant here (the
+    # set-anyway case is the regression test below); the public_url() 302 branch
+    # is s3/gcp only.
     monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
     monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "")
     rec = await _seed_video(fake_metadata, visibility="public")
@@ -61,6 +61,22 @@ async def test_local_public_download_is_xaccel_no_token(
     assert resp.headers["X-Accel-Redirect"] == "/internal-media/videos/v_compressed.mp4"
     assert resp.headers["content-type"] == "video/mp4"
     assert resp.content == b""  # app emits no bytes; nginx fills the body
+
+
+async def test_local_public_download_stays_xaccel_even_with_public_base(
+    client: httpx.AsyncClient,
+    fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: LOCAL_PUBLIC_BASE_URL set to a base nginx doesn't serve (e.g.
+    # the entry proxy origin itself) must NOT turn local public playback into a
+    # 302 to a dead /videos/<key> URL. Local always resolves via X-Accel.
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "http://localhost:9000")
+    rec = await _seed_video(fake_metadata, visibility="public")
+    resp = await client.get(f"/files/{rec.id}/download")  # no auth
+    assert resp.status_code == 200
+    assert resp.headers["X-Accel-Redirect"] == "/internal-media/videos/v_compressed.mp4"
 
 
 async def test_local_private_download_requires_owner(
@@ -105,7 +121,7 @@ async def test_download_unknown_id_404(client: httpx.AsyncClient) -> None:
     assert (await client.get("/files/nope/download")).status_code == 404
 
 
-# --- public with a configured public base URL -> 302 to the stable URL --------
+# --- object store (s3/gcp) + a public base -> 302 to the stable URL -----------
 
 
 async def test_public_with_public_base_302s_to_stable_url(
@@ -114,11 +130,12 @@ async def test_public_with_public_base_302s_to_stable_url(
     fake_storage: InMemoryStorageBackend,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Setting a public base flips the resolver to the stable public_url() branch
-    # (no per-request presigning). The URL itself comes from the backend's
-    # public_url(); for the fake that's its own base -- the point of the test is
-    # that public + a configured base -> a plain 302 to the object URL, tokenless.
-    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "https://cdn.example.com")
+    # An object-store backend with a public/CDN base -> a plain 302 to the stable
+    # public_url(), tokenless, no per-request presigning. Local is excluded (it
+    # has no public URL), so this is s3/gcp only. The URL comes from the backend's
+    # public_url(); for the fake that's its own base.
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "s3")
+    monkeypatch.setattr(settings, "S3_PUBLIC_BASE_URL", "https://cdn.example.com")
     rec = await _seed_video(fake_metadata, visibility="public")
     resp = await client.get(f"/files/{rec.id}/download")  # no token
     assert resp.status_code == 302

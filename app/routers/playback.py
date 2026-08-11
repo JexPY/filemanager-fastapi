@@ -6,7 +6,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 
 from app.routers.auth import _resolve_owner_optional, security, verify_token
-from app.routers.utils import _image_source_url, _storage_public_base_configured, resolve_playback
+from app.routers.utils import _image_source_url, _public_playback_url_available, resolve_playback
 from app.services.imgproxy import generate_signed_url
 from app.services.metadata import (
     KIND_IMAGE,
@@ -34,11 +34,11 @@ async def download_file_endpoint(
     """The permanent, backend-agnostic playback URL -- the one clients embed.
     Visibility decides the auth *and* the URL form:
 
-    * `public` -> if a public base URL is configured for the backend, 302 to the
-      stable `public_url(key)` (no token, cacheable behind a CDN, app out of the
-      read path); otherwise fall back to the signed-URL/resolver path, still
-      tokenless. No per-request presigning for public media -- a unique signature
-      would defeat CDN caching.
+    * `public` -> tokenless. On an object store (s3/gcp) with a public/CDN base,
+      302 to the stable `public_url(key)` (cacheable behind a CDN, app out of the
+      read path; no per-request presigning, which would defeat that caching). On
+      local, always the tokenless X-Accel path -- the media volume has no public
+      URL to redirect to.
     * `private` -> requires the owner bearer; a non-owner or missing token gets
       404 (not 403), matching the rest of the owner-scoping so existence never
       leaks. Then resolved per backend (local X-Accel / s3 presigned / gcs signed).
@@ -62,8 +62,12 @@ async def download_file_endpoint(
         )
 
     if record.visibility == VISIBILITY_PUBLIC:
-        # Stable, embeddable URL when one exists; else tokenless signed delivery.
-        if _storage_public_base_configured():
+        # Object stores (s3/gcp) with a public/CDN base -> a stable, embeddable
+        # 302 to public_url(key). NOT local: its media volume is served only via
+        # nginx's internal X-Accel location, so a 302 to LOCAL_PUBLIC_BASE_URL/<key>
+        # would dead-end -- local public videos fall through to the tokenless
+        # X-Accel path below (resolve_playback), same as private ones.
+        if _public_playback_url_available():
             backend = await get_storage()
             return RedirectResponse(
                 url=backend.public_url(record.storage_key), status_code=status.HTTP_302_FOUND
