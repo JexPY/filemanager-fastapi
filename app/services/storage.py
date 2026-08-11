@@ -74,6 +74,13 @@ class StorageBackend(ABC):
         the object's regular url."""
         return None
 
+    def local_path(self, key: str) -> str | None:
+        """The object's path on a filesystem the caller shares, if any
+        (LocalStorage), else None. Lets a co-located worker hand ffmpeg the path
+        directly instead of downloading the bytes into RAM. Object stores have no
+        shared filesystem -> None."""
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Local filesystem backend
@@ -94,6 +101,12 @@ class LocalStorage(StorageBackend):
 
     def public_url(self, key: str) -> str:
         return f"{self._base}/{key}" if self._base else key
+
+    def local_path(self, key: str) -> str:
+        """The object's on-disk path, through the same traversal guard as
+        read/write. A co-located worker (sharing the media volume) hands this
+        straight to ffmpeg, so the bytes never round-trip through its memory."""
+        return str(self._resolve(key))
 
     async def upload(self, data: bytes, key: str, content_type: str) -> StorageObject:
         target = self._resolve(key)

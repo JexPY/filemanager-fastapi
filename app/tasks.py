@@ -1,7 +1,6 @@
 import asyncio
 import contextlib
 import logging
-import os
 import uuid
 
 import aiofiles
@@ -21,10 +20,36 @@ from app.services.metadata import (
     UploadRecord,
     get_metadata_store,
 )
-from app.services.storage import StorageError, delete_file, download_file, upload_file
+from app.services.storage import StorageError, delete_file, get_storage, upload_file
 from app.services.webhooks import deliver_webhook
 
 logger = logging.getLogger(__name__)
+
+
+async def _resolve_ffmpeg_input(storage_key: str) -> str:
+    """Resolve an ffmpeg ``-i`` source for a stored object WITHOUT buffering its
+    bytes through worker RAM -- the input side is the real memory waste in the
+    video pipeline (an N-hundred-MB upload was previously downloaded whole, then
+    rewritten to /tmp, before ffmpeg even started). Mirrors resolve_playback's
+    per-backend split via the storage singleton (itself selected by
+    STORAGE_BACKEND):
+
+    * local  -> the object's on-disk path in the shared media volume; ffmpeg
+      reads it directly, no copy at all.
+    * s3/gcp -> a short-lived presigned GET URL; ffmpeg streams it over HTTPS
+      (range requests to seek), so nothing is downloaded first.
+
+    The storage key is UUID-based and already sanitized upstream; the local path
+    still passes through LocalStorage's traversal guard.
+    """
+    backend = await get_storage()
+    local = backend.local_path(storage_key)
+    if local is not None:
+        return local
+    signed = await backend.presigned_get_url(storage_key, settings.FFMPEG_INPUT_URL_TTL_SECONDS)
+    if not signed:
+        raise StorageError(f"Backend cannot produce an ffmpeg input source for {storage_key!r}")
+    return signed
 
 
 async def _enqueue_webhook(record: UploadRecord, event: str) -> None:
@@ -72,7 +97,6 @@ async def _probe_duration_seconds(input_path: str) -> float | None:
 @broker.task
 async def compress_video_task(raw_storage_key: str, original_filename: str, upload_id: str) -> dict:
     unique_id = uuid.uuid4().hex
-    input_path = f"/tmp/{unique_id}_{os.path.basename(raw_storage_key)}"
     output_path = f"/tmp/{unique_id}_compressed.mp4"
     output_key = f"videos/{unique_id}_compressed.mp4"
     max_duration = settings.VIDEO_MAX_DURATION_SECONDS
@@ -80,15 +104,15 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
     store = await get_metadata_store()
 
     try:
-        # Pull the raw upload from storage (only its key travels through Redis).
-        raw_data = await download_file(raw_storage_key)
-        async with aiofiles.open(input_path, "wb") as f:
-            await f.write(raw_data)
+        # Read the raw upload in place instead of buffering it in RAM: local ->
+        # the on-disk path, s3/gcp -> a presigned URL ffmpeg reads over HTTPS.
+        # Only the key ever travels through Redis.
+        input_source = await _resolve_ffmpeg_input(raw_storage_key)
 
         # Probe the input duration up front so we can tell the caller when the
         # output was truncated (input longer than the cap) instead of silently
         # dropping footage.
-        input_duration = await _probe_duration_seconds(input_path)
+        input_duration = await _probe_duration_seconds(input_source)
         truncated = input_duration is not None and input_duration > max_duration
 
         # Run FFmpeg 7 async: H.264/AAC, cap output at max_duration, -crf 28,
@@ -97,7 +121,7 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
             "ffmpeg",
             "-y",
             "-i",
-            input_path,
+            input_source,
             "-t",
             str(max_duration),
             "-c:v",
@@ -185,10 +209,10 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
         raise
 
     finally:
-        # Cleanup temp files.
-        for path in (input_path, output_path):
-            if await aiofiles.os.path.exists(path):
-                await aiofiles.os.remove(path)
+        # Only the (small) compressed output is a temp file now -- the input was
+        # read in place (local path or presigned URL), never copied to /tmp.
+        if await aiofiles.os.path.exists(output_path):
+            await aiofiles.os.remove(output_path)
 
         # The raw upload has already been fully consumed by ffmpeg above,
         # whether compression succeeded or failed -- it's never referenced
@@ -272,22 +296,21 @@ async def generate_poster_task(upload_id: str, at_seconds: float | None = None) 
 
     unique_id = uuid.uuid4().hex
     src_key = video.storage_key  # the compressed mp4
-    input_path = f"/tmp/{unique_id}_{os.path.basename(src_key)}"
     frame_path = f"/tmp/{unique_id}_poster.png"
 
     try:
-        raw_data = await download_file(src_key)
-        async with aiofiles.open(input_path, "wb") as f:
-            await f.write(raw_data)
+        # Read the compressed video in place (local path or presigned URL) rather
+        # than downloading it into RAM first.
+        input_source = await _resolve_ffmpeg_input(src_key)
 
-        seek = at_seconds if at_seconds is not None else await _poster_seek_seconds(input_path)
+        seek = at_seconds if at_seconds is not None else await _poster_seek_seconds(input_source)
         process = await asyncio.create_subprocess_exec(
             "ffmpeg",
             "-y",
             "-ss",
             f"{seek:.3f}",
             "-i",
-            input_path,
+            input_source,
             "-frames:v",
             "1",
             "-f",
@@ -356,6 +379,5 @@ async def generate_poster_task(upload_id: str, at_seconds: float | None = None) 
         }
 
     finally:
-        for path in (input_path, frame_path):
-            if await aiofiles.os.path.exists(path):
-                await aiofiles.os.remove(path)
+        if await aiofiles.os.path.exists(frame_path):
+            await aiofiles.os.remove(frame_path)

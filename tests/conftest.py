@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,14 +20,15 @@ TEST_TOKEN = "test-token"
 
 
 @pytest.fixture
-def fake_storage(monkeypatch: pytest.MonkeyPatch) -> InMemoryStorageBackend:
+def fake_storage(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryStorageBackend]:
     """Bypasses get_storage()'s lazy singleton build entirely by pre-seeding it,
     so upload_file/download_file/delete_file (imported by name into files.py and
     tasks.py) transparently operate on the fake regardless of who imported them.
     """
     backend = InMemoryStorageBackend()
     monkeypatch.setattr(storage_module, "_storage", backend)
-    return backend
+    yield backend
+    backend.cleanup()
 
 
 @pytest.fixture

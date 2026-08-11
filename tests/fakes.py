@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
+import tempfile
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -30,6 +33,7 @@ class InMemoryStorageBackend(StorageBackend):
         self.content_types: dict[str, str] = {}
         self.deleted_keys: list[str] = []
         self.closed = False
+        self._materialized: dict[str, str] = {}
 
     async def upload(self, data: bytes, key: str, content_type: str) -> StorageObject:
         self.objects[key] = data
@@ -51,13 +55,37 @@ class InMemoryStorageBackend(StorageBackend):
     def public_url(self, key: str) -> str:
         return f"{self._base_url}/{key}"
 
+    def local_path(self, key: str) -> str | None:
+        # Model the local backend: hand back a real on-disk path (materialized
+        # from the stored bytes on first use) so a co-located worker can read
+        # bytes in place, mirroring LocalStorage. Object-store backends
+        # (presign_capable) have no shared filesystem -> None, so the worker's
+        # resolver falls through to presigned_get_url instead.
+        if self._presign_capable or key not in self.objects:
+            return None
+        path = self._materialized.get(key)
+        if path is None:
+            fd, path = tempfile.mkstemp(prefix="fakestore_")
+            with os.fdopen(fd, "wb") as f:
+                f.write(self.objects[key])
+            self._materialized[key] = path
+        return path
+
     async def presigned_get_url(self, key: str, expires_in: int = 3600) -> str | None:
         if not self._presign_capable:
             return None
         return f"{self._base_url}/{key}?X-Amz-Signature=fake&expires={expires_in}"
 
+    def cleanup(self) -> None:
+        """Remove any temp files materialized by local_path (call on teardown)."""
+        for path in self._materialized.values():
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
+        self._materialized.clear()
+
     async def aclose(self) -> None:
         self.closed = True
+        self.cleanup()
 
 
 class InMemoryMetadataStore(MetadataStore):

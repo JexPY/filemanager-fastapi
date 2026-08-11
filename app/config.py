@@ -93,6 +93,14 @@ class Settings(BaseSettings):
     # *wall-clock processing time*.
     FFMPEG_TIMEOUT_SECONDS: int = Field(default=120)
 
+    # TTL (seconds) for the presigned GET URL the worker hands ffmpeg as its
+    # input on the s3/gcp backends: the worker reads the object in place (over
+    # HTTPS, with range requests) instead of downloading it into RAM first. Must
+    # comfortably exceed FFMPEG_TIMEOUT_SECONDS since a single ffmpeg run may keep
+    # reading across the whole window. Ignored on `local` (ffmpeg reads the shared
+    # media volume directly, no URL involved).
+    FFMPEG_INPUT_URL_TTL_SECONDS: int = Field(default=3600)
+
     # --- Video playback -------------------------------------------------
     # TTL (seconds) for the freshly-minted signed GET URL the /files/{id}/download
     # endpoint 302s to on the s3/gcp backends. Size it to a generous viewing
