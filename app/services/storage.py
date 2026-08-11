@@ -271,6 +271,17 @@ class GCSStorage(StorageBackend):
         client = await self._get_client()
         try:
             await client.delete(self._bucket, key)
+        except aiohttp.ClientResponseError as exc:
+            # Idempotent: an already-deleted object (404) is success, matching
+            # LocalStorage.unlink(missing_ok=True) and S3's delete_object (204 on a
+            # missing key). gcloud-aio-storage surfaces a non-2xx as a
+            # ClientResponseError (a ClientError subclass), so this branch must
+            # precede the generic ClientError handler below. Without it a retried
+            # DELETE /files/{id} after a storage-delete-succeeded / row-delete-failed
+            # race would 502 forever instead of self-healing.
+            if exc.status == 404:
+                return
+            raise StorageError(f"GCS delete failed for {key!r}") from exc
         except aiohttp.ClientError as exc:
             raise StorageError(f"GCS delete failed for {key!r}") from exc
 
