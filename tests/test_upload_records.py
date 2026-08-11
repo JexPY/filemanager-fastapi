@@ -88,3 +88,25 @@ async def test_uploads_are_scoped_to_the_calling_token(
     # Each token sees exactly its own upload -- the per-token audit trail.
     assert len(await fake_metadata.list("alice")) == 1
     assert len(await fake_metadata.list("bob")) == 1
+
+
+async def test_upload_image_custom_imgproxy_url(
+    client: httpx.AsyncClient,
+) -> None:
+    png = fixture_bytes("tiny.png")
+    resp = await client.post(
+        "/upload/image",
+        headers={"Authorization": "Bearer test-token"},
+        files={"file": ("tiny.png", png, "image/png")},
+        data={
+            "imgproxy_width": 1024,
+            "imgproxy_height": 768,
+            "imgproxy_fit": "fill",
+            "imgproxy_format": "webp",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "imgproxy_custom_url" in body
+    assert "/rs:fill:1024:768/" in body["imgproxy_custom_url"]
+    assert body["imgproxy_custom_url"].endswith(".webp")

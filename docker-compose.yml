@@ -24,12 +24,17 @@ services:
     image: nginx:1.27-alpine
     ports:
       - "9000:80"
+    environment:
+      - ENABLE_IMGPROXY_CACHE=${ENABLE_IMGPROXY_CACHE:-true}
+      - NGINX_MAX_BODY_SIZE=${NGINX_MAX_BODY_SIZE:-550m}
+    command: /bin/sh -c "envsubst '$${ENABLE_IMGPROXY_CACHE} $${NGINX_MAX_BODY_SIZE}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
       # Read-only: nginx serves bytes but never writes the media volume.
-      - media_data:/data/media:ro
+      - ./data/media:/data/media:ro
     depends_on:
       - api
+      - imgproxy
 
   api:
     build:
@@ -50,7 +55,7 @@ services:
       # app out of the byte path. Use `direct` only for a no-nginx dev setup.
       - LOCAL_MEDIA_SERVE_MODE=${LOCAL_MEDIA_SERVE_MODE:-xaccel}
     volumes:
-      - media_data:/data/media
+      - ./data/media:/data/media
     depends_on:
       redis:
         condition: service_healthy
@@ -71,7 +76,7 @@ services:
       - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
       - LOCAL_STORAGE_DIR=/data/media
     volumes:
-      - media_data:/data/media
+      - ./data/media:/data/media
     depends_on:
       redis:
         condition: service_healthy
@@ -104,8 +109,8 @@ services:
 
   imgproxy:
     image: darthsim/imgproxy:latest
-    ports:
-      - "8080:8080"
+    # Ports are intentionally NOT exposed directly to the host.
+    # All access must go through nginx (:9000/imgproxy/) for cache locking.
     environment:
       # Hex-encoded strings; must match the app's IMGPROXY_KEY/IMGPROXY_SALT
       # exactly. No fallback default here on purpose: a blank .env value
@@ -118,7 +123,7 @@ services:
       # way to reach locally-stored objects at all.
       - IMGPROXY_LOCAL_FILESYSTEM_ROOT=/data/media
     volumes:
-      - media_data:/data/media:ro
+      - ./data/media:/data/media:ro
 
   test:
     build:
@@ -139,7 +144,7 @@ services:
       - IMGPROXY_KEY=00112233445566778899aabbccddeeff00112233445566778899aabbccddee
       - IMGPROXY_SALT=aabbccddeeff00112233445566778899aabbccddeeff0011223344556677aa
     volumes:
-      - media_data:/data/media
+      - ./data/media:/data/media
     depends_on:
       redis:
         condition: service_healthy
@@ -178,5 +183,4 @@ services:
     profiles: ["s3-dev"]
 
 volumes:
-  media_data:
   pg_data:

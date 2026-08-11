@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/healthz")
+@router.get("/healthz", tags=["System"], summary="Liveness probe")
 async def healthz() -> dict[str, str]:
     """Pure liveness: 200 whenever the process can handle a request at all.
     No dependency checks -- that's /readyz."""
@@ -47,7 +47,7 @@ async def _check_db() -> bool:
         return False
 
 
-@router.get("/readyz")
+@router.get("/readyz", tags=["System"], summary="Readiness probe")
 async def readyz() -> JSONResponse:
     """200 only if Redis, the storage backend, and the metadata store are all
     reachable/usable; 503 otherwise. Meant for orchestrator readiness probes,

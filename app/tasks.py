@@ -21,7 +21,7 @@ from app.services.metadata import (
     UploadRecord,
     get_metadata_store,
 )
-from app.services.storage import StorageError, delete_file, download_file, get_storage, upload_file
+from app.services.storage import StorageError, delete_file, download_file, upload_file
 from app.services.webhooks import deliver_webhook
 
 logger = logging.getLogger(__name__)
@@ -157,28 +157,20 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
                 await delete_file(obj.key)
             return {"status": "discarded", "upload_id": upload_id}
 
-        # Prefer a presigned URL over the plain object URL when the backend
-        # supports it (S3/R2/MinIO): the plain URL is unusable for a private
-        # bucket.
-        backend = await get_storage()
-        presigned_url = await backend.presigned_get_url(obj.key)
-
         # Push completion to the client's callback (if any) on its own task, so
         # they don't have to poll GET /tasks/{id} and a slow receiver can't block
         # this worker slot. Best-effort; never affects the task result.
         await _enqueue_webhook(record, "video.completed")
 
-        return {
-            "status": "success",
-            "url": presigned_url or obj.url,
-            "key": obj.key,
-            "size": obj.size,
-            "original_filename": original_filename,
-            "upload_id": upload_id,
-            "duration_seconds": input_duration,
-            "truncated": truncated,
-            "max_duration_seconds": max_duration,
-        }
+        # Thin task: return ONLY execution state, never domain data. Everything a
+        # client needs (download_url, size, duration_seconds, truncated, ...)
+        # lives on the `uploads` row we just marked ready and is served *live* by
+        # GET /files/{upload_id}. The TaskIQ result backend is immutable + TTL'd
+        # (and a presigned url would even expire inside it), so a snapshot sealed
+        # here becomes a stale second source of truth -- the split-brain we
+        # deliberately avoid. upload_id is the pointer clients use to fetch the
+        # authoritative record once this task reports completion.
+        return {"status": "success", "upload_id": upload_id}
 
     except Exception:
         # Any failure (download, ffmpeg, upload, mark_ready) marks the record

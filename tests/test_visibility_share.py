@@ -59,7 +59,8 @@ async def test_patch_rejects_bad_visibility(
     resp = await client.patch(
         f"/files/{rec.id}", headers=auth_headers, json={"visibility": "unlisted"}
     )
-    assert resp.status_code == 400
+    # The _VisibilityBody Literal rejects an out-of-enum value at validation time.
+    assert resp.status_code == 422
 
 
 async def test_patch_is_video_only(

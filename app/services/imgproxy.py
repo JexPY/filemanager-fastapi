@@ -22,9 +22,13 @@ def sign_url(path: str) -> str:
     return f"{base}{signed_path}" if base else signed_path
 
 
-def generate_signed_url(url: str, processing_options: str = "rs:fill:300:300") -> str:
+def generate_signed_url(
+    url: str, processing_options: str = "rs:fill:300:300", format: str | None = None
+) -> str:
     encoded_url = base64.urlsafe_b64encode(url.encode()).decode("utf-8").rstrip("=")
     path = f"/{processing_options}/{encoded_url}"
+    if format:
+        path = f"{path}.{format}"
     return sign_url(path)
 
 

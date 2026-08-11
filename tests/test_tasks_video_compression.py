@@ -63,22 +63,20 @@ async def test_successful_compression_uploads_output_marks_ready_and_deletes_raw
         raw_storage_key=raw_key, original_filename="tiny.mp4", upload_id=upload_id
     )
 
-    assert result["status"] == "success"
-    assert result["key"].startswith("videos/")
-    assert result["key"] in fake_storage.objects
-    assert result["upload_id"] == upload_id
-
-    # tiny.mp4 is 2s, well under the 60s default cap -> not truncated, and the
-    # probed input duration is reported.
-    assert result["truncated"] is False
-    assert result["max_duration_seconds"] == settings.VIDEO_MAX_DURATION_SECONDS
-    assert result["duration_seconds"] == pytest.approx(2.0, abs=0.5)
+    # Thin task: the result carries only execution state, never domain data.
+    # Everything else (key, size, duration, truncated, download_url) is the
+    # Postgres row's job -- asserted below, the single source of truth GET /files
+    # reads live. Nothing about the compressed object is sealed in Redis here.
+    assert result == {"status": "success", "upload_id": upload_id}
 
     # The record is flipped to ready and now points at the compressed object.
     record = await fake_metadata.get(upload_id, OWNER)
     assert record is not None
     assert record.status == STATUS_READY
-    assert record.storage_key == result["key"]
+    assert record.storage_key.startswith("videos/")
+    assert record.storage_key in fake_storage.objects
+    # tiny.mp4 is 2s, well under the 60s default cap -> not truncated, and the
+    # probed input duration is persisted on the row.
     assert record.truncated is False
     assert record.duration_seconds == pytest.approx(2.0, abs=0.5)
 
@@ -104,11 +102,9 @@ async def test_input_longer_than_cap_is_flagged_truncated(
         raw_storage_key=raw_key, original_filename="long.mp4", upload_id=upload_id
     )
 
-    assert result["status"] == "success"
-    assert result["truncated"] is True
-    assert result["max_duration_seconds"] == 1
-    assert result["duration_seconds"] == pytest.approx(2.0, abs=0.5)
+    assert result == {"status": "success", "upload_id": upload_id}
 
+    # The truncation verdict + probed duration live on the row, not the result.
     record = await fake_metadata.get(upload_id, OWNER)
     assert record is not None
     assert record.truncated is True

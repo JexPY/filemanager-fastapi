@@ -3,7 +3,7 @@ from typing import Any
 import httpx
 import pytest
 
-from app.routers.files import _sanitize_extension
+from app.routers.utils import _sanitize_extension
 from tests.conftest import fixture_bytes
 
 

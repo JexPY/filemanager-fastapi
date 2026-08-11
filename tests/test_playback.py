@@ -45,8 +45,16 @@ async def _seed_video(
 
 
 async def test_local_public_download_is_xaccel_no_token(
-    client: httpx.AsyncClient, fake_metadata: InMemoryMetadataStore
+    client: httpx.AsyncClient,
+    fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Hermetic against the developer's .env: with no public base URL configured
+    # for the local backend, a public video resolves via nginx X-Accel. The
+    # configured-base -> 302 branch is covered by
+    # test_public_with_public_base_302s_to_stable_url below.
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "")
     rec = await _seed_video(fake_metadata, visibility="public")
     resp = await client.get(f"/files/{rec.id}/download")  # no auth
     assert resp.status_code == 200
@@ -170,3 +178,64 @@ async def test_share_non_video_token_404(
     )
     await fake_metadata.set_share_token(image.id, OWNER, "img-token")
     assert (await client.get("/share/img-token")).status_code == 404
+
+
+async def test_get_custom_image_url(
+    client: httpx.AsyncClient, fake_metadata: InMemoryMetadataStore
+) -> None:
+    image = await fake_metadata.create(
+        owner=OWNER,
+        kind="image",
+        storage_key="images/a.webp",
+        content_type="image/webp",
+        size_bytes=1,
+        status="ready",
+    )
+
+    # Needs auth
+    assert (await client.get(f"/files/{image.id}/image-url")).status_code == 401
+
+    # Different owner -> 404
+    client_auth = {"Authorization": "Bearer test-token"}
+
+    image_other = await fake_metadata.create(
+        owner="other",
+        kind="image",
+        storage_key="images/b.webp",
+        content_type="image/webp",
+        size_bytes=1,
+        status="ready",
+    )
+    assert (
+        await client.get(f"/files/{image_other.id}/image-url", headers=client_auth)
+    ).status_code == 404
+
+    # Non-image -> 400
+    video = await fake_metadata.create(
+        owner=OWNER,
+        kind="video",
+        storage_key="videos/v.mp4",
+        content_type="video/mp4",
+        size_bytes=1,
+        status="ready",
+    )
+    assert (
+        await client.get(f"/files/{video.id}/image-url", headers=client_auth)
+    ).status_code == 400
+
+    # Success cases
+    # No options -> rs:auto:0:0
+    r1 = await client.get(f"/files/{image.id}/image-url", headers=client_auth)
+    assert r1.status_code == 200
+    assert "url" in r1.json()
+    assert "/rs:auto:0:0/" in r1.json()["url"]
+
+    # With dimensions and format
+    r2 = await client.get(
+        f"/files/{image.id}/image-url?width=800&height=600&fit=fill&format=jpeg",
+        headers=client_auth,
+    )
+    assert r2.status_code == 200
+    url = r2.json()["url"]
+    assert "/rs:fill:800:600/" in url
+    assert url.endswith(".jpeg")

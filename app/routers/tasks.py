@@ -1,0 +1,48 @@
+import logging
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Path, status
+
+from app.broker import broker
+from app.routers.auth import verify_token
+from app.services.metadata import MetadataError, get_metadata_store
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+
+@router.get("/tasks/{task_id}", tags=["Tasks"], summary="Get task status")
+async def get_task_status(
+    task_id: Annotated[str, Path(max_length=100)], owner: str = Depends(verify_token)
+):
+    # Owner-scoped via the uploads record: a task_id that isn't this owner's
+    # (or never existed) is a 404, so no one can poll another owner's task and
+    # existence never leaks across tenants. The record is also the durable proof
+    # the task was issued -- it distinguishes "still running" (record exists,
+    # result not ready -> pending) from "never existed" (no record -> 404),
+    # which is_result_ready alone cannot.
+    store = await get_metadata_store()
+    try:
+        record = await store.get_by_task_id(task_id, owner)
+    except MetadataError as exc:
+        logger.error("Failed to resolve task %s: %s", task_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown task id")
+
+    is_ready = await broker.result_backend.is_result_ready(task_id)
+    if not is_ready:
+        return {"task_id": task_id, "status": "pending"}
+
+    task_result = await broker.result_backend.get_result(task_id)
+    if task_result.is_err:
+        # The underlying exception (e.g. raw ffmpeg stderr, which can include
+        # internal /tmp paths) is server-side detail only -- never echoed to
+        # the caller, unlike the rest of this route which was already careful
+        # about that (StorageError -> generic 502 above).
+        logger.error("Task %s failed: %s", task_id, task_result.error)
+        return {"task_id": task_id, "status": "failed", "error": "Video processing failed"}
+
+    return {"task_id": task_id, "status": "completed", "result": task_result.return_value}

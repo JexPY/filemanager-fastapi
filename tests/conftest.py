@@ -85,7 +85,7 @@ class FakeResultBackend:
 def fake_result_backend(monkeypatch: pytest.MonkeyPatch) -> FakeResultBackend:
     fake = FakeResultBackend()
     # `broker` is the same object everywhere it's imported, so patching this
-    # attribute affects app.routers.files' `broker` reference too.
+    # attribute affects app.routers.tasks' `broker` reference too.
     monkeypatch.setattr(broker, "result_backend", fake)
     return fake
 

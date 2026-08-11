@@ -1,0 +1,277 @@
+import asyncio
+import contextlib
+import logging
+import uuid
+from typing import Annotated, Literal
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
+
+from app.config import settings
+from app.routers.auth import require_scopes
+from app.routers.utils import (
+    _image_response,
+    _image_source_url,
+    _read_capped,
+    _sanitize_extension,
+    _sha256_hex,
+)
+from app.services.image_vips import ImageValidationError, validate_and_strip_image
+from app.services.metadata import (
+    KIND_IMAGE,
+    KIND_VIDEO,
+    STATUS_PROCESSING,
+    STATUS_READY,
+    MetadataError,
+    get_metadata_store,
+)
+from app.services.storage import StorageError, delete_file, upload_file
+from app.services.webhooks import WebhookValidationError, validate_callback_url
+from app.tasks import compress_video_task
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+# Scope-gated auth: a static master token passes unconditionally (full access);
+# a capability JWT must carry the matching upload scope, else 403. Built once at
+# import so each route reuses one stable dependency callable.
+require_image_upload = require_scopes("upload:image")
+require_video_upload = require_scopes("upload:video")
+
+
+@router.post("/upload/image", tags=["Uploads"], summary="Upload image")
+async def upload_image(
+    request: Request,
+    file: UploadFile = File(...),
+    imgproxy_width: int | None = Form(
+        default=None, ge=0, le=8192, json_schema_extra={"default": ""}
+    ),
+    imgproxy_height: int | None = Form(
+        default=None, ge=0, le=8192, json_schema_extra={"default": ""}
+    ),
+    imgproxy_fit: Literal["auto", "fit", "fill", "fill-down", "force"] = Form(
+        default="auto", examples=["auto"]
+    ),
+    imgproxy_format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
+        default=None, json_schema_extra={"example": None}
+    ),
+    owner: str = Depends(require_image_upload),
+):
+    file_data = await _read_capped(file, request, settings.MAX_IMAGE_UPLOAD_BYTES)
+
+    # Content hash of the *input* bytes for idempotency. Hashing 25 MB is
+    # borderline CPU work, so offload it like the other CPU-bound steps.
+    content_hash = await asyncio.to_thread(_sha256_hex, file_data)
+
+    store = await get_metadata_store()
+    # Idempotency: the exact same bytes already stored (and ready) by this owner
+    # returns the existing record instead of re-decoding/re-encoding/re-storing.
+    # Owner-scoped so hashes never collide or leak across tenants. A lookup
+    # failure must not fail the upload -- fall through and process normally.
+    try:
+        existing = await store.find_ready_by_hash(owner, content_hash)
+    except MetadataError as exc:
+        logger.warning("Idempotency lookup failed (processing normally): %s", exc)
+        existing = None
+    if existing is not None:
+        source_url = await _image_source_url(existing.storage_key)
+        return _image_response(
+            existing.id,
+            existing.width,
+            existing.height,
+            source_url,
+            custom_width=imgproxy_width,
+            custom_height=imgproxy_height,
+            custom_fit=imgproxy_fit,
+            custom_format=imgproxy_format,
+        )
+
+    # Client-side failures (bad/unsupported image) => 400, generic detail.
+    try:
+        optimized_buffer, content_type, width, height = await asyncio.to_thread(
+            validate_and_strip_image, file_data
+        )
+    except ImageValidationError as exc:
+        logger.warning("Image validation rejected upload: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or unsupported image"
+        ) from exc
+
+    unique_id = uuid.uuid4().hex
+    object_name = f"images/{unique_id}.webp"
+
+    # Storage failures are server-side; never surface backend internals to the caller.
+    try:
+        obj = await upload_file(optimized_buffer, object_name, content_type)
+    except StorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
+        ) from exc
+
+    # Record the object in the system-of-record (owner-scoped, immediately
+    # ready, with the content hash so a later identical upload dedupes). If this
+    # fails the stored object would be orphaned with no way to ever find or
+    # delete it, so roll it back before surfacing a generic 502.
+    try:
+        record = await store.create(
+            owner=owner,
+            kind=KIND_IMAGE,
+            storage_key=obj.key,
+            content_type=content_type,
+            size_bytes=obj.size,
+            status=STATUS_READY,
+            width=width,
+            height=height,
+            content_hash=content_hash,
+        )
+    except MetadataError as exc:
+        logger.error("Failed to record image upload %s: %s", obj.key, exc)
+        with contextlib.suppress(StorageError):
+            await delete_file(obj.key)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
+        ) from exc
+
+    source_url = await _image_source_url(obj.key)
+    return _image_response(
+        record.id,
+        width,
+        height,
+        source_url,
+        custom_width=imgproxy_width,
+        custom_height=imgproxy_height,
+        custom_fit=imgproxy_fit,
+        custom_format=imgproxy_format,
+    )
+
+
+@router.post(
+    "/upload/video",
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["Uploads"],
+    summary="Upload video",
+)
+async def upload_video(
+    request: Request,
+    response: Response,
+    file: UploadFile = File(...),
+    callback_url: Annotated[str | None, Form(json_schema_extra={"example": None})] = None,
+    owner: str = Depends(require_video_upload),
+):
+    file_data = await _read_capped(file, request, settings.MAX_VIDEO_UPLOAD_BYTES)
+
+    # Admit the optional webhook target up front (before staging/enqueue) so a
+    # bad or disallowed URL is a clean 400, not a silent non-delivery later.
+    if callback_url is not None:
+        try:
+            callback_url = validate_callback_url(callback_url)
+        except WebhookValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    # Idempotency (video): hash the raw input bytes and, on a match against this
+    # owner's existing `ready`-or-`processing` video, skip staging + enqueue and
+    # return the existing job. `ready` -> 200 (already available); `processing`
+    # -> 202 (attach to the in-flight compression, don't compress twice). Keyed
+    # on the *raw input*, since the compressed output is nondeterministic. A
+    # lookup failure must not fail the upload -- fall through and process.
+    content_hash = await asyncio.to_thread(_sha256_hex, file_data)
+    store = await get_metadata_store()
+    try:
+        duplicate = await store.find_active_video_by_hash(owner, content_hash)
+    except MetadataError as exc:
+        logger.warning("Video idempotency lookup failed (processing normally): %s", exc)
+        duplicate = None
+    if duplicate is not None:
+        response.status_code = (
+            status.HTTP_200_OK if duplicate.status == STATUS_READY else status.HTTP_202_ACCEPTED
+        )
+        return {
+            "status": "duplicate",
+            "id": duplicate.id,
+            "task_id": duplicate.task_id,
+            "record_status": duplicate.status,
+        }
+
+    # Stage the raw upload in storage; only its key travels through Redis.
+    original_filename = file.filename or "video.mp4"
+    ext = _sanitize_extension(original_filename)
+    raw_key = f"raw/videos/{uuid.uuid4().hex}.{ext}"
+    try:
+        await upload_file(
+            file_data,
+            raw_key,
+            file.content_type or "application/octet-stream",
+        )
+    except StorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
+        ) from exc
+
+    # Record the upload as `processing` BEFORE enqueuing, so the worker (which
+    # marks it ready by id) can never observe the row before it exists. The
+    # raw key is the current authoritative object; the worker swaps it for the
+    # compressed key on success. The content hash is stored so a later identical
+    # upload dedupes (find_active_video_by_hash above).
+    try:
+        record = await store.create(
+            owner=owner,
+            kind=KIND_VIDEO,
+            storage_key=raw_key,
+            content_type=file.content_type or "application/octet-stream",
+            size_bytes=len(file_data),
+            status=STATUS_PROCESSING,
+            content_hash=content_hash,
+            original_filename=original_filename,
+            callback_url=callback_url,
+        )
+    except MetadataError as exc:
+        logger.error("Failed to record video upload %s: %s", raw_key, exc)
+        with contextlib.suppress(StorageError):
+            await delete_file(raw_key)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
+        ) from exc
+
+    # Enqueue the task with the lightweight key reference + the record id.
+    try:
+        task = await compress_video_task.kiq(
+            raw_storage_key=raw_key,
+            original_filename=original_filename,
+            upload_id=record.id,
+        )
+    except Exception as exc:
+        # Enqueue failed (e.g. Redis down): don't leave a row stuck `processing`
+        # forever with no task behind it -- roll back the record and the raw
+        # object, then surface a generic 502.
+        logger.error("Failed to enqueue compression for %s: %s", record.id, exc)
+        with contextlib.suppress(MetadataError):
+            await store.delete(record.id, owner)
+        with contextlib.suppress(StorageError):
+            await delete_file(raw_key)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Video processing temporarily unavailable",
+        ) from exc
+
+    # Link the record to its task id so GET /tasks/{id} can resolve ownership +
+    # existence from the record. Best-effort: the upload is already accepted and
+    # the task queued, so a failure to record the task id must not fail the
+    # request (the poller would just 404 until a retry sets it).
+    with contextlib.suppress(MetadataError):
+        await store.set_task_id(record.id, task.task_id)
+
+    return {
+        "status": "accepted",
+        "id": record.id,
+        "task_id": task.task_id,
+        "raw_key": raw_key,
+    }

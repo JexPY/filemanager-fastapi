@@ -98,14 +98,17 @@ async def test_completed_task_returns_result(
     task_id = uuid.uuid4().hex
     await _seed_task(fake_metadata, task_id)
     fake_result_backend.set_result(
-        task_id, FakeTaskResult(is_err=False, return_value={"status": "success", "key": "x"})
+        task_id,
+        FakeTaskResult(is_err=False, return_value={"status": "success", "upload_id": task_id}),
     )
 
     resp = await client.get(f"/tasks/{task_id}", headers=auth_headers)
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "completed"
-    assert body["result"] == {"status": "success", "key": "x"}
+    # Thin task result: the route passes through only execution state. The
+    # client then fetches domain data live via GET /files/{upload_id}.
+    assert body["result"] == {"status": "success", "upload_id": task_id}
 
 
 async def test_failed_task_returns_sanitized_error(

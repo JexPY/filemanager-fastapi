@@ -51,9 +51,11 @@ class Settings(BaseSettings):
     IMGPROXY_KEY: str = Field(default="")
     IMGPROXY_SALT: str = Field(default="")
     # Scheme+host imgproxy is reachable at, prefixed onto the signed paths
-    # returned to clients (e.g. http://localhost:8080). Without this, the
+    # returned to clients (e.g. http://localhost:9000/imgproxy). Without this, the
     # imgproxy_*_url response fields are just paths, not fetchable URLs.
     IMGPROXY_BASE_URL: str = Field(default="")
+    # Whether NGINX should enable the proxy_cache_lock (origin shield) for imgproxy
+    ENABLE_IMGPROXY_CACHE: str = Field(default="true")
 
     # The API's own externally-reachable origin (scheme+host, e.g.
     # https://media.example.com), used to build absolute share/download URLs in
@@ -63,6 +65,18 @@ class Settings(BaseSettings):
 
     # Auth
     FILE_MANAGER_BEARER_TOKENS: str = Field(default="")
+
+    # --- JWT capability tokens (optional) --------------------------------
+    # Shared secret for HS256 "capability" JWTs. Lets a trusted backend (or this
+    # service's own POST /upload/presign) mint short-lived, scoped upload tokens
+    # that an untrusted frontend can send *directly* to this service, so the
+    # bytes never round-trip the backend. Blank => JWT auth is disabled and only
+    # the static FILE_MANAGER_BEARER_TOKENS are accepted (backward compatible).
+    # Independent of WEBHOOK_SIGNING_SECRET / IMGPROXY_KEY -- do not reuse those.
+    JWT_SECRET_KEY: str = Field(default="")
+    # Signing algorithm for the above (any HMAC alg PyJWT supports). HS256 by
+    # default; the shared-secret model here does not use asymmetric keys.
+    JWT_ALGORITHM: str = Field(default="HS256")
 
     # Upload limits (bytes)
     MAX_IMAGE_UPLOAD_BYTES: int = Field(default=25 * 1024 * 1024)

@@ -5,13 +5,19 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
+from starlette.requests import Request
 
 from app.config import Settings, _derive_owner, settings
-from app.routers.files import verify_token
+from app.routers.auth import verify_token
 
 
 def _creds(token: str) -> HTTPAuthorizationCredentials:
     return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+
+def _req(query: str = "") -> Request:
+    """Minimal ASGI request; `query` (e.g. "token=abc") drives the ?token= path."""
+    return Request({"type": "http", "query_string": query.encode(), "headers": []})
 
 
 def test_bare_token_owner_is_derived_hash_not_the_secret() -> None:
@@ -41,15 +47,23 @@ def test_distinct_secrets_get_distinct_owners() -> None:
 
 def test_verify_token_returns_the_matched_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "FILE_MANAGER_BEARER_TOKENS", "alice:tok-a,bob:tok-b")
-    assert verify_token(_creds("tok-a")) == "alice"
-    assert verify_token(_creds("tok-b")) == "bob"
+    assert verify_token(_req(), _creds("tok-a")) == "alice"
+    assert verify_token(_req(), _creds("tok-b")) == "bob"
+
+
+def test_verify_token_accepts_static_token_via_query_param(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No Authorization header -> the ?token= fallback resolves the same owner.
+    monkeypatch.setattr(settings, "FILE_MANAGER_BEARER_TOKENS", "alice:tok-a")
+    assert verify_token(_req("token=tok-a"), None) == "alice"
 
 
 def test_verify_token_rejects_wrong_and_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "FILE_MANAGER_BEARER_TOKENS", "alice:tok-a")
     with pytest.raises(HTTPException) as wrong:
-        verify_token(_creds("not-a-token"))
+        verify_token(_req(), _creds("not-a-token"))
     assert wrong.value.status_code == 401
     with pytest.raises(HTTPException) as missing:
-        verify_token(None)
+        verify_token(_req(), None)
     assert missing.value.status_code == 401

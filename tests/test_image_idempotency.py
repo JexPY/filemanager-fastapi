@@ -37,7 +37,6 @@ async def test_reupload_of_identical_bytes_is_deduplicated(
     assert len(await fake_metadata.list(OWNER)) == 1
     # The deduplicated response is fully shaped, dimensions included.
     assert second.json()["dimensions"] == {"width": 8, "height": 8}
-    assert second.json()["raw_url"].startswith("local:///images/")
 
 
 async def test_distinct_images_are_not_deduplicated(

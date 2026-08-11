@@ -27,22 +27,31 @@ async def test_valid_image_upload_succeeds(
     assert "imgproxy_optimized_url" in body
 
 
-async def test_raw_url_is_local_source_scheme_for_local_backend(
+def _decode_imgproxy_source(imgproxy_url: str) -> str:
+    # imgproxy URL shape: {base}/{signature}/{options}/{b64_source}
+    b64_source = imgproxy_url.rstrip("/").rsplit("/", 1)[-1]
+    padded = b64_source + "=" * (-len(b64_source) % 4)
+    return base64.urlsafe_b64decode(padded).decode()
+
+
+async def test_source_is_local_scheme_for_local_backend(
     client: httpx.AsyncClient, auth_headers: dict[str, str]
 ) -> None:
     # The test env's STORAGE_BACKEND defaults to "local" -- build_source_url
-    # swaps in imgproxy's local:// scheme rather than the fake's plain URL.
+    # swaps in imgproxy's local:// scheme rather than the fake's plain URL. The
+    # source is no longer returned directly (raw_url was dropped); it survives
+    # only b64-embedded in the signed imgproxy URLs, so assert it there.
     resp = await client.post(
         "/upload/image",
         headers=auth_headers,
         files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
     )
-    body = resp.json()
-    assert body["raw_url"].startswith("local:///images/")
-    assert "X-Amz-Signature" not in body["raw_url"]
+    source = _decode_imgproxy_source(resp.json()["imgproxy_thumbnail_url"])
+    assert source.startswith("local:///images/")
+    assert "X-Amz-Signature" not in source
 
 
-async def test_raw_url_is_presigned_when_backend_supports_it(
+async def test_source_is_presigned_when_backend_supports_it(
     monkeypatch: pytest.MonkeyPatch,
     auth_headers: dict[str, str],
     fake_metadata: InMemoryMetadataStore,
@@ -61,17 +70,11 @@ async def test_raw_url_is_presigned_when_backend_supports_it(
             files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
         )
     assert resp.status_code == 200
-    body = resp.json()
-    # A private-bucket-style backend must never return the unsigned direct
-    # URL, and imgproxy's source must be built from the same presigned URL
-    # (a private bucket would otherwise be unreachable for imgproxy too).
-    assert "X-Amz-Signature=fake" in body["raw_url"]
-
-    # imgproxy_thumbnail_url shape: {base}/{signature}/{options}/{b64_source}
-    b64_source = body["imgproxy_thumbnail_url"].rstrip("/").rsplit("/", 1)[-1]
-    padded = b64_source + "=" * (-len(b64_source) % 4)
-    decoded_source = base64.urlsafe_b64decode(padded).decode()
-    assert decoded_source == body["raw_url"]
+    # A private-bucket-style backend must never sign imgproxy's source over the
+    # unsigned direct URL -- the embedded source must be the presigned URL (a
+    # private bucket would otherwise be unreachable for imgproxy too).
+    source = _decode_imgproxy_source(resp.json()["imgproxy_thumbnail_url"])
+    assert "X-Amz-Signature=fake" in source
 
 
 async def test_svg_upload_is_rejected(

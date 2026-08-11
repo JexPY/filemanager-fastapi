@@ -90,7 +90,7 @@ class UploadRecord:
 
     def to_public(self) -> dict[str, Any]:
         """Owner-safe JSON view for API responses (no cross-tenant fields)."""
-        return {
+        data = {
             "id": self.id,
             "kind": self.kind,
             "status": self.status,
@@ -119,6 +119,13 @@ class UploadRecord:
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
+
+        if self.kind == KIND_VIDEO and self.status == STATUS_READY:
+            from app.routers.utils import _public_url
+
+            data["download_url"] = _public_url(f"/files/{self.id}/download")
+
+        return data
 
 
 # ---------------------------------------------------------------------------
