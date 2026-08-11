@@ -1,7 +1,11 @@
+import contextlib
 import hashlib
+import os
 import re
+import tempfile
 from pathlib import Path
 
+import aiofiles
 from fastapi import HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse, Response
 
@@ -11,7 +15,9 @@ from app.services.storage import StorageError, get_storage
 
 
 async def _read_capped(file: UploadFile, request: Request, max_bytes: int) -> bytes:
-    """Read an upload into memory, aborting safely if it exceeds max_bytes."""
+    """Read an upload into memory, aborting safely if it exceeds max_bytes. Used
+    for images (bounded + decoded in memory by pyvips anyway); video streams to
+    disk instead via _stream_capped_to_temp."""
     content = bytearray()
     while chunk := await file.read(1024 * 1024):  # 1MB chunks
         if await request.is_disconnected():
@@ -25,6 +31,45 @@ async def _read_capped(file: UploadFile, request: Request, max_bytes: int) -> by
                 detail=f"File exceeds {max_bytes} bytes",
             )
     return bytes(content)
+
+
+async def _stream_capped_to_temp(
+    file: UploadFile, request: Request, max_bytes: int
+) -> tuple[str, int, str]:
+    """Stream an upload straight to a temp file on disk, one chunk at a time, so
+    the process never holds the whole body in memory -- the buffered _read_capped
+    is fine for small images but not for a hundreds-of-MB video. Enforces the same
+    per-chunk size cap and client-disconnect abort, and hashes the input
+    incrementally (a rolling sha256) so no separate full-buffer pass is needed.
+
+    Returns (temp_path, size, sha256_hex). On any abort the temp file is removed;
+    on success the CALLER owns temp_path and must remove it.
+    """
+    hasher = hashlib.sha256()
+    size = 0
+    fd, temp_path = tempfile.mkstemp(prefix="upload_")
+    os.close(fd)
+    try:
+        async with aiofiles.open(temp_path, "wb") as out:
+            while chunk := await file.read(1024 * 1024):  # 1MB chunks
+                if await request.is_disconnected():
+                    raise HTTPException(
+                        status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
+                        detail="Client disconnected",
+                    )
+                size += len(chunk)
+                if size > max_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"File exceeds {max_bytes} bytes",
+                    )
+                await out.write(chunk)
+                hasher.update(chunk)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp_path)
+        raise
+    return temp_path, size, hasher.hexdigest()
 
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]")

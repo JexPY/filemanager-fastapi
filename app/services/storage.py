@@ -19,6 +19,7 @@ from pathlib import Path
 
 import aioboto3
 import aiofiles
+import aiofiles.os
 import aiohttp
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
@@ -81,6 +82,15 @@ class StorageBackend(ABC):
         shared filesystem -> None."""
         return None
 
+    async def upload_from_path(self, path: str, key: str, content_type: str) -> StorageObject:
+        """Upload the file at ``path`` to ``key``. Default reads it whole and
+        delegates to upload(); backends that can stream from disk (local/s3/gcp)
+        override this so a large object never lands fully in memory -- the
+        write-side counterpart to the worker reading its input in place."""
+        async with aiofiles.open(path, "rb") as f:
+            data = await f.read()
+        return await self.upload(data, key, content_type)
+
 
 # ---------------------------------------------------------------------------
 # Local filesystem backend
@@ -115,6 +125,20 @@ class LocalStorage(StorageBackend):
             await f.write(data)
         return StorageObject(
             key=key, url=self.public_url(key), size=len(data), content_type=content_type
+        )
+
+    async def upload_from_path(self, path: str, key: str, content_type: str) -> StorageObject:
+        # Stream the staged temp file into place a chunk at a time; never load the
+        # whole (possibly hundreds-of-MB) object into memory.
+        target = self._resolve(key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        size = 0
+        async with aiofiles.open(path, "rb") as src, aiofiles.open(target, "wb") as dst:
+            while chunk := await src.read(1024 * 1024):
+                await dst.write(chunk)
+                size += len(chunk)
+        return StorageObject(
+            key=key, url=self.public_url(key), size=size, content_type=content_type
         )
 
     async def download(self, key: str) -> bytes:
@@ -200,6 +224,21 @@ class S3Storage(StorageBackend):
             key=key, url=self._object_url(key), size=len(data), content_type=content_type
         )
 
+    async def upload_from_path(self, path: str, key: str, content_type: str) -> StorageObject:
+        # upload_file streams from disk (managed multipart) -- the object never
+        # lands fully in this process's memory, unlike upload_fileobj(BytesIO(data)).
+        client = await self._get_client()
+        try:
+            await client.upload_file(
+                path, self._bucket, key, ExtraArgs={"ContentType": content_type}
+            )
+        except (BotoCoreError, ClientError) as exc:
+            raise StorageError(f"S3 upload failed for {key!r}") from exc
+        size = await aiofiles.os.path.getsize(path)
+        return StorageObject(
+            key=key, url=self._object_url(key), size=size, content_type=content_type
+        )
+
     async def download(self, key: str) -> bytes:
         client = await self._get_client()
         try:
@@ -271,6 +310,24 @@ class GCSStorage(StorageBackend):
             raise StorageError(f"GCS upload failed for {key!r}") from exc
         return StorageObject(
             key=key, url=self._object_url(key), size=len(data), content_type=content_type
+        )
+
+    async def upload_from_path(self, path: str, key: str, content_type: str) -> StorageObject:
+        # Hand gcloud-aio the open file object so it streams the upload (resumable)
+        # rather than buffering the whole object in memory. gcloud-aio reads the
+        # stream synchronously, so it must be a plain file object (not aiofiles);
+        # GCS is mock-only here (no live GCP), asserted by test.
+        client = await self._get_client()
+        size = await aiofiles.os.path.getsize(path)
+        try:
+            with open(path, "rb") as f:  # noqa: ASYNC230 -- gcloud-aio needs a sync file object
+                await client.upload(
+                    self._bucket, key, f, content_type=content_type, force_resumable_upload=True
+                )
+        except aiohttp.ClientError as exc:
+            raise StorageError(f"GCS upload failed for {key!r}") from exc
+        return StorageObject(
+            key=key, url=self._object_url(key), size=size, content_type=content_type
         )
 
     async def download(self, key: str) -> bytes:
@@ -359,6 +416,17 @@ async def upload_file(
 ) -> StorageObject:
     backend = await get_storage()
     return await backend.upload(file_data, object_name, content_type)
+
+
+async def upload_file_from_path(
+    path: str,
+    object_name: str,
+    content_type: str = "application/octet-stream",
+) -> StorageObject:
+    """Stream a staged temp file into storage without loading it into memory (the
+    write-side counterpart to upload_file's bytes-in interface)."""
+    backend = await get_storage()
+    return await backend.upload_from_path(path, object_name, content_type)
 
 
 async def download_file(object_name: str) -> bytes:
