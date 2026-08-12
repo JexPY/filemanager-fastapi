@@ -25,10 +25,18 @@ def _sniff_format(data: bytes) -> str | None:
             return fmt
     if len(data) >= 12 and data[0:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "webp"
+    if (
+        len(data) >= 12
+        and data[4:8] == b"ftyp"
+        and data[8:12] in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}
+    ):
+        return "heic"
     return None
 
 
-def validate_and_strip_image(file_data: bytes) -> tuple[bytes, str, int, int]:
+def validate_and_strip_image(
+    file_data: bytes, optimization: str = "balanced"
+) -> tuple[bytes, str, int, int]:
     """
     Load image using pyvips, strip metadata (EXIF), and return the optimized bytes
     along with the detected format and dimensions.
@@ -52,7 +60,28 @@ def validate_and_strip_image(file_data: bytes) -> tuple[bytes, str, int, int]:
             f"Image dimensions {width}x{height} exceed the {settings.MAX_IMAGE_PIXELS}-pixel limit"
         )
 
+    # Determine quality and max dimension based on optimization profile
+    if optimization == "size":
+        q_value = 65
+        max_dim = 1280
+    elif optimization == "quality":
+        q_value = 95
+        max_dim = 3840
+    else:  # "balanced"
+        q_value = 85
+        max_dim = 1920
+
+    if width > max_dim or height > max_dim:
+        scale = min(max_dim / width, max_dim / height)
+        image = image.resize(scale)
+        width = image.width
+        height = image.height
+
     # Write to optimized webp format. strip=True removes ALL metadata
     # (EXIF/GPS, ICC profile, XMP) on output in a single call.
-    optimized_buffer = image.write_to_buffer(".webp", Q=85, strip=True)
+    # effort=6 maximizes compression efficiency (smallest size for given Q).
+    # smart_subsample=True improves color sharpness for high contrast edges.
+    optimized_buffer = image.write_to_buffer(
+        ".webp", Q=q_value, strip=True, effort=6, smart_subsample=True
+    )
     return optimized_buffer, "image/webp", width, height

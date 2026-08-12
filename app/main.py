@@ -1,3 +1,4 @@
+import json as _json
 import logging
 from contextlib import asynccontextmanager
 
@@ -20,12 +21,38 @@ from app.routers import (
 from app.services.metadata import close_metadata_store, get_metadata_store
 from app.services.storage import close_storage
 
+
+class _JSONFormatter(logging.Formatter):
+    """Structured JSON log lines for log aggregators (Datadog, Loki, ELK)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        log_entry = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "request_id": getattr(record, "request_id", "-"),
+        }
+        if record.exc_info and record.exc_info[0] is not None:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return _json.dumps(log_entry)
+
+
 _handler = logging.StreamHandler()
 _handler.addFilter(RequestIDLogFilter())
-_handler.setFormatter(
-    logging.Formatter("%(asctime)s %(levelname)s [%(request_id)s] %(name)s: %(message)s")
-)
+_handler.setFormatter(_JSONFormatter())
 logging.basicConfig(level=logging.INFO, handlers=[_handler])
+
+# Uvicorn configures its own handlers on these loggers via dictConfig, bypassing
+# the root config above -- so its access/error lines would otherwise stay plain
+# text and break a JSON log pipeline (one un-parseable line per request). Point
+# them at the same JSON handler, with propagation off so they don't also
+# double-emit through root. This runs after uvicorn's own logging setup (the app
+# is imported after Config() has configured logging), so it wins.
+for _uvicorn_logger in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+    _l = logging.getLogger(_uvicorn_logger)
+    _l.handlers = [_handler]
+    _l.propagate = False
 
 
 @asynccontextmanager

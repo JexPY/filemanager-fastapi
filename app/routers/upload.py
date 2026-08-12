@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 import uuid
@@ -27,6 +28,7 @@ from app.routers.utils import (
     _sha256_hex,
     _stream_capped_to_temp,
 )
+from app.schemas import ImageUploadResponse, VideoUploadResponse
 from app.services.image_vips import ImageValidationError, validate_and_strip_image
 from app.services.metadata import (
     KIND_IMAGE,
@@ -50,7 +52,13 @@ require_image_upload = require_scopes("upload:image")
 require_video_upload = require_scopes("upload:video")
 
 
-@router.post("/upload/image", tags=["Uploads"], summary="Upload image")
+@router.post(
+    "/upload/image",
+    tags=["Uploads"],
+    summary="Upload image",
+    response_model=ImageUploadResponse,
+    response_model_exclude_unset=True,
+)
 async def upload_image(
     request: Request,
     file: UploadFile = File(...),
@@ -66,13 +74,19 @@ async def upload_image(
     imgproxy_format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
         default=None, json_schema_extra={"example": None}
     ),
+    optimization: Literal["size", "balanced", "quality"] = Form(
+        "balanced", description="Encoding profile for initial image compression"
+    ),
     owner: str = Depends(require_image_upload),
 ):
     file_data = await _read_capped(file, request, settings.MAX_IMAGE_UPLOAD_BYTES)
 
     # Content hash of the *input* bytes for idempotency. Hashing 25 MB is
     # borderline CPU work, so offload it like the other CPU-bound steps.
-    content_hash = await asyncio.to_thread(_sha256_hex, file_data)
+    # We include the optimization profile in the hash, so different optimization
+    # levels are treated as distinct uploads for the same source bytes.
+    signature = f"{await asyncio.to_thread(_sha256_hex, file_data)}:{optimization}"
+    content_hash = hashlib.sha256(signature.encode()).hexdigest()
 
     store = await get_metadata_store()
     # Idempotency: the exact same bytes already stored (and ready) by this owner
@@ -90,6 +104,7 @@ async def upload_image(
             existing.id,
             existing.width,
             existing.height,
+            existing.size_bytes,
             source_url,
             custom_width=imgproxy_width,
             custom_height=imgproxy_height,
@@ -100,7 +115,7 @@ async def upload_image(
     # Client-side failures (bad/unsupported image) => 400, generic detail.
     try:
         optimized_buffer, content_type, width, height = await asyncio.to_thread(
-            validate_and_strip_image, file_data
+            validate_and_strip_image, file_data, optimization
         )
     except ImageValidationError as exc:
         logger.warning("Image validation rejected upload: %s", exc)
@@ -148,6 +163,7 @@ async def upload_image(
         record.id,
         width,
         height,
+        record.size_bytes,
         source_url,
         custom_width=imgproxy_width,
         custom_height=imgproxy_height,
@@ -161,12 +177,20 @@ async def upload_image(
     status_code=status.HTTP_202_ACCEPTED,
     tags=["Uploads"],
     summary="Upload video",
+    response_model=VideoUploadResponse,
+    response_model_exclude_unset=True,
 )
 async def upload_video(
     request: Request,
     response: Response,
     file: UploadFile = File(...),
     callback_url: Annotated[str | None, Form(json_schema_extra={"example": None})] = None,
+    format: Literal["mp4", "webm_vp9", "webm_av1"] = Form("mp4"),
+    optimization: Literal["balanced", "quality"] = Form("balanced", description="Encoding profile"),
+    start_seconds: float | None = Form(
+        None, description="Timestamp to start cropping from", ge=0.0
+    ),
+    end_seconds: float | None = Form(None, description="Timestamp to stop cropping at", ge=0.0),
     owner: str = Depends(require_video_upload),
 ):
     # Admit the optional webhook target up front (before ingesting) so a bad or
@@ -181,9 +205,13 @@ async def upload_video(
     # time) and hash it incrementally as it lands, instead of buffering the whole
     # body (up to MAX_VIDEO_UPLOAD_BYTES) in RAM. The temp file is removed in the
     # finally, whatever happens below.
-    temp_path, size, content_hash = await _stream_capped_to_temp(
+    temp_path, size, raw_content_hash = await _stream_capped_to_temp(
         file, request, settings.MAX_VIDEO_UPLOAD_BYTES
     )
+    # The deduplication hash must include the processing parameters, otherwise
+    # uploading the same video with different formats/cuts would falsely dedupe.
+    signature = f"{raw_content_hash}:{format}:{optimization}:{start_seconds}:{end_seconds}"
+    content_hash = hashlib.sha256(signature.encode()).hexdigest()
     content_type = file.content_type or "application/octet-stream"
     try:
         # Idempotency (video): on a match against this owner's existing
@@ -253,6 +281,10 @@ async def upload_video(
                 raw_storage_key=raw_key,
                 original_filename=original_filename,
                 upload_id=record.id,
+                output_format=format,
+                optimization=optimization,
+                start_seconds=start_seconds,
+                end_seconds=end_seconds,
             )
         except Exception as exc:
             # Enqueue failed (e.g. Redis down): don't leave a row stuck

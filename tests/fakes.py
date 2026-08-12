@@ -6,7 +6,7 @@ import contextlib
 import os
 import tempfile
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.services.metadata import (
     KIND_VIDEO,
@@ -150,6 +150,7 @@ class InMemoryMetadataStore(MetadataStore):
             webhook_updated_at=None,
             visibility="private",
             share_token=None,
+            is_linked=False,
             created_at=now,
             updated_at=now,
         )
@@ -183,9 +184,18 @@ class InMemoryMetadataStore(MetadataStore):
         ]
         return matches[offset : offset + limit]
 
-    async def delete(self, upload_id: str, owner: str) -> UploadRecord | None:
+    async def count(self, owner: str, *, kind: str | None = None) -> int:
+        return len(
+            [
+                r
+                for r in self.records.values()
+                if r.owner == owner and (kind is None or r.kind == kind)
+            ]
+        )
+
+    async def delete(self, upload_id: str, owner: str | None = None) -> UploadRecord | None:
         record = self.records.get(upload_id)
-        if record is None or record.owner != owner:
+        if record is None or (owner is not None and record.owner != owner):
             return None
         del self.records[upload_id]
         self._order.remove(upload_id)
@@ -222,6 +232,9 @@ class InMemoryMetadataStore(MetadataStore):
         size_bytes: int,
         duration_seconds: float | None = None,
         truncated: bool = False,
+        width: int | None = None,
+        height: int | None = None,
+        content_type: str | None = None,
     ) -> UploadRecord | None:
         record = self.records.get(upload_id)
         if record is None:
@@ -232,6 +245,9 @@ class InMemoryMetadataStore(MetadataStore):
             size_bytes=size_bytes,
             duration_seconds=duration_seconds,
             truncated=truncated,
+            width=width if width is not None else record.width,
+            height=height if height is not None else record.height,
+            content_type=content_type if content_type is not None else record.content_type,
             status=STATUS_READY,
             updated_at=datetime.now(UTC),
         )
@@ -310,6 +326,20 @@ class InMemoryMetadataStore(MetadataStore):
             if record.share_token == token:
                 return record
         return None
+
+    async def mark_linked(self, upload_id: str, owner: str) -> UploadRecord | None:
+        record = self.records.get(upload_id)
+        if record is None or record.owner != owner:
+            return None
+        updated = replace(record, is_linked=True, updated_at=datetime.now(UTC))
+        self.records[upload_id] = updated
+        return updated
+
+    async def get_unlinked_older_than(self, hours: int, limit: int = 100) -> list[UploadRecord]:
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
+        matches = [r for r in self.records.values() if not r.is_linked and r.created_at < cutoff]
+        matches.sort(key=lambda r: r.created_at)
+        return matches[:limit]
 
     async def aclose(self) -> None:
         self.closed = True

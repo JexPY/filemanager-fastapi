@@ -83,14 +83,6 @@ def _sanitize_extension(filename: str) -> str:
     return cleaned or "bin"
 
 
-def _public_url(path: str) -> str:
-    """Turn an app-relative path (e.g. /share/<token>) into an absolute URL when
-    PUBLIC_BASE_URL is configured, otherwise return the path unchanged so the
-    client prefixes its own origin."""
-    base = settings.PUBLIC_BASE_URL.rstrip("/")
-    return f"{base}{path}" if base else path
-
-
 def _public_playback_url_available() -> bool:
     """Whether GET /files/{id}/download may 302 a *public* video straight to a
     stable, directly-servable public_url(key) instead of X-Accel / presigning.
@@ -115,40 +107,50 @@ def _assert_safe_media_key(storage_key: str) -> None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid path")
 
 
-def _xaccel_response(storage_key: str) -> Response:
+def _xaccel_response(storage_key: str, filename: str | None = None) -> Response:
     """Yield a local video via nginx's X-Accel-Redirect. The app issues the
     header; nginx serves the bytes directly from the volume, natively supporting
     Range/seek. The `media_data` location block must be internal in nginx.conf.
-    Path traversal is blocked locally before touching the nginx boundary."""
+    Path traversal is blocked locally before touching the nginx boundary.
+    `filename` sets an `inline` Content-Disposition so the player/browser has a
+    sensible name for a "save as" without forcing a download."""
     _assert_safe_media_key(storage_key)
     response = Response(media_type="video/mp4")
     response.headers["X-Accel-Redirect"] = f"/internal-media/{storage_key}"
+    if filename:
+        response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
     return response
 
 
-def _local_file_response(storage_key: str) -> Response:
+def _local_file_response(storage_key: str, filename: str | None = None) -> Response:
     """Yield a local video via Starlette's FileResponse (which does support Range).
     Used ONLY when LOCAL_MEDIA_SERVE_MODE=direct (i.e. dev without nginx). Prod
-    always uses xaccel."""
+    always uses xaccel. `filename` sets an `inline` Content-Disposition, matching
+    the X-Accel path."""
     _assert_safe_media_key(storage_key)
     path = Path(settings.LOCAL_STORAGE_DIR) / storage_key
     if not path.is_file():
         raise StorageError(f"Object not found: {storage_key!r}")
-    return FileResponse(path, media_type="video/mp4")
+    headers = {"Content-Disposition": f'inline; filename="{filename}"'} if filename else None
+    return FileResponse(path, media_type="video/mp4", headers=headers)
 
 
-async def resolve_playback(storage_key: str) -> Response:
+async def resolve_playback(storage_key: str, filename: str | None = None) -> Response:
     """Resolve a video's byte path, keyed on STORAGE_BACKEND (mirrors
     imgproxy.build_source_url's keying): local -> nginx X-Accel (or FileResponse
     in dev); s3/gcp -> 302 to a freshly-minted signed GET URL sized to a viewing
     session. Range works in every path and the app stays out of the byte path
     (nginx or the object store moves the bytes). Raises StorageError (-> 502) if
-    the backend can't produce a usable URL."""
+    the backend can't produce a usable URL.
+
+    `filename` (the original upload name) is threaded onto the local byte paths
+    as an `inline` Content-Disposition; the object-store 302 leaves the header to
+    the store, so it is not applied there."""
     backend_name = settings.STORAGE_BACKEND
     if backend_name == "local":
         if settings.LOCAL_MEDIA_SERVE_MODE == "direct":
-            return _local_file_response(storage_key)
-        return _xaccel_response(storage_key)
+            return _local_file_response(storage_key, filename)
+        return _xaccel_response(storage_key, filename)
 
     backend = await get_storage()
     signed = await backend.presigned_get_url(storage_key, settings.VIDEO_PLAYBACK_URL_TTL_SECONDS)
@@ -171,6 +173,7 @@ def _image_response(
     record_id: str,
     width: int | None,
     height: int | None,
+    size_bytes: int | None,
     source_url: str,
     custom_width: int | None = None,
     custom_height: int | None = None,
@@ -180,6 +183,8 @@ def _image_response(
     response = {
         "status": "success",
         "id": record_id,
+        "size_bytes": size_bytes,
+        "size_mb": round(size_bytes / (1024 * 1024), 2) if size_bytes else None,
         "dimensions": {"width": width, "height": height},
         "imgproxy_thumbnail_url": generate_signed_url(
             source_url, processing_options="rs:fill:300:300"
@@ -190,7 +195,11 @@ def _image_response(
     if custom_width or custom_height or custom_format or custom_fit != "auto":
         cw = custom_width or 0
         ch = custom_height or 0
-        processing_options = f"rs:{custom_fit}:{cw}:{ch}"
+        if cw == 0 and ch == 0:
+            processing_options = f"rs:{custom_fit}"
+        else:
+            processing_options = f"rs:{custom_fit}:{cw}:{ch}"
+
         response["imgproxy_custom_url"] = generate_signed_url(
             source_url, processing_options=processing_options, format=custom_format
         )

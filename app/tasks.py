@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 import logging
 import uuid
 
@@ -66,19 +67,20 @@ async def _enqueue_webhook(record: UploadRecord, event: str) -> None:
         logger.exception("Failed to enqueue webhook delivery for upload %s", record.id)
 
 
-async def _probe_duration_seconds(input_path: str) -> float | None:
-    """Return the input's duration in seconds via ffprobe, or None if it can't
-    be determined. Best-effort: a probe failure must never fail the compression
-    itself -- it only means we can't report `truncated` for this input."""
+async def _probe_video_metadata(input_path: str) -> tuple[float | None, int | None, int | None]:
+    """Return the input's (duration, width, height) via ffprobe.
+    Best-effort: a probe failure must never fail the compression itself."""
     try:
         process = await asyncio.create_subprocess_exec(
             "ffprobe",
             "-v",
             "error",
+            "-select_streams",
+            "v:0",
             "-show_entries",
-            "format=duration",
+            "format=duration:stream=width,height",
             "-of",
-            "default=noprint_wrappers=1:nokey=1",
+            "json",
             input_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -87,54 +89,167 @@ async def _probe_duration_seconds(input_path: str) -> float | None:
             process.communicate(), timeout=settings.FFMPEG_TIMEOUT_SECONDS
         )
         if process.returncode != 0:
-            return None
-        return float(stdout.decode().strip())
-    except (ValueError, TimeoutError, OSError) as exc:
-        logger.warning("ffprobe could not determine duration for %s: %s", input_path, exc)
-        return None
+            return None, None, None
+
+        data = json.loads(stdout.decode())
+        duration = (
+            float(data.get("format", {}).get("duration"))
+            if data.get("format", {}).get("duration")
+            else None
+        )
+
+        width, height = None, None
+        streams = data.get("streams", [])
+        if streams:
+            width = streams[0].get("width")
+            height = streams[0].get("height")
+
+        return duration, width, height
+    except (ValueError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        logger.warning("ffprobe could not determine metadata for %s: %s", input_path, exc)
+        return None, None, None
 
 
 @broker.task
-async def compress_video_task(raw_storage_key: str, original_filename: str, upload_id: str) -> dict:
+async def compress_video_task(
+    raw_storage_key: str,
+    original_filename: str,
+    upload_id: str,
+    output_format: str = "mp4",
+    optimization: str = "balanced",
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
+) -> dict:
     unique_id = uuid.uuid4().hex
-    output_path = f"/tmp/{unique_id}_compressed.mp4"
-    output_key = f"videos/{unique_id}_compressed.mp4"
-    max_duration = settings.VIDEO_MAX_DURATION_SECONDS
+
+    ext = "webm" if output_format.startswith("webm") else "mp4"
+    content_type = f"video/{ext}"
+    output_path = f"/tmp/{unique_id}_compressed.{ext}"
+    output_key = f"videos/{unique_id}_compressed.{ext}"
 
     store = await get_metadata_store()
 
     try:
-        # Read the raw upload in place instead of buffering it in RAM: local ->
-        # the on-disk path, s3/gcp -> a presigned URL ffmpeg reads over HTTPS.
-        # Only the key ever travels through Redis.
         input_source = await _resolve_ffmpeg_input(raw_storage_key)
+        input_duration, width, height = await _probe_video_metadata(input_source)
 
-        # Probe the input duration up front so we can tell the caller when the
-        # output was truncated (input longer than the cap) instead of silently
-        # dropping footage.
-        input_duration = await _probe_duration_seconds(input_source)
-        truncated = input_duration is not None and input_duration > max_duration
+        truncated = start_seconds is not None or end_seconds is not None
 
-        # Run FFmpeg 7 async: H.264/AAC, cap output at max_duration, -crf 28,
-        # -preset fast.
+        ffmpeg_args = ["ffmpeg", "-y"]
+        if start_seconds is not None:
+            ffmpeg_args.extend(["-ss", str(start_seconds)])
+        if end_seconds is not None:
+            ffmpeg_args.extend(["-to", str(end_seconds)])
+
+        ffmpeg_args.extend(["-i", input_source])
+
+        if optimization == "balanced":
+            ffmpeg_args.extend(["-vf", "scale='min(1280,iw)':-2"])
+            if output_format == "webm_vp9":
+                ffmpeg_args.extend(
+                    [
+                        "-c:v",
+                        "libvpx-vp9",
+                        "-crf",
+                        "35",
+                        "-b:v",
+                        "0",
+                        "-cpu-used",
+                        "4",
+                        "-c:a",
+                        "libopus",
+                        "-b:a",
+                        "96k",
+                    ]
+                )
+            elif output_format == "webm_av1":
+                ffmpeg_args.extend(
+                    [
+                        "-c:v",
+                        "libsvtav1",
+                        "-preset",
+                        "8",
+                        "-crf",
+                        "45",
+                        "-c:a",
+                        "libopus",
+                        "-b:a",
+                        "96k",
+                    ]
+                )
+            else:
+                ffmpeg_args.extend(
+                    [
+                        "-c:v",
+                        "libx264",
+                        "-crf",
+                        "28",
+                        "-preset",
+                        "fast",
+                        "-movflags",
+                        "+faststart",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "128k",
+                    ]
+                )
+        else:  # "quality"
+            ffmpeg_args.extend(["-vf", "scale='min(1920,iw)':-2"])
+            if output_format == "webm_vp9":
+                ffmpeg_args.extend(
+                    [
+                        "-c:v",
+                        "libvpx-vp9",
+                        "-crf",
+                        "30",
+                        "-b:v",
+                        "0",
+                        "-cpu-used",
+                        "2",
+                        "-c:a",
+                        "libopus",
+                        "-b:a",
+                        "128k",
+                    ]
+                )
+            elif output_format == "webm_av1":
+                ffmpeg_args.extend(
+                    [
+                        "-c:v",
+                        "libsvtav1",
+                        "-preset",
+                        "6",
+                        "-crf",
+                        "35",
+                        "-c:a",
+                        "libopus",
+                        "-b:a",
+                        "128k",
+                    ]
+                )
+            else:
+                ffmpeg_args.extend(
+                    [
+                        "-c:v",
+                        "libx264",
+                        "-crf",
+                        "23",
+                        "-preset",
+                        "medium",
+                        "-movflags",
+                        "+faststart",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "192k",
+                    ]
+                )
+
+        ffmpeg_args.append(output_path)
+
         process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-y",
-            "-i",
-            input_source,
-            "-t",
-            str(max_duration),
-            "-c:v",
-            "libx264",
-            "-crf",
-            "28",
-            "-preset",
-            "fast",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            output_path,
+            *ffmpeg_args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -158,7 +273,7 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
         async with aiofiles.open(output_path, "rb") as f:
             output_data = await f.read()
 
-        obj = await upload_file(output_data, output_key, "video/mp4")
+        obj = await upload_file(output_data, output_key, content_type)
 
         # Flip the record from `processing` to `ready`, pointing it at the
         # compressed object. A None result means the owner DELETEd the upload
@@ -170,6 +285,9 @@ async def compress_video_task(raw_storage_key: str, original_filename: str, uplo
             size_bytes=obj.size,
             duration_seconds=input_duration,
             truncated=truncated,
+            width=width,
+            height=height,
+            content_type=content_type,
         )
         if record is None:
             logger.warning(
@@ -273,7 +391,7 @@ async def _poster_seek_seconds(input_path: str) -> float:
     """Where to grab the poster frame from: ~10% in (so it's not a black
     lead-in frame), clamped just inside the clip. Falls back to the very first
     frame (0s) when the duration can't be probed."""
-    duration = await _probe_duration_seconds(input_path)
+    duration, _, _ = await _probe_video_metadata(input_path)
     if duration is None or duration <= 0:
         return 0.0
     return min(duration * 0.1, max(duration - 0.1, 0.0))
@@ -381,3 +499,57 @@ async def generate_poster_task(upload_id: str, at_seconds: float | None = None) 
     finally:
         if await aiofiles.os.path.exists(frame_path):
             await aiofiles.os.remove(frame_path)
+
+
+@broker.task(schedule=[{"cron": "0 * * * *"}])
+async def cleanup_orphaned_uploads_task(hours: int = 24, batch_size: int = 100) -> dict:
+    """Cron-based cleanup mechanism that automatically deletes unlinked uploads older than 24 hours.
+
+    Fetches unlinked records older than `hours` in batches. For each record:
+    1. Attempts to delete physical file via `delete_file(storage_key)`.
+    2. On success (or if missing/404), deletes the database record via `store.delete(upload_id)`.
+    """
+    store = await get_metadata_store()
+    total_deleted = 0
+    total_failed = 0
+
+    while True:
+        try:
+            records = await store.get_unlinked_older_than(hours=hours, limit=batch_size)
+        except MetadataError as exc:
+            logger.error("Failed to fetch unlinked uploads for cleanup: %s", exc)
+            break
+
+        if not records:
+            break
+
+        for record in records:
+            storage_ok = False
+            try:
+                await delete_file(record.storage_key)
+                storage_ok = True
+            except StorageError as exc:
+                err_str = str(exc).lower()
+                if "not found" in err_str or "nosuchkey" in err_str or "404" in err_str:
+                    logger.info(
+                        "Storage key %s missing during cleanup; proceeding to remove record",
+                        record.storage_key,
+                    )
+                    storage_ok = True
+                else:
+                    logger.error(
+                        "Failed to delete physical file %s during cleanup: %s",
+                        record.storage_key,
+                        exc,
+                    )
+                    total_failed += 1
+
+            if storage_ok:
+                try:
+                    await store.delete(record.id)
+                    total_deleted += 1
+                except MetadataError as exc:
+                    logger.error("Failed to delete record %s during cleanup: %s", record.id, exc)
+                    total_failed += 1
+
+    return {"status": "success", "deleted": total_deleted, "failed": total_failed}

@@ -140,6 +140,28 @@ Things that will bite you if you don't know them:
   `DELETE /files/{id}/share` clears it. The `share_token` column has a **UNIQUE
   index** (Postgres NULLs are distinct, so unlimited rows may have none while a
   minted token is guaranteed unique) — see migration `0006`.
+- **Two credential shapes, one owner: static master tokens *and* capability
+  JWTs.** `app/routers/auth.py::resolve_principal` is the single dual-auth path
+  and is pure (trivially mockable). A bearer is first matched, constant-time,
+  against `FILE_MANAGER_BEARER_TOKENS` (the legacy path → a `Principal` with
+  `scopes=None`, i.e. **unrestricted**); an unmatched one is then decoded as an
+  HS256 capability JWT signed with `JWT_SECRET_KEY` (`sub`=owner, `exp`
+  enforced, `scopes` must include at least one of `upload:image`/`upload:video`
+  or it isn't a principal). Either way the resolved *owner* flows through
+  `verify_token` unchanged, so every existing owner-scoped route is unaffected.
+  The token may ride the `Authorization: Bearer` header **or** a `?token=` query
+  param — the presigned-URL fallback for header-less clients (`<form>` POSTs, a
+  `<video src>`); identical validation for both. **Scopes gate only the upload
+  verbs**: `/upload/image` and `/upload/video` depend on `require_scopes(...)`,
+  so a JWT must carry the matching scope (a 403 otherwise) while a static token
+  bypasses it (`scopes=None`). `POST /upload/presign` is **static-token only**
+  (via `verify_static_token`, so a leaked JWT can never mint *more* JWTs) and
+  returns `<PUBLIC_BASE_URL>/upload/<kind>?token=<jwt>` for a frontend to upload
+  straight to this service, bytes never touching the main backend. JWT auth is
+  **off unless `JWT_SECRET_KEY` is set** — blank means only static tokens work
+  (backward compatible) and `/upload/presign` is a `503`. **Do not `str(e)` a
+  JWT error to the client** — a bad/expired/mis-signed token is a flat `401`, no
+  oracle for *why*.
 - **GCS can now sign private playback URLs.** `GCSStorage.presigned_get_url`
   does V4 signing **locally** from the service-account key already loaded
   (gcloud-aio-storage's `Blob.get_signed_url`) — no CDN, no extra Google product,
@@ -172,7 +194,9 @@ Things that will bite you if you don't know them:
   independently in each OS process (api and worker each get their own). It's
   closed via `close_storage()` — wired into `api`'s FastAPI lifespan
   (`app/main.py`) and into the worker's `TaskiqEvents.WORKER_SHUTDOWN` event
-  (`app/broker.py`), so both processes release pooled clients cleanly.
+  (`app/broker.py`), so both processes release pooled clients cleanly. New
+  streaming interfaces include `StorageBackend.local_path` (for zero-copy
+  local FFmpeg access) and `StorageBackend.upload_from_path` (for streaming).
 - **The metadata store mirrors that singleton pattern exactly.** `app/services/
   metadata.py`'s `_store` (an asyncpg-pool-backed `PostgresMetadataStore`) is
   built lazily per process and closed via `close_metadata_store()`, wired into
@@ -245,6 +269,19 @@ Things that will bite you if you don't know them:
   404) — `is_result_ready()` alone cannot. This replaced the old short-lived
   Redis issuance marker (`app/services/task_status.py`, now removed); the record
   is created before enqueue, so it's always present and it's durable (no TTL).
+- **`docker-compose.override.yml` (checked in, dev-only) silently wins over
+  `Dockerfile.api`'s `CMD`.** Compose auto-merges it into any bare
+  `docker compose ...` run from this directory, and it unconditionally
+  overrides the `api` service's `command` to a single-process
+  `uvicorn --reload` (plus a `./app:/app/app` live-reload bind mount) — it
+  does not defer to whatever `Dockerfile.api`'s `CMD` says. A prod-facing
+  `CMD` change (e.g. adding `--workers N`) is real in the built image
+  (`docker inspect <image> --format '{{json .Config.Cmd}}'` shows it) but
+  **invisible under a default local `docker compose up`**, so don't trust
+  `docker compose config`/`build` alone to confirm it took effect — check the
+  actual running container (`docker compose exec api ps aux`) or run
+  `docker compose -f docker-compose.yml up` to exclude the override. The
+  override applies the same override pattern to `worker`'s command/volumes.
 
 ## Commands (all verified this session, against the real stack)
 
@@ -376,12 +413,16 @@ Honest list, not hidden anywhere else:
   (vs. row-state) would also be needed if a single upload ever needed multiple
   callbacks/events.
 - **Scopes are coarse** — per-token *identity* exists and scopes uploads,
-  listing, deletion, **and now `GET /tasks/{id}`** to the owner, but there are
-  no roles/scopes beyond "owns its own uploads" (e.g. no read-only vs.
-  read-write tokens, no admin).
+  listing, deletion, **and `GET /tasks/{id}`** to the owner. Capability JWTs add
+  `upload:image`/`upload:video` scopes, but **those gate only the two upload
+  verbs**; a JWT authenticates as its `sub` for every *other* owner-scoped route
+  the same as a static token would (blast radius is still just that owner's own
+  resources). There are still no read-only vs. read-write or admin roles, and no
+  scope taxonomy beyond the two upload verbs.
 - **GCS backend is unit-tested only** (mocked client) — no live GCP
   project/credentials in this environment. This now includes the V4
   signed-playback-URL path (`GCSStorage.presigned_get_url`), asserted by mock.
+  The GCS delete method is also verified by mock to safely handle 404s (idempotent).
   `local` and `s3` (against real MinIO) are verified end to end — including
   **video playback with Range** (local via nginx X-Accel → 206; s3 via
   302→presigned→Range → 206) and the full visibility/share matrix; the Postgres
@@ -394,10 +435,9 @@ Honest list, not hidden anywhere else:
   is a later pass, warranted only when high-read private media or a hard
   never-break-on-resume promise appears. CDN wiring itself is a deploy concern:
   `*_PUBLIC_BASE_URL` = the CDN domain, zero code change.
-- **No streaming I/O** — uploads are fully buffered in memory (bounded by
-  `MAX_IMAGE_UPLOAD_BYTES`/`MAX_VIDEO_UPLOAD_BYTES`, but still buffered, not
-  streamed to storage). The single biggest scalability lever if this needs
-  to handle much larger files or higher concurrency.
+- **No streaming I/O for images** — image uploads are fully buffered in memory
+  by design. (Video upload and worker processing now stream to/from disk safely, 
+  offering bounded O(1) memory usage across all backends).
 - **No presigned direct-to-storage uploads** — every byte proxies through
   `api`. Would remove the API from the upload path entirely for large media.
 - **No rate limiting / concurrency caps** beyond the upload size limits.
@@ -413,3 +453,17 @@ Honest list, not hidden anywhere else:
 None of the above are silently broken — each is a deliberate scope boundary.
 Start a fresh planning pass against the actual code before picking one up,
 rather than assuming this list is still accurate by the time you read it.
+
+### Additional Potential Improvements for Future Sessions
+- **Multipart/Chunked Uploads:** For extremely large video files, bypassing the memory buffer via chunked uploads or direct-to-s3 multipart presigned URLs.
+- **Bulk Operations:** Endpoints to delete or fetch status for multiple IDs at once, reducing API overhead for batch operations.
+- **Tenant Quotas and Analytics:** Storage usage tracking and configurable limits per token.
+- **Automated Webhook Retry with Backoff:** Instead of just manual replay, implement an automatic exponential backoff for failed webhook deliveries using TaskIQ's scheduling/retry capabilities.
+- **Automated CI/CD Pipeline:** Adding GitHub Actions (or similar) to run the `test` docker compose service automatically on push/PR, since it's fully containerized.
+
+## Production Guidelines & Architecture
+The project is built around an "Origin Shield" architecture where NGINX acts as a mandatory entry proxy for both video streaming and `imgproxy` caching (preventing cache stampedes). A detailed guide on this architecture, the Backend-to-Backend security model for `FILE_MANAGER_BEARER_TOKENS`, and cache invalidation strategies is located in `docs/PRODUCTION.md`. 
+
+## Architectural Rules
+
+- **Single Responsibility & Anti-Bloat:** Do not dump every new endpoint or helper into a generic file like `files.py` or `utils.py`. If a `.py` file exceeds ~400 lines, it must be proactively refactored into modular, domain-specific files (e.g. `upload.py`, `playback.py`, `management.py`). Keep the codebase lightweight and highly cohesive.

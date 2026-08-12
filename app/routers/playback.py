@@ -7,6 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 
 from app.routers.auth import _resolve_owner_optional, security, verify_token
 from app.routers.utils import _image_source_url, _public_playback_url_available, resolve_playback
+from app.schemas import ImageUrlResponse
 from app.services.imgproxy import generate_signed_url
 from app.services.metadata import (
     KIND_IMAGE,
@@ -81,7 +82,9 @@ async def download_file_endpoint(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
     try:
-        return await resolve_playback(record.storage_key)
+        return await resolve_playback(
+            record.storage_key, filename=record.original_filename or "video.mp4"
+        )
     except StorageError as exc:
         logger.error("Failed to resolve playback for %s: %s", file_id, exc)
         raise HTTPException(
@@ -111,7 +114,9 @@ async def download_via_share(share_token: Annotated[str, Path(max_length=100)]):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
     try:
-        return await resolve_playback(record.storage_key)
+        return await resolve_playback(
+            record.storage_key, filename=record.original_filename or "video.mp4"
+        )
     except StorageError as exc:
         logger.error("Failed to resolve playback via share token: %s", exc)
         raise HTTPException(
@@ -123,6 +128,7 @@ async def download_via_share(share_token: Annotated[str, Path(max_length=100)]):
     "/files/{file_id}/image-url",
     tags=["Sharing & Playback"],
     summary="Generate custom image URL",
+    response_model=ImageUrlResponse,
 )
 async def get_custom_image_url(
     file_id: Annotated[str, Path(max_length=64)],

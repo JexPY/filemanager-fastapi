@@ -134,53 +134,53 @@ async def deliver_webhook(
     # Compact, stable serialization so the bytes the receiver verifies are the
     # exact bytes we signed.
     body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-    timestamp = str(int(time.time()))
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "filemanager-fastapi-webhooks/1",
         "X-Webhook-Id": delivery_id,  # idempotency key, stable across retries
         "X-Webhook-Event": event,
-        "X-Webhook-Timestamp": timestamp,
-        "X-Webhook-Signature": _sign(settings.WEBHOOK_SIGNING_SECRET, timestamp, body),
     }
     timeout = aiohttp.ClientTimeout(total=settings.WEBHOOK_TIMEOUT_SECONDS)
 
     last_error = "no attempt made"
     attempt = 0
-    for attempt in range(1, settings.WEBHOOK_MAX_ATTEMPTS + 1):
-        try:
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(url, data=body, headers=headers, timeout=timeout) as resp,
-            ):
-                if 200 <= resp.status < 300:
-                    logger.info(
-                        "Webhook %s delivered to %s (attempt %d, status %d)",
+    async with aiohttp.ClientSession() as session:
+        for attempt in range(1, settings.WEBHOOK_MAX_ATTEMPTS + 1):
+            timestamp = str(int(time.time()))
+            headers["X-Webhook-Timestamp"] = timestamp
+            headers["X-Webhook-Signature"] = _sign(settings.WEBHOOK_SIGNING_SECRET, timestamp, body)
+            try:
+                async with session.post(url, data=body, headers=headers, timeout=timeout) as resp:
+                    if 200 <= resp.status < 300:
+                        logger.info(
+                            "Webhook %s delivered to %s (attempt %d, status %d)",
+                            delivery_id,
+                            url,
+                            attempt,
+                            resp.status,
+                        )
+                        return WebhookDeliveryResult(
+                            delivered=True, attempts=attempt, last_error=None
+                        )
+                    last_error = f"HTTP {resp.status}"
+                    logger.warning(
+                        "Webhook %s got non-2xx from %s (attempt %d, status %d)",
                         delivery_id,
                         url,
                         attempt,
                         resp.status,
                     )
-                    return WebhookDeliveryResult(delivered=True, attempts=attempt, last_error=None)
-                last_error = f"HTTP {resp.status}"
+            except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
                 logger.warning(
-                    "Webhook %s got non-2xx from %s (attempt %d, status %d)",
+                    "Webhook %s delivery to %s failed (attempt %d): %s",
                     delivery_id,
                     url,
                     attempt,
-                    resp.status,
+                    exc,
                 )
-        except (aiohttp.ClientError, TimeoutError, OSError) as exc:
-            last_error = f"{type(exc).__name__}: {exc}"
-            logger.warning(
-                "Webhook %s delivery to %s failed (attempt %d): %s",
-                delivery_id,
-                url,
-                attempt,
-                exc,
-            )
-        if attempt < settings.WEBHOOK_MAX_ATTEMPTS:
-            await asyncio.sleep(_backoff_seconds(attempt))
+            if attempt < settings.WEBHOOK_MAX_ATTEMPTS:
+                await asyncio.sleep(_backoff_seconds(attempt))
 
     logger.error(
         "Webhook %s exhausted %d attempts to %s; dead-lettered (last error: %s)",

@@ -26,7 +26,7 @@ services:
       - "9000:80"
     environment:
       - ENABLE_IMGPROXY_CACHE=${ENABLE_IMGPROXY_CACHE:-true}
-      - NGINX_MAX_BODY_SIZE=${NGINX_MAX_BODY_SIZE:-550m}
+      - NGINX_MAX_BODY_SIZE=${NGINX_MAX_BODY_SIZE:-2000m}
     command: /bin/sh -c "envsubst '$${ENABLE_IMGPROXY_CACHE} $${NGINX_MAX_BODY_SIZE}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"
     volumes:
       - ./nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
@@ -77,6 +77,7 @@ services:
       - LOCAL_STORAGE_DIR=/data/media
     volumes:
       - ./data/media:/data/media
+      - worker_tmp:/tmp
     depends_on:
       redis:
         condition: service_healthy
@@ -99,6 +100,21 @@ services:
       - POSTGRES_USER=filemanager
       - POSTGRES_PASSWORD=filemanager
       - POSTGRES_DB=filemanager
+    # Production-safe defaults: bound how long a runaway query/idle transaction
+    # can hold locks, cap connections, and log anything slower than 1s so slow
+    # queries are visible instead of silently eating latency.
+    command:
+      - "postgres"
+      - "-c"
+      - "statement_timeout=30000"
+      - "-c"
+      - "idle_in_transaction_session_timeout=60000"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "shared_buffers=128MB"
+      - "-c"
+      - "log_min_duration_statement=1000"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -106,6 +122,29 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # On-demand custom-format pg_dump, pruning dumps older than 7 days.
+  # Usage: docker compose --profile backup run --rm db-backup
+  db-backup:
+    image: postgres:17-alpine
+    environment:
+      - PGHOST=db
+      - PGUSER=filemanager
+      - PGPASSWORD=filemanager
+      - PGDATABASE=filemanager
+    volumes:
+      - ./data/backups:/backups
+    entrypoint: >
+      /bin/sh -c "
+      pg_dump --format=custom --file=/backups/filemanager_$$(date +%Y%m%d_%H%M%S).dump &&
+      echo 'Backup completed' &&
+      find /backups -name '*.dump' -mtime +7 -delete &&
+      echo 'Old backups cleaned'
+      "
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles: ["backup"]
 
   imgproxy:
     image: darthsim/imgproxy:latest
@@ -184,3 +223,4 @@ services:
 
 volumes:
   pg_data:
+  worker_tmp:

@@ -134,3 +134,22 @@ async def test_failed_task_returns_sanitized_error(
     assert body["error"] == "Video processing failed"
     assert "/tmp/" not in body["error"]
     assert "ffmpeg" not in body["error"].lower()
+
+
+async def test_completed_task_in_db_but_not_redis_returns_completed(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+) -> None:
+    task_id = uuid.uuid4().hex
+    await _seed_task(fake_metadata, task_id)
+    record = await fake_metadata.get_by_task_id(task_id, OWNER)
+    await fake_metadata.mark_ready(record.id, storage_key="compressed.mp4", size_bytes=100)
+    record = await fake_metadata.get_by_task_id(task_id, OWNER)
+
+    # Do not set anything in fake_result_backend to simulate wiped Redis
+    resp = await client.get(f"/tasks/{task_id}", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "completed"
+    assert body["result"] == {"status": "success", "upload_id": record.id}

@@ -54,6 +54,28 @@ async def test_list_pagination_and_kind_filter(
     assert [f["kind"] for f in videos] == ["video"]
 
 
+async def test_list_reports_total_count_independent_of_pagination(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+) -> None:
+    # Three of the caller's records (2 image, 1 video) plus one other owner's.
+    await _seed(fake_metadata, OWNER, "image", "images/1.webp")
+    await _seed(fake_metadata, OWNER, "image", "images/2.webp")
+    await _seed(fake_metadata, OWNER, "video", "raw/videos/v.mp4")
+    await _seed(fake_metadata, "someone-else", "image", "images/z.webp")
+
+    # total_count is the owner's full count, not the (paginated) page size.
+    body = (await client.get("/files?limit=1", headers=auth_headers)).json()
+    assert len(body["files"]) == 1
+    assert body["total_count"] == 3
+    assert body["limit"] == 1 and body["offset"] == 0
+
+    # It honors the kind filter, and never leaks the other owner's record.
+    videos = (await client.get("/files?kind=video", headers=auth_headers)).json()
+    assert videos["total_count"] == 1
+
+
 async def test_list_rejects_out_of_range_limit(
     client: httpx.AsyncClient, auth_headers: dict[str, str]
 ) -> None:

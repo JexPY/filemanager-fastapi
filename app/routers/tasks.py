@@ -5,13 +5,20 @@ from fastapi import APIRouter, Depends, HTTPException, Path, status
 
 from app.broker import broker
 from app.routers.auth import verify_token
+from app.schemas import TaskStatusResponse
 from app.services.metadata import MetadataError, get_metadata_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/tasks/{task_id}", tags=["Tasks"], summary="Get task status")
+@router.get(
+    "/tasks/{task_id}",
+    tags=["Tasks"],
+    summary="Get task status",
+    response_model=TaskStatusResponse,
+    response_model_exclude_unset=True,
+)
 async def get_task_status(
     task_id: Annotated[str, Path(max_length=100)], owner: str = Depends(verify_token)
 ):
@@ -31,6 +38,16 @@ async def get_task_status(
         ) from exc
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown task id")
+
+    # The database is our source of truth for completed states
+    if record.status == "ready":
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "result": {"status": "success", "upload_id": record.id},
+        }
+    elif record.status == "failed":
+        return {"task_id": task_id, "status": "failed", "error": "Processing failed"}
 
     is_ready = await broker.result_backend.is_result_ready(task_id)
     if not is_ready:

@@ -4,6 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, HTTPException, Path, Response, status
 
 from app.routers.auth import verify_token
+from app.schemas import PosterResponse
 from app.services.metadata import KIND_VIDEO, STATUS_READY, MetadataError, get_metadata_store
 from app.tasks import generate_poster_task
 
@@ -16,6 +17,8 @@ router = APIRouter()
     tags=["Posters"],
     summary="Generate video poster",
     status_code=status.HTTP_202_ACCEPTED,
+    response_model=PosterResponse,
+    response_model_exclude_unset=True,
 )
 async def generate_poster(
     file_id: Annotated[str, Path(max_length=64)],
@@ -68,9 +71,11 @@ async def generate_poster(
             detail="Poster generation temporarily unavailable",
         ) from exc
 
+    from app.urls import public_url
+
     return {
         "status": "accepted",
         "video_id": file_id,
         "task_id": task.task_id,
-        "poll": f"/files/{file_id}",
+        "poll": public_url(f"/files/{file_id}"),
     }

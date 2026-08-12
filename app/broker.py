@@ -1,7 +1,8 @@
 from typing import Any
 
 import taskiq_fastapi
-from taskiq import TaskiqEvents, TaskiqState
+from taskiq import TaskiqEvents, TaskiqScheduler, TaskiqState
+from taskiq.schedule_sources import LabelScheduleSource
 from taskiq_redis import RedisAsyncResultBackend, RedisStreamBroker
 
 from app.config import settings
@@ -15,6 +16,8 @@ result_backend: RedisAsyncResultBackend[Any] = RedisAsyncResultBackend(
 broker = RedisStreamBroker(
     url=settings.REDIS_URL,
 ).with_result_backend(result_backend)
+
+scheduler = TaskiqScheduler(broker, [LabelScheduleSource(broker)])
 
 taskiq_fastapi.init(broker, "app.main:app")
 

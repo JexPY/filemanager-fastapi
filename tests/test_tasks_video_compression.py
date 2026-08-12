@@ -64,7 +64,7 @@ async def test_successful_compression_uploads_output_marks_ready_and_deletes_raw
     )
 
     # Thin task: the result carries only execution state, never domain data.
-    # Everything else (key, size, duration, truncated, download_url) is the
+    # Everything else (key, size, duration, truncated, url) is the
     # Postgres row's job -- asserted below, the single source of truth GET /files
     # reads live. Nothing about the compressed object is sealed in Redis here.
     assert result == {"status": "success", "upload_id": upload_id}
@@ -86,20 +86,20 @@ async def test_successful_compression_uploads_output_marks_ready_and_deletes_raw
     assert raw_key in fake_storage.deleted_keys
 
 
-async def test_input_longer_than_cap_is_flagged_truncated(
+async def test_cropping_flags_truncated(
     fake_storage: InMemoryStorageBackend,
     fake_metadata: InMemoryMetadataStore,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # tiny.mp4 is 2s; a 1s cap forces truncation. The caller must be told rather
-    # than silently losing the second half.
-    monkeypatch.setattr(settings, "VIDEO_MAX_DURATION_SECONDS", 1)
     raw_key = "raw/videos/long.mp4"
     fake_storage.objects[raw_key] = fixture_bytes("tiny.mp4")
     upload_id = await _seed_processing(fake_metadata, raw_key)
 
     result = await compress_video_task(
-        raw_storage_key=raw_key, original_filename="long.mp4", upload_id=upload_id
+        raw_storage_key=raw_key,
+        original_filename="long.mp4",
+        upload_id=upload_id,
+        start_seconds=0.5,
+        end_seconds=1.5,
     )
 
     assert result == {"status": "success", "upload_id": upload_id}

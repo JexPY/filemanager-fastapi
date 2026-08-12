@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, status
 
 from app.config import settings
 from app.routers.auth import verify_token
+from app.schemas import WebhookRedeliverResponse
 from app.services.metadata import STATUS_PROCESSING, STATUS_READY, MetadataError, get_metadata_store
 from app.tasks import deliver_webhook_task
 
@@ -17,6 +18,7 @@ router = APIRouter()
     tags=["Webhooks"],
     summary="Redeliver webhook",
     status_code=status.HTTP_202_ACCEPTED,
+    response_model=WebhookRedeliverResponse,
 )
 async def redeliver_webhook(
     file_id: Annotated[str, Path(max_length=64)], owner: str = Depends(verify_token)

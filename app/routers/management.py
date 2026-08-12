@@ -7,15 +7,22 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, st
 from pydantic import BaseModel
 
 from app.routers.auth import verify_token
-from app.routers.utils import _public_url
+from app.schemas import FileListResponse, FileRecord, ShareLinkResponse
 from app.services.metadata import KIND_VIDEO, MetadataError, get_metadata_store
 from app.services.storage import StorageError, delete_file
+from app.urls import public_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/files", tags=["Files"], summary="List files")
+@router.get(
+    "/files",
+    tags=["Files"],
+    summary="List files",
+    response_model=FileListResponse,
+    response_model_exclude_unset=True,
+)
 async def list_files(
     owner: str = Depends(verify_token),
     limit: int = Query(default=50, ge=1, le=200),
@@ -27,6 +34,7 @@ async def list_files(
     store = await get_metadata_store()
     try:
         records = await store.list(owner, kind=kind, limit=limit, offset=offset)
+        total_count = await store.count(owner, kind=kind)
     except MetadataError as exc:
         logger.error("Failed to list uploads for %s: %s", owner, exc)
         raise HTTPException(
@@ -34,12 +42,19 @@ async def list_files(
         ) from exc
     return {
         "files": [record.to_public() for record in records],
+        "total_count": total_count,
         "limit": limit,
         "offset": offset,
     }
 
 
-@router.get("/files/{file_id}", tags=["Files"], summary="Get file")
+@router.get(
+    "/files/{file_id}",
+    tags=["Files"],
+    summary="Get file",
+    response_model=FileRecord,
+    response_model_exclude_unset=True,
+)
 async def get_file(
     file_id: Annotated[str, Path(max_length=64)], owner: str = Depends(verify_token)
 ):
@@ -62,7 +77,13 @@ class _VisibilityBody(BaseModel):
     visibility: Literal["public", "private"]
 
 
-@router.patch("/files/{file_id}", tags=["Files"], summary="Set file visibility")
+@router.patch(
+    "/files/{file_id}",
+    tags=["Files"],
+    summary="Set file visibility",
+    response_model=FileRecord,
+    response_model_exclude_unset=True,
+)
 async def set_file_visibility(
     file_id: Annotated[str, Path(max_length=64)],
     body: _VisibilityBody,
@@ -105,7 +126,40 @@ async def set_file_visibility(
     return updated.to_public()
 
 
-@router.post("/files/{file_id}/share", tags=["Sharing & Playback"], summary="Create share link")
+@router.patch(
+    "/files/{file_id}/link",
+    tags=["Files"],
+    summary="Mark file as linked",
+    response_model=FileRecord,
+    response_model_exclude_unset=True,
+)
+async def mark_file_linked(
+    file_id: Annotated[str, Path(max_length=64)],
+    owner: str = Depends(verify_token),
+):
+    """Mark an upload as linked to a domain entity (e.g., a user profile or post).
+    Owner-scoped (404 for files that do not belong to the caller). Idempotent.
+    Prevents the upload from being cleaned up by the background garbage collection.
+    """
+    store = await get_metadata_store()
+    try:
+        record = await store.mark_linked(file_id, owner)
+    except MetadataError as exc:
+        logger.error("Failed to mark upload %s as linked: %s", file_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+        ) from exc
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return record.to_public()
+
+
+@router.post(
+    "/files/{file_id}/share",
+    tags=["Sharing & Playback"],
+    summary="Create share link",
+    response_model=ShareLinkResponse,
+)
 async def create_share_link(
     file_id: Annotated[str, Path(max_length=64)], owner: str = Depends(verify_token)
 ):
@@ -144,7 +198,7 @@ async def create_share_link(
     return {
         "id": file_id,
         "share_token": token,
-        "share_url": _public_url(f"/share/{token}"),
+        "share_url": public_url(f"/share/{token}"),
     }
 
 

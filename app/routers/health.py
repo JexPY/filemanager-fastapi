@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import redis.asyncio as redis
@@ -5,6 +6,7 @@ from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
 
 from app.config import settings
+from app.schemas import HealthResponse, ReadinessResponse
 from app.services.metadata import MetadataError, get_metadata_store
 from app.services.storage import StorageError, get_storage
 
@@ -13,7 +15,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/healthz", tags=["System"], summary="Liveness probe")
+@router.get("/healthz", tags=["System"], summary="Liveness probe", response_model=HealthResponse)
 async def healthz() -> dict[str, str]:
     """Pure liveness: 200 whenever the process can handle a request at all.
     No dependency checks -- that's /readyz."""
@@ -47,12 +49,22 @@ async def _check_db() -> bool:
         return False
 
 
-@router.get("/readyz", tags=["System"], summary="Readiness probe")
+@router.get(
+    "/readyz",
+    tags=["System"],
+    summary="Readiness probe",
+    response_model=ReadinessResponse,
+    responses={
+        503: {"model": ReadinessResponse, "description": "One or more dependencies unavailable"}
+    },
+)
 async def readyz() -> JSONResponse:
     """200 only if Redis, the storage backend, and the metadata store are all
     reachable/usable; 503 otherwise. Meant for orchestrator readiness probes,
     not liveness."""
-    redis_ok, storage_ok, db_ok = await _check_redis(), await _check_storage(), await _check_db()
+    redis_ok, storage_ok, db_ok = await asyncio.gather(
+        _check_redis(), _check_storage(), _check_db()
+    )
     ready = redis_ok and storage_ok and db_ok
     body = {
         "status": "ok" if ready else "unavailable",

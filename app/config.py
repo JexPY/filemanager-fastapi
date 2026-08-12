@@ -80,10 +80,10 @@ class Settings(BaseSettings):
 
     # Upload limits (bytes)
     MAX_IMAGE_UPLOAD_BYTES: int = Field(default=25 * 1024 * 1024)
-    MAX_VIDEO_UPLOAD_BYTES: int = Field(default=500 * 1024 * 1024)
+    MAX_VIDEO_UPLOAD_BYTES: int = Field(default=2000 * 1024 * 1024)
     # Decompression-bomb guard: reject images decoding to more than this
     # many total pixels (width * height), before the full-resolution encode.
-    MAX_IMAGE_PIXELS: int = Field(default=40_000_000)
+    MAX_IMAGE_PIXELS: int = Field(default=50_000_000)
     # QR codes have a hard capacity limit (~2953 bytes at version 40/level L);
     # this just rejects absurd input before it ever reaches segno.
     MAX_QR_CONTENT_LENGTH: int = Field(default=2000)

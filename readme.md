@@ -138,12 +138,12 @@ All routes except `/healthz`/`/readyz` require `Authorization: Bearer <token>`.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| POST | `/upload/image` | multipart `file` | `{status, id, dimensions, raw_url, imgproxy_thumbnail_url, imgproxy_optimized_url}` |
+| POST | `/upload/image` | multipart `file` | `{status, id, dimensions, imgproxy_thumbnail_url, imgproxy_optimized_url}` |
 | POST | `/upload/video` | multipart `file`, optional form `callback_url` | `202 {status: "accepted", id, task_id, raw_key}`; identical bytes dedupe to `{status: "duplicate", …}` |
 | GET | `/tasks/{task_id}` | — | `{status: "pending"\|"completed"\|"failed", ...}`; `404` for an unknown id **or another owner's task** |
 | GET | `/files` | query `limit`,`offset`,`kind` | `{files: [{id, kind, status, storage_key, size_bytes, …}], limit, offset}` — caller's uploads, newest first |
 | GET | `/files/{id}` | — | one upload record, or `404` if it isn't the caller's (never includes `share_token`) |
-| PATCH | `/files/{id}` | JSON `{visibility}` | set a video's `private`/`public`; `400` non-video/bad value, `404` if not the caller's |
+| PATCH | `/files/{id}` | JSON `{visibility}` | set a video's `private`/`public`; `400` non-video, `422` bad value, `404` if not the caller's |
 | GET | `/files/{id}/download` | optional `Range` | the permanent playback URL — `public`: 302 to the stable URL or tokenless signed delivery; `private`: owner-only (`404` otherwise) then local X-Accel / s3 presigned / gcs signed 302; `400` non-video |
 | POST | `/files/{id}/share` | — | mint/rotate the share link → `{id, share_token, share_url}` (the **only** place the token is returned); `404` if not the caller's |
 | DELETE | `/files/{id}/share` | — | `204`, revokes the share token; `404` if not the caller's |
@@ -266,7 +266,7 @@ startup (`Settings()` validation) if left unset.
 | `VIDEO_MAX_DURATION_SECONDS` | | caps compressed output duration (default 60s); longer inputs are truncated and flagged `truncated: true` in the task result + `uploads` row |
 | `WEBHOOK_SIGNING_SECRET`, `WEBHOOK_ALLOWED_HOSTS` | both, to enable webhooks | HMAC secret + comma-separated allow-list of callback hosts; **both** must be set or any `callback_url` is rejected `400` |
 | `WEBHOOK_ALLOW_INSECURE_HTTP`, `WEBHOOK_ALLOW_PRIVATE_IPS`, `WEBHOOK_TIMEOUT_SECONDS`, `WEBHOOK_MAX_ATTEMPTS`, `WEBHOOK_RETRY_BACKOFF_SECONDS` | | webhook delivery tuning; the first two default off (https-only, private-IP-blocked) — see **Webhooks** |
-| `MAX_IMAGE_UPLOAD_BYTES`, `MAX_VIDEO_UPLOAD_BYTES`, `MAX_IMAGE_PIXELS`, `MAX_QR_CONTENT_LENGTH`, `FFMPEG_TIMEOUT_SECONDS` | | sane defaults, see `app/config.py` |
+| `MAX_IMAGE_UPLOAD_BYTES`, `MAX_VIDEO_UPLOAD_BYTES`, `MAX_IMAGE_PIXELS`, `MAX_QR_CONTENT_LENGTH`, `FFMPEG_TIMEOUT_SECONDS`, `FFMPEG_INPUT_URL_TTL_SECONDS` | | sane defaults, see `app/config.py` |
 
 ## Development
 
