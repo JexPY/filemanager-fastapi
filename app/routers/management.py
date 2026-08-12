@@ -126,33 +126,6 @@ async def set_file_visibility(
     return updated.to_public()
 
 
-@router.patch(
-    "/files/{file_id}/link",
-    tags=["Files"],
-    summary="Mark file as linked",
-    response_model=FileRecord,
-    response_model_exclude_unset=True,
-)
-async def mark_file_linked(
-    file_id: Annotated[str, Path(max_length=64)],
-    owner: str = Depends(verify_token),
-):
-    """Mark an upload as linked to a domain entity (e.g., a user profile or post).
-    Owner-scoped (404 for files that do not belong to the caller). Idempotent.
-    Prevents the upload from being cleaned up by the background garbage collection.
-    """
-    store = await get_metadata_store()
-    try:
-        record = await store.mark_linked(file_id, owner)
-    except MetadataError as exc:
-        logger.error("Failed to mark upload %s as linked: %s", file_id, exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
-        ) from exc
-    if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    return record.to_public()
-
 
 @router.post(
     "/files/{file_id}/share",

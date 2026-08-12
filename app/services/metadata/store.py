@@ -7,7 +7,6 @@ type that never carries DB internals to callers.
 
 from __future__ import annotations
 
-import builtins
 from abc import ABC, abstractmethod
 
 from .types import UploadRecord
@@ -43,6 +42,7 @@ class MetadataStore(ABC):
         task_id: str | None = None,
         original_filename: str | None = None,
         callback_url: str | None = None,
+        visibility: str = "private",
     ) -> UploadRecord: ...
 
     @abstractmethod
@@ -151,16 +151,6 @@ class MetadataStore(ABC):
     async def get_by_share_token(self, token: str) -> UploadRecord | None:
         """Unscoped lookup by share token -- the token *is* the grant (like
         get_by_id for the worker), so no owner scoping. Unknown token -> None."""
-
-    @abstractmethod
-    async def mark_linked(self, upload_id: str, owner: str) -> UploadRecord | None:
-        """Owner-scoped update to set is_linked = True."""
-
-    @abstractmethod
-    async def get_unlinked_older_than(
-        self, hours: int, limit: int = 100
-    ) -> builtins.list[UploadRecord]:
-        """Fetch batch of unlinked records (is_linked = False) older than N hours."""
 
     async def aclose(self) -> None:  # noqa: B027 -- intentional no-op default, not abstract
         """Release any pooled clients. Default is a no-op."""

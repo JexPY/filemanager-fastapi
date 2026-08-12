@@ -14,7 +14,6 @@ locking fragility the storage-singleton pattern was built to avoid.
 from __future__ import annotations
 
 import asyncio
-import builtins
 import uuid
 from typing import cast
 
@@ -29,11 +28,20 @@ _COLUMNS = (
     "id, owner, kind, storage_key, content_type, size_bytes, width, height, "
     "content_hash, status, task_id, original_filename, duration_seconds, truncated, "
     "callback_url, poster_upload_id, webhook_status, webhook_attempts, webhook_last_error, "
-    "webhook_updated_at, visibility, share_token, is_linked, created_at, updated_at"
+    "webhook_updated_at, visibility, share_token, created_at, updated_at"
+)
+
+_JOIN_COLUMNS = (
+    "u.id, u.owner, u.kind, u.storage_key, u.content_type, u.size_bytes, u.width, u.height, "
+    "u.content_hash, u.status, u.task_id, u.original_filename, u.duration_seconds, u.truncated, "
+    "u.callback_url, u.poster_upload_id, u.webhook_status, u.webhook_attempts, "
+    "u.webhook_last_error, u.webhook_updated_at, u.visibility, u.share_token, "
+    "u.created_at, u.updated_at, p.storage_key AS poster_storage_key"
 )
 
 
 def _row_to_record(row: asyncpg.Record) -> UploadRecord:
+    poster_storage_key = row["poster_storage_key"] if "poster_storage_key" in row else None
     return UploadRecord(
         id=row["id"],
         owner=row["owner"],
@@ -57,9 +65,9 @@ def _row_to_record(row: asyncpg.Record) -> UploadRecord:
         webhook_updated_at=row["webhook_updated_at"],
         visibility=row["visibility"],
         share_token=row["share_token"],
-        is_linked=row["is_linked"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        poster_storage_key=poster_storage_key,
     )
 
 
@@ -153,12 +161,14 @@ class PostgresMetadataStore(MetadataStore):
         task_id: str | None = None,
         original_filename: str | None = None,
         callback_url: str | None = None,
+        visibility: str = "private",
     ) -> UploadRecord:
         upload_id = uuid.uuid4().hex
         row = await self._fetchrow(
             f"INSERT INTO uploads (id, owner, kind, storage_key, content_type, size_bytes, "
-            f"width, height, content_hash, status, task_id, original_filename, callback_url) "
-            f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) "
+            f"width, height, content_hash, status, task_id, original_filename, "
+            f"callback_url, visibility) "
+            f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) "
             f"RETURNING {_COLUMNS}",
             upload_id,
             owner,
@@ -173,6 +183,7 @@ class PostgresMetadataStore(MetadataStore):
             task_id,
             original_filename,
             callback_url,
+            visibility,
             error_msg=f"Failed to record upload {storage_key!r}",
         )
         assert row is not None  # INSERT ... RETURNING always yields a row
@@ -188,7 +199,9 @@ class PostgresMetadataStore(MetadataStore):
 
     async def get(self, upload_id: str, owner: str) -> UploadRecord | None:
         row = await self._fetchrow(
-            f"SELECT {_COLUMNS} FROM uploads WHERE id = $1 AND owner = $2",
+            f"SELECT {_JOIN_COLUMNS} FROM uploads u "
+            f"LEFT JOIN uploads p ON u.poster_upload_id = p.id "
+            f"WHERE u.id = $1 AND u.owner = $2",
             upload_id,
             owner,
             error_msg=f"Failed to load upload {upload_id!r}",
@@ -197,7 +210,9 @@ class PostgresMetadataStore(MetadataStore):
 
     async def get_by_task_id(self, task_id: str, owner: str) -> UploadRecord | None:
         row = await self._fetchrow(
-            f"SELECT {_COLUMNS} FROM uploads WHERE task_id = $1 AND owner = $2",
+            f"SELECT {_JOIN_COLUMNS} FROM uploads u "
+            f"LEFT JOIN uploads p ON u.poster_upload_id = p.id "
+            f"WHERE u.task_id = $1 AND u.owner = $2",
             task_id,
             owner,
             error_msg=f"Failed to load task {task_id!r}",
@@ -208,9 +223,10 @@ class PostgresMetadataStore(MetadataStore):
         self, owner: str, *, kind: str | None = None, limit: int = 50, offset: int = 0
     ) -> list[UploadRecord]:
         rows = await self._fetch(
-            f"SELECT {_COLUMNS} FROM uploads "
-            f"WHERE owner = $1 AND ($2::text IS NULL OR kind = $2) "
-            f"ORDER BY created_at DESC LIMIT $3 OFFSET $4",
+            f"SELECT {_JOIN_COLUMNS} FROM uploads u "
+            f"LEFT JOIN uploads p ON u.poster_upload_id = p.id "
+            f"WHERE u.owner = $1 AND ($2::text IS NULL OR u.kind = $2) "
+            f"ORDER BY u.created_at DESC LIMIT $3 OFFSET $4",
             owner,
             kind,
             limit,
@@ -240,9 +256,10 @@ class PostgresMetadataStore(MetadataStore):
 
     async def find_ready_by_hash(self, owner: str, content_hash: str) -> UploadRecord | None:
         row = await self._fetchrow(
-            f"SELECT {_COLUMNS} FROM uploads "
-            f"WHERE owner = $1 AND content_hash = $2 AND status = '{STATUS_READY}' "
-            f"ORDER BY created_at DESC LIMIT 1",
+            f"SELECT {_JOIN_COLUMNS} FROM uploads u "
+            f"LEFT JOIN uploads p ON u.poster_upload_id = p.id "
+            f"WHERE u.owner = $1 AND u.content_hash = $2 AND u.status = '{STATUS_READY}' "
+            f"ORDER BY u.created_at DESC LIMIT 1",
             owner,
             content_hash,
             error_msg="Failed to look up upload by hash",
@@ -251,10 +268,11 @@ class PostgresMetadataStore(MetadataStore):
 
     async def find_active_video_by_hash(self, owner: str, content_hash: str) -> UploadRecord | None:
         row = await self._fetchrow(
-            f"SELECT {_COLUMNS} FROM uploads "
-            f"WHERE owner = $1 AND content_hash = $2 AND kind = '{KIND_VIDEO}' "
-            f"AND status IN ('{STATUS_READY}', '{STATUS_PROCESSING}') "
-            f"ORDER BY created_at DESC LIMIT 1",
+            f"SELECT {_JOIN_COLUMNS} FROM uploads u "
+            f"LEFT JOIN uploads p ON u.poster_upload_id = p.id "
+            f"WHERE u.owner = $1 AND u.content_hash = $2 AND u.kind = '{KIND_VIDEO}' "
+            f"AND u.status IN ('{STATUS_READY}', '{STATUS_PROCESSING}') "
+            f"ORDER BY u.created_at DESC LIMIT 1",
             owner,
             content_hash,
             error_msg="Failed to look up video by hash",
@@ -303,7 +321,9 @@ class PostgresMetadataStore(MetadataStore):
 
     async def get_by_id(self, upload_id: str) -> UploadRecord | None:
         row = await self._fetchrow(
-            f"SELECT {_COLUMNS} FROM uploads WHERE id = $1",
+            f"SELECT {_JOIN_COLUMNS} FROM uploads u "
+            f"LEFT JOIN uploads p ON u.poster_upload_id = p.id "
+            f"WHERE u.id = $1",
             upload_id,
             error_msg=f"Failed to load upload {upload_id!r}",
         )
@@ -311,13 +331,15 @@ class PostgresMetadataStore(MetadataStore):
 
     async def set_poster(self, video_id: str, poster_upload_id: str) -> UploadRecord | None:
         row = await self._fetchrow(
-            f"UPDATE uploads SET poster_upload_id = $2, updated_at = now() "
-            f"WHERE id = $1 RETURNING {_COLUMNS}",
+            "UPDATE uploads SET poster_upload_id = $2, updated_at = now() "
+            "WHERE id = $1 RETURNING id",
             video_id,
             poster_upload_id,
             error_msg=f"Failed to set poster on upload {video_id!r}",
         )
-        return _row_to_record(row) if row is not None else None
+        if row is None:
+            return None
+        return await self.get_by_id(video_id)
 
     async def mark_webhook(
         self,
@@ -375,34 +397,15 @@ class PostgresMetadataStore(MetadataStore):
 
     async def get_by_share_token(self, token: str) -> UploadRecord | None:
         row = await self._fetchrow(
-            f"SELECT {_COLUMNS} FROM uploads WHERE share_token = $1",
+            f"SELECT {_JOIN_COLUMNS} FROM uploads u "
+            f"LEFT JOIN uploads p ON u.poster_upload_id = p.id "
+            f"WHERE u.share_token = $1",
             token,
             error_msg="Failed to look up upload by share token",
         )
         return _row_to_record(row) if row is not None else None
 
-    async def mark_linked(self, upload_id: str, owner: str) -> UploadRecord | None:
-        row = await self._fetchrow(
-            f"UPDATE uploads SET is_linked = true, updated_at = now() "
-            f"WHERE id = $1 AND owner = $2 RETURNING {_COLUMNS}",
-            upload_id,
-            owner,
-            error_msg=f"Failed to mark upload {upload_id!r} linked",
-        )
-        return _row_to_record(row) if row is not None else None
 
-    async def get_unlinked_older_than(
-        self, hours: int, limit: int = 100
-    ) -> builtins.list[UploadRecord]:
-        rows = await self._fetch(
-            f"SELECT {_COLUMNS} FROM uploads "
-            f"WHERE is_linked = false AND created_at < now() - ($1 * INTERVAL '1 hour') "
-            f"ORDER BY created_at ASC LIMIT $2",
-            hours,
-            limit,
-            error_msg="Failed to fetch unlinked uploads",
-        )
-        return [_row_to_record(row) for row in rows]
 
     async def aclose(self) -> None:
         if self._pool is not None:

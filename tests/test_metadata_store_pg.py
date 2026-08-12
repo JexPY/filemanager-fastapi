@@ -378,26 +378,3 @@ async def test_multiple_null_share_tokens_allowed(pg_store: PostgresMetadataStor
             status=STATUS_READY,
         )
     assert len(await pg_store.list("alice")) == 3
-
-
-async def test_mark_linked_and_unlinked_older_than_pg(pg_store: PostgresMetadataStore) -> None:
-    rec = await pg_store.create(
-        owner="alice",
-        kind=KIND_IMAGE,
-        storage_key="images/pg1.webp",
-        content_type="image/webp",
-        size_bytes=10,
-        status=STATUS_READY,
-    )
-    assert rec.is_linked is False
-
-    # Owner scoping check for mark_linked
-    assert await pg_store.mark_linked(rec.id, "bob") is None
-
-    # Mark as linked
-    linked = await pg_store.mark_linked(rec.id, "alice")
-    assert linked is not None and linked.is_linked is True
-
-    # Persisted check
-    refetched = await pg_store.get(rec.id, "alice")
-    assert refetched is not None and refetched.is_linked is True

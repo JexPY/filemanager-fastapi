@@ -1,16 +1,13 @@
 import logging
-from typing import Annotated, Literal
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 
-from app.routers.auth import _resolve_owner_optional, security, verify_token
-from app.routers.utils import _image_source_url, _public_playback_url_available, resolve_playback
-from app.schemas import ImageUrlResponse
-from app.services.imgproxy import generate_signed_url
+from app.routers.auth import _resolve_owner_optional, security
+from app.routers.utils import _public_playback_url_available, resolve_playback
 from app.services.metadata import (
-    KIND_IMAGE,
     KIND_VIDEO,
     VISIBILITY_PUBLIC,
     MetadataError,
@@ -123,45 +120,3 @@ async def download_via_share(share_token: Annotated[str, Path(max_length=100)]):
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Playback backend unavailable"
         ) from exc
 
-
-@router.get(
-    "/files/{file_id}/image-url",
-    tags=["Sharing & Playback"],
-    summary="Generate custom image URL",
-    response_model=ImageUrlResponse,
-)
-async def get_custom_image_url(
-    file_id: Annotated[str, Path(max_length=64)],
-    width: Annotated[int | None, Query(ge=0, le=8192)] = None,
-    height: Annotated[int | None, Query(ge=0, le=8192)] = None,
-    fit: Literal["auto", "fit", "fill", "fill-down", "force"] = Query(default="auto"),
-    format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Query(default="webp"),
-    owner: str = Depends(verify_token),
-):
-    """Dynamically generate a signed imgproxy URL for an uploaded image.
-    Owner-scoped (404, not 403, if it isn't the caller's).
-    """
-    store = await get_metadata_store()
-    try:
-        record = await store.get(file_id, owner)
-    except MetadataError as exc:
-        logger.error("Failed to load upload %s for custom url: %s", file_id, exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
-        ) from exc
-    if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    if record.kind != KIND_IMAGE:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Custom URLs are only for images"
-        )
-
-    cw = width or 0
-    ch = height or 0
-    processing_options = f"rs:{fit}:{cw}:{ch}"
-    source_url = await _image_source_url(record.storage_key)
-    signed_url = generate_signed_url(
-        source_url, processing_options=processing_options, format=format
-    )
-
-    return {"id": file_id, "url": signed_url}

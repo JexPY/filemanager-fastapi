@@ -32,6 +32,23 @@ WEBHOOK_DELIVERED = "delivered"
 WEBHOOK_FAILED = "failed"
 
 
+def _build_imgproxy_url(storage_key: str, processing_options: str = "rs:auto") -> str:
+    from app.config import settings
+    from app.services.imgproxy import build_source_url, generate_signed_url
+
+    if settings.STORAGE_BACKEND == "local":
+        source_url = build_source_url(storage_key, "")
+    else:
+        from app.services.storage import _build_backend, _storage
+
+        backend = _storage if _storage is not None else _build_backend()
+        source_url = build_source_url(
+            storage_key, backend.public_url(storage_key)
+        )
+
+    return generate_signed_url(source_url, processing_options=processing_options)
+
+
 @dataclass(frozen=True)
 class UploadRecord:
     """One row of the ``uploads`` table."""
@@ -58,11 +75,11 @@ class UploadRecord:
     webhook_updated_at: datetime | None
     visibility: str
     share_token: str | None
-    is_linked: bool
     created_at: datetime
     updated_at: datetime
+    poster_storage_key: str | None = None
 
-    def to_public(self) -> dict[str, Any]:
+    def to_public(self, poster_storage_key: str | None = None) -> dict[str, Any]:
         """Owner-safe JSON view for API responses (no cross-tenant fields)."""
         data = {
             "id": self.id,
@@ -90,7 +107,6 @@ class UploadRecord:
             # and is deliberately omitted here -- it's returned only by the
             # share-mint endpoint, never in listings/webhooks/GET /files/{id}.
             "visibility": self.visibility,
-            "is_linked": self.is_linked,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -101,9 +117,13 @@ class UploadRecord:
             if self.kind == KIND_VIDEO:
                 data["url"] = public_url(f"/files/{self.id}/download")
             elif self.kind == KIND_IMAGE:
-                data["url"] = public_url(f"/files/{self.id}/image-url")
+                data["url"] = _build_imgproxy_url(self.storage_key)
+                data["thumbnail_url"] = _build_imgproxy_url(
+                    self.storage_key, processing_options="rs:fill:300:300:0/g:no"
+                )
 
             if self.poster_upload_id:
-                data["poster_url"] = public_url(f"/files/{self.poster_upload_id}/image-url")
+                pkey = poster_storage_key or self.poster_storage_key or self.poster_upload_id
+                data["poster_url"] = _build_imgproxy_url(pkey)
 
         return data

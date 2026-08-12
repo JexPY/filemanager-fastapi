@@ -110,3 +110,40 @@ async def test_upload_image_custom_imgproxy_url(
     assert "imgproxy_custom_url" in body
     assert "/rs:fill:1024:768/" in body["imgproxy_custom_url"]
     assert body["imgproxy_custom_url"].endswith(".webp")
+
+
+async def test_to_public_returns_direct_imgproxy_url(
+    fake_metadata: InMemoryMetadataStore,
+) -> None:
+    image = await fake_metadata.create(
+        owner=TEST_OWNER,
+        kind="image",
+        storage_key="images/test_to_public.webp",
+        content_type="image/webp",
+        size_bytes=123,
+        status="ready",
+    )
+    public_data = image.to_public()
+    assert "url" in public_data
+    assert "/rs:auto/" in public_data["url"]
+    assert "/files/" not in public_data["url"]
+    assert "thumbnail_url" in public_data
+    assert "/rs:fill:300:300:0/g:no/" in public_data["thumbnail_url"]
+    assert "/files/" not in public_data["thumbnail_url"]
+
+    video = await fake_metadata.create(
+        owner=TEST_OWNER,
+        kind="video",
+        storage_key="videos/test_to_public.mp4",
+        content_type="video/mp4",
+        size_bytes=456,
+        status="ready",
+    )
+    video_with_poster = await fake_metadata.set_poster(video.id, "poster_abc")
+    assert video_with_poster is not None
+    video_data = video_with_poster.to_public()
+    assert "poster_url" in video_data
+    assert "/rs:auto/" in video_data["poster_url"]
+    assert "/files/" not in video_data["poster_url"]
+    assert video_data["poster_upload_id"] == "poster_abc"
+

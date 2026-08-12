@@ -28,7 +28,7 @@ from app.routers.utils import (
     _sha256_hex,
     _stream_capped_to_temp,
 )
-from app.schemas import ImageUploadResponse, VideoUploadResponse
+from app.schemas import BulkImageUploadResponse, ImageUploadResponse, VideoUploadResponse
 from app.services.image_vips import ImageValidationError, validate_and_strip_image
 from app.services.metadata import (
     KIND_IMAGE,
@@ -149,6 +149,7 @@ async def upload_image(
             width=width,
             height=height,
             content_hash=content_hash,
+            visibility="public",
         )
     except MetadataError as exc:
         logger.error("Failed to record image upload %s: %s", obj.key, exc)
@@ -173,6 +174,175 @@ async def upload_image(
 
 
 @router.post(
+    "/upload/images",
+    tags=["Uploads"],
+    summary="Bulk upload images",
+    response_model=BulkImageUploadResponse,
+    response_model_exclude_unset=True,
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "files": {
+                                "type": "array",
+                                "items": {"type": "string", "format": "binary"},
+                                "description": "Multiple image files to upload",
+                            },
+                            "imgproxy_width": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 8192,
+                                "nullable": True,
+                            },
+                            "imgproxy_height": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 8192,
+                                "nullable": True,
+                            },
+                            "imgproxy_fit": {
+                                "type": "string",
+                                "enum": ["auto", "fit", "fill", "fill-down", "force"],
+                                "default": "auto",
+                            },
+                            "imgproxy_format": {
+                                "type": "string",
+                                "enum": ["webp", "png", "jpg", "jpeg", "avif", "gif"],
+                                "nullable": True,
+                            },
+                            "optimization": {
+                                "type": "string",
+                                "enum": ["size", "balanced", "quality"],
+                                "default": "balanced",
+                            },
+                        },
+                        "required": ["files"],
+                    }
+                }
+            }
+        }
+    },
+)
+async def upload_images(
+    request: Request,
+    files: Annotated[list[UploadFile], File(description="Multiple image files to upload")],
+    imgproxy_width: int | None = Form(
+        default=None, ge=0, le=8192, json_schema_extra={"default": ""}
+    ),
+    imgproxy_height: int | None = Form(
+        default=None, ge=0, le=8192, json_schema_extra={"default": ""}
+    ),
+    imgproxy_fit: Literal["auto", "fit", "fill", "fill-down", "force"] = Form(
+        default="auto", examples=["auto"]
+    ),
+    imgproxy_format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
+        default=None, json_schema_extra={"example": None}
+    ),
+    optimization: Literal["size", "balanced", "quality"] = Form(
+        "balanced", description="Encoding profile for initial image compression"
+    ),
+    owner: str = Depends(require_image_upload),
+):
+    if not files or len(files) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="No files provided"
+        )
+    if len(files) > 10:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Maximum of 10 files allowed"
+        )
+
+    # Validate size up to 50MB and keep in memory
+    MAX_TOTAL_BYTES = 50 * 1024 * 1024
+    total_bytes = 0
+    files_data = []
+
+    for file in files:
+        data = await _read_capped(file, request, MAX_TOTAL_BYTES - total_bytes)
+        total_bytes += len(data)
+        files_data.append(data)
+
+    store = await get_metadata_store()
+
+    async def _process_single(file_data: bytes) -> dict | None:
+        try:
+            signature = f"{await asyncio.to_thread(_sha256_hex, file_data)}:{optimization}"
+            content_hash = hashlib.sha256(signature.encode()).hexdigest()
+
+            try:
+                existing = await store.find_ready_by_hash(owner, content_hash)
+            except MetadataError as exc:
+                logger.warning("Idempotency lookup failed (processing normally): %s", exc)
+                existing = None
+
+            if existing is not None:
+                source_url = await _image_source_url(existing.storage_key)
+                return _image_response(
+                    existing.id,
+                    existing.width,
+                    existing.height,
+                    existing.size_bytes,
+                    source_url,
+                    custom_width=imgproxy_width,
+                    custom_height=imgproxy_height,
+                    custom_fit=imgproxy_fit,
+                    custom_format=imgproxy_format,
+                )
+
+            optimized_buffer, content_type, width, height = await asyncio.to_thread(
+                validate_and_strip_image, file_data, optimization
+            )
+
+            unique_id = uuid.uuid4().hex
+            object_name = f"images/{unique_id}.webp"
+
+            obj = await upload_file(optimized_buffer, object_name, content_type)
+
+            try:
+                record = await store.create(
+                    owner=owner,
+                    kind=KIND_IMAGE,
+                    storage_key=obj.key,
+                    content_type=content_type,
+                    size_bytes=obj.size,
+                    status=STATUS_READY,
+                    width=width,
+                    height=height,
+                    content_hash=content_hash,
+                    visibility="public",
+                )
+            except MetadataError as exc:
+                logger.error("Failed to record bulk image upload %s: %s", obj.key, exc)
+                with contextlib.suppress(StorageError):
+                    await delete_file(obj.key)
+                return None
+
+            source_url = await _image_source_url(obj.key)
+            return _image_response(
+                record.id,
+                width,
+                height,
+                record.size_bytes,
+                source_url,
+                custom_width=imgproxy_width,
+                custom_height=imgproxy_height,
+                custom_fit=imgproxy_fit,
+                custom_format=imgproxy_format,
+            )
+        except Exception as exc:
+            logger.error("Failed to process bulk image item: %s", exc)
+            return None
+
+    results = await asyncio.gather(*[_process_single(d) for d in files_data])
+    items = [r for r in results if r is not None]
+
+    return {"count": len(items), "items": items}
+
+
+@router.post(
     "/upload/video",
     status_code=status.HTTP_202_ACCEPTED,
     tags=["Uploads"],
@@ -191,6 +361,10 @@ async def upload_video(
         None, description="Timestamp to start cropping from", ge=0.0
     ),
     end_seconds: float | None = Form(None, description="Timestamp to stop cropping at", ge=0.0),
+    poster_seconds: float | None = Form(
+        None, description="Timestamp for poster frame extraction", ge=0.0
+    ),
+    visibility: Literal["public", "private"] = Form("public"),
     owner: str = Depends(require_video_upload),
 ):
     # Admit the optional webhook target up front (before ingesting) so a bad or
@@ -210,7 +384,10 @@ async def upload_video(
     )
     # The deduplication hash must include the processing parameters, otherwise
     # uploading the same video with different formats/cuts would falsely dedupe.
-    signature = f"{raw_content_hash}:{format}:{optimization}:{start_seconds}:{end_seconds}"
+    signature = (
+        f"{raw_content_hash}:{format}:{optimization}:{start_seconds}:"
+        f"{end_seconds}:{poster_seconds}"
+    )
     content_hash = hashlib.sha256(signature.encode()).hexdigest()
     content_type = file.content_type or "application/octet-stream"
     try:
@@ -266,6 +443,7 @@ async def upload_video(
                 content_hash=content_hash,
                 original_filename=original_filename,
                 callback_url=callback_url,
+                visibility=visibility,
             )
         except MetadataError as exc:
             logger.error("Failed to record video upload %s: %s", raw_key, exc)
@@ -285,6 +463,7 @@ async def upload_video(
                 optimization=optimization,
                 start_seconds=start_seconds,
                 end_seconds=end_seconds,
+                poster_seconds=poster_seconds,
             )
         except Exception as exc:
             # Enqueue failed (e.g. Redis down): don't leave a row stuck

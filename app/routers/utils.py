@@ -187,9 +187,11 @@ def _image_response(
         "size_mb": round(size_bytes / (1024 * 1024), 2) if size_bytes else None,
         "dimensions": {"width": width, "height": height},
         "imgproxy_thumbnail_url": generate_signed_url(
-            source_url, processing_options="rs:fill:300:300"
+            source_url, processing_options="rs:fill:300:300", format="webp"
         ),
-        "imgproxy_optimized_url": generate_signed_url(source_url, processing_options="rs:auto"),
+        "imgproxy_optimized_url": generate_signed_url(
+            source_url, processing_options="rs:auto", format="webp"
+        ),
     }
 
     if custom_width or custom_height or custom_format or custom_fit != "auto":

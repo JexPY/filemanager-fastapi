@@ -28,8 +28,10 @@ async def test_valid_image_upload_succeeds(
 
 
 def _decode_imgproxy_source(imgproxy_url: str) -> str:
-    # imgproxy URL shape: {base}/{signature}/{options}/{b64_source}
+    # imgproxy URL shape: {base}/{signature}/{options}/{b64_source}[.{format}]
     b64_source = imgproxy_url.rstrip("/").rsplit("/", 1)[-1]
+    if "." in b64_source:
+        b64_source = b64_source.rsplit(".", 1)[0]
     padded = b64_source + "=" * (-len(b64_source) % 4)
     return base64.urlsafe_b64decode(padded).decode()
 

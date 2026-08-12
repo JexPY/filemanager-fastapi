@@ -6,7 +6,7 @@ import contextlib
 import os
 import tempfile
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from app.services.metadata import (
     KIND_VIDEO,
@@ -123,6 +123,7 @@ class InMemoryMetadataStore(MetadataStore):
         task_id: str | None = None,
         original_filename: str | None = None,
         callback_url: str | None = None,
+        visibility: str = "private",
     ) -> UploadRecord:
         self._counter += 1
         upload_id = f"rec-{self._counter:08d}"
@@ -148,9 +149,8 @@ class InMemoryMetadataStore(MetadataStore):
             webhook_attempts=0,
             webhook_last_error=None,
             webhook_updated_at=None,
-            visibility="private",
+            visibility=visibility,
             share_token=None,
-            is_linked=False,
             created_at=now,
             updated_at=now,
         )
@@ -269,7 +269,14 @@ class InMemoryMetadataStore(MetadataStore):
         record = self.records.get(video_id)
         if record is None:
             return None
-        updated = replace(record, poster_upload_id=poster_upload_id, updated_at=datetime.now(UTC))
+        poster = self.records.get(poster_upload_id)
+        poster_storage_key = poster.storage_key if poster else None
+        updated = replace(
+            record,
+            poster_upload_id=poster_upload_id,
+            poster_storage_key=poster_storage_key,
+            updated_at=datetime.now(UTC),
+        )
         self.records[video_id] = updated
         return updated
 
@@ -327,19 +334,7 @@ class InMemoryMetadataStore(MetadataStore):
                 return record
         return None
 
-    async def mark_linked(self, upload_id: str, owner: str) -> UploadRecord | None:
-        record = self.records.get(upload_id)
-        if record is None or record.owner != owner:
-            return None
-        updated = replace(record, is_linked=True, updated_at=datetime.now(UTC))
-        self.records[upload_id] = updated
-        return updated
 
-    async def get_unlinked_older_than(self, hours: int, limit: int = 100) -> list[UploadRecord]:
-        cutoff = datetime.now(UTC) - timedelta(hours=hours)
-        matches = [r for r in self.records.values() if not r.is_linked and r.created_at < cutoff]
-        matches.sort(key=lambda r: r.created_at)
-        return matches[:limit]
 
     async def aclose(self) -> None:
         self.closed = True

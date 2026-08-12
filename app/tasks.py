@@ -3,6 +3,7 @@ import contextlib
 import json
 import logging
 import uuid
+from typing import Any
 
 import aiofiles
 import aiofiles.os
@@ -119,6 +120,7 @@ async def compress_video_task(
     optimization: str = "balanced",
     start_seconds: float | None = None,
     end_seconds: float | None = None,
+    poster_seconds: float | None = None,
 ) -> dict:
     unique_id = uuid.uuid4().hex
 
@@ -299,20 +301,83 @@ async def compress_video_task(
                 await delete_file(obj.key)
             return {"status": "discarded", "upload_id": upload_id}
 
+        # Automated single-step poster extraction if poster_seconds is provided
+        if poster_seconds is not None:
+            frame_path = f"/tmp/{unique_id}_poster.png"
+            try:
+                seek = (
+                    poster_seconds
+                    if poster_seconds is not None
+                    else await _poster_seek_seconds(output_path)
+                )
+                process_poster = await asyncio.create_subprocess_exec(
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    f"{seek:.3f}",
+                    "-i",
+                    output_path,
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "image2",
+                    "-c:v",
+                    "png",
+                    frame_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    _, stderr_poster = await asyncio.wait_for(
+                        process_poster.communicate(), timeout=settings.FFMPEG_TIMEOUT_SECONDS
+                    )
+                except TimeoutError:
+                    process_poster.kill()
+                    await process_poster.wait()
+                    raise RuntimeError(
+                        f"Poster ffmpeg timed out after {settings.FFMPEG_TIMEOUT_SECONDS}s"
+                    ) from None
+
+                if process_poster.returncode == 0 and await aiofiles.os.path.exists(frame_path):
+                    async with aiofiles.open(frame_path, "rb") as pf:
+                        frame_bytes = await pf.read()
+
+                    webp_bytes, p_content_type, p_width, p_height = await asyncio.to_thread(
+                        validate_and_strip_image, frame_bytes
+                    )
+                    poster_key = f"posters/{unique_id}.webp"
+                    poster_obj = await upload_file(webp_bytes, poster_key, p_content_type)
+
+                    poster = await store.create(
+                        owner=record.owner,
+                        kind=KIND_IMAGE,
+                        storage_key=poster_obj.key,
+                        content_type=p_content_type,
+                        size_bytes=poster_obj.size,
+                        status=STATUS_READY,
+                        width=p_width,
+                        height=p_height,
+                        visibility=record.visibility,
+                    )
+
+                    linked = await store.set_poster(upload_id, poster.id)
+                    if linked is not None:
+                        record = linked
+            except Exception as p_exc:
+                logger.warning("Automated poster extraction failed for %s: %s", upload_id, p_exc)
+            finally:
+                if await aiofiles.os.path.exists(frame_path):
+                    await aiofiles.os.remove(frame_path)
+
         # Push completion to the client's callback (if any) on its own task, so
         # they don't have to poll GET /tasks/{id} and a slow receiver can't block
         # this worker slot. Best-effort; never affects the task result.
         await _enqueue_webhook(record, "video.completed")
 
-        # Thin task: return ONLY execution state, never domain data. Everything a
-        # client needs (download_url, size, duration_seconds, truncated, ...)
-        # lives on the `uploads` row we just marked ready and is served *live* by
-        # GET /files/{upload_id}. The TaskIQ result backend is immutable + TTL'd
-        # (and a presigned url would even expire inside it), so a snapshot sealed
-        # here becomes a stale second source of truth -- the split-brain we
-        # deliberately avoid. upload_id is the pointer clients use to fetch the
-        # authoritative record once this task reports completion.
-        return {"status": "success", "upload_id": upload_id}
+        res: dict[str, Any] = {"status": "success", "upload_id": upload_id}
+        if record.poster_upload_id:
+            res["poster_id"] = record.poster_upload_id
+        return res
 
     except Exception:
         # Any failure (download, ffmpeg, upload, mark_ready) marks the record
@@ -499,57 +564,3 @@ async def generate_poster_task(upload_id: str, at_seconds: float | None = None) 
     finally:
         if await aiofiles.os.path.exists(frame_path):
             await aiofiles.os.remove(frame_path)
-
-
-@broker.task(schedule=[{"cron": "0 * * * *"}])
-async def cleanup_orphaned_uploads_task(hours: int = 24, batch_size: int = 100) -> dict:
-    """Cron-based cleanup mechanism that automatically deletes unlinked uploads older than 24 hours.
-
-    Fetches unlinked records older than `hours` in batches. For each record:
-    1. Attempts to delete physical file via `delete_file(storage_key)`.
-    2. On success (or if missing/404), deletes the database record via `store.delete(upload_id)`.
-    """
-    store = await get_metadata_store()
-    total_deleted = 0
-    total_failed = 0
-
-    while True:
-        try:
-            records = await store.get_unlinked_older_than(hours=hours, limit=batch_size)
-        except MetadataError as exc:
-            logger.error("Failed to fetch unlinked uploads for cleanup: %s", exc)
-            break
-
-        if not records:
-            break
-
-        for record in records:
-            storage_ok = False
-            try:
-                await delete_file(record.storage_key)
-                storage_ok = True
-            except StorageError as exc:
-                err_str = str(exc).lower()
-                if "not found" in err_str or "nosuchkey" in err_str or "404" in err_str:
-                    logger.info(
-                        "Storage key %s missing during cleanup; proceeding to remove record",
-                        record.storage_key,
-                    )
-                    storage_ok = True
-                else:
-                    logger.error(
-                        "Failed to delete physical file %s during cleanup: %s",
-                        record.storage_key,
-                        exc,
-                    )
-                    total_failed += 1
-
-            if storage_ok:
-                try:
-                    await store.delete(record.id)
-                    total_deleted += 1
-                except MetadataError as exc:
-                    logger.error("Failed to delete record %s during cleanup: %s", record.id, exc)
-                    total_failed += 1
-
-    return {"status": "success", "deleted": total_deleted, "failed": total_failed}

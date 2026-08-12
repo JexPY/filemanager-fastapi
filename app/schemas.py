@@ -57,6 +57,13 @@ class ImageUploadResponse(BaseModel):
     )
 
 
+class BulkImageUploadResponse(BaseModel):
+    """Returned by ``POST /upload/images``."""
+
+    count: int = Field(description="Number of successfully uploaded images")
+    items: list[ImageUploadResponse]
+
+
 # ---------------------------------------------------------------------------
 # Video upload (two shapes, discriminated on `status`)
 # ---------------------------------------------------------------------------
@@ -125,14 +132,14 @@ class FileRecord(BaseModel):
     webhook_last_error: str | None = None
     webhook_updated_at: str | None = Field(default=None, description="ISO-8601 timestamp, or null")
     visibility: str = Field(description="'private' | 'public'")
-    is_linked: bool = Field(
-        default=False, description="True if file has been linked to a domain entity"
-    )
     url: str | None = Field(
         default=None, description="Stable playback/image URL; present only when status='ready'"
     )
+    thumbnail_url: str | None = Field(
+        default=None, description="Signed imgproxy URL: a 300x300 fill thumbnail"
+    )
     poster_url: str | None = Field(
-        default=None, description="Poster image URL for a video that has one"
+        default=None, description="Direct signed imgproxy URL for the video poster image"
     )
     created_at: str = Field(description="ISO-8601 timestamp")
     updated_at: str = Field(description="ISO-8601 timestamp")
@@ -185,12 +192,6 @@ class ShareLinkResponse(BaseModel):
     )
     share_url: str = Field(description="Shareable URL embedding the token")
 
-
-class ImageUrlResponse(BaseModel):
-    """Returned by ``GET /files/{id}/image-url``."""
-
-    id: str
-    url: str = Field(description="Signed imgproxy URL for the requested transform")
 
 
 # ---------------------------------------------------------------------------
