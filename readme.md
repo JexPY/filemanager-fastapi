@@ -82,6 +82,7 @@ Key behaviours worth knowing upfront:
   stored. The response includes signed imgproxy URLs for a thumbnail and an optimized version.
 - **Videos** are staged, then compressed asynchronously. Poll `GET /tasks/{id}` or supply a
   `callback_url` for a signed webhook on completion.
+- **QR Codes** are generated using Segno + pyvips with optional logo overlay. Accepted logo formats: **PNG, JPEG, GIF, WebP, HEIC** (SVG is rejected for security).
 - **Uploads are idempotent** — re-uploading identical bytes (per token) returns the existing
   record instead of creating a duplicate, keyed on SHA-256.
 - **Every upload is owner-scoped** — each bearer token maps to an owner; listing and deletion
@@ -115,9 +116,17 @@ curl -H "Authorization: Bearer $TOKEN" -F "file=@clip.mp4" \
 # Poll the task
 curl -H "Authorization: Bearer $TOKEN" http://localhost:9000/tasks/<task_id>
 
-# Generate a QR code
+# Generate a plain text / URL QR code
 curl -H "Authorization: Bearer $TOKEN" -F "content=https://example.com" \
   http://localhost:9000/generate/qrcode -o qr.png
+
+# Generate a Wi-Fi QR code with logo
+curl -H "Authorization: Bearer $TOKEN" -F "ssid=MyHomeWiFi" -F "password=secret" \
+  -F "logo=@logo.png" http://localhost:9000/generate/qrcode/wifi -o wifi_qr.png
+
+# Generate a vCard contact QR code
+curl -H "Authorization: Bearer $TOKEN" -F "name=Doe;John" -F "phone=+1234567890" \
+  http://localhost:9000/generate/qrcode/vcard -o vcard_qr.png
 
 # List your uploads
 curl -H "Authorization: Bearer $TOKEN" http://localhost:9000/files

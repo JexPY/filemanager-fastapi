@@ -19,7 +19,7 @@ class ImageValidationError(Exception):
     dimensions, or a corrupt/truncated file pyvips can't decode."""
 
 
-def _sniff_format(data: bytes) -> str | None:
+def sniff_format(data: bytes) -> str | None:
     for fmt, signatures in _SIGNATURES.items():
         if any(data.startswith(sig) for sig in signatures):
             return fmt
@@ -41,7 +41,7 @@ def validate_and_strip_image(
     Load image using pyvips, strip metadata (EXIF), and return the optimized bytes
     along with the detected format and dimensions.
     """
-    if _sniff_format(file_data) is None:
+    if sniff_format(file_data) is None:
         raise ImageValidationError("Unsupported or unrecognized image format")
 
     try:
