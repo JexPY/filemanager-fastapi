@@ -25,7 +25,9 @@ jobs:
         run: |
           docker compose build test
           docker compose --profile s3-dev up -d db redis minio minio-init
-          docker compose run --rm -v $(pwd):/app test pytest --cov=app --cov-report=xml:coverage.xml
+          docker compose run --name test-runner test pytest --cov=app --cov-report=xml:coverage.xml
+          docker cp test-runner:/app/coverage.xml ./coverage.xml
+          docker rm -f test-runner
 
       - name: SonarCloud Scan
         uses: SonarSource/sonarcloud-github-action@master
