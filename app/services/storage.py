@@ -104,8 +104,10 @@ class LocalStorage(StorageBackend):
 
     def _resolve(self, key: str) -> Path:
         # Guard against path traversal escaping the storage root.
-        safe_key = key.lstrip("/\\")
-        target = (self._root / safe_key).resolve()
+        p = Path(key)
+        if p.is_absolute() or key.startswith("/") or key.startswith("\\"):
+            raise StorageError(f"Invalid object key outside storage root: {key!r}")
+        target = (self._root / key).resolve()
         if not target.is_relative_to(self._root):
             raise StorageError(f"Invalid object key outside storage root: {key!r}")
         return target
