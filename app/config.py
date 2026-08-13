@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # Postgres metadata store (system-of-record for every uploaded object).
     # Both the api and worker processes connect to this; the worker updates a
     # video's record on compression completion.
-    DATABASE_URL: str = Field(default="postgresql://filemanager:filemanager@db:5432/filemanager")
+    DATABASE_URL: str = Field(default="")
 
     # Storage backend selection: "local" | "s3" | "gcp"
     STORAGE_BACKEND: str = Field(default="local")
@@ -188,6 +188,13 @@ class Settings(BaseSettings):
             except ValueError as exc:
                 raise ValueError(f"{field_name} must be valid hex, got {value!r}") from exc
         return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def _set_default_database_url(cls, data: dict) -> dict:
+        if isinstance(data, dict) and not data.get("DATABASE_URL"):
+            data["DATABASE_URL"] = "postgresql://filemanager:filemanager@db:5432/filemanager"
+        return data
 
     @property
     def token_identities(self) -> dict[str, str]:

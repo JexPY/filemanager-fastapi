@@ -106,7 +106,7 @@ async def _probe_video_metadata(input_path: str) -> tuple[float | None, int | No
             height = streams[0].get("height")
 
         return duration, width, height
-    except (ValueError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+    except (ValueError, TimeoutError, OSError) as exc:
         logger.warning("ffprobe could not determine metadata for %s: %s", input_path, exc)
         return None, None, None
 

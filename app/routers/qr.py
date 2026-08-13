@@ -20,8 +20,11 @@ from app.services.qr_generator import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _IBAN_RE = re.compile(r"^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$")
+
+_SCALE_DESC = "QR code pixel scale factor (1 to 20, default 10)"
+_LOGO_DESC = "Optional logo image overlay."
 
 
 async def _run_qr_generator(func, *args, **kwargs) -> bytes:
@@ -55,9 +58,7 @@ async def generate_qrcode(
         max_length=settings.MAX_QR_CONTENT_LENGTH,
         description="Text or URL to encode in the QR code",
     ),
-    scale: int = Form(
-        10, ge=1, le=20, description="QR code pixel scale factor (1 to 20, default 10)"
-    ),
+    scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
     logo: UploadFile | None = File(
         None,
         description="Optional logo image overlay. Accepted formats: PNG, JPEG, GIF, WebP, HEIC.",
@@ -83,10 +84,8 @@ async def generate_qrcode_vcard(
     phone: str | None = Form(None, description="Phone number"),
     email: str | None = Form(None, description="Email address"),
     url: str | None = Form(None, description="Website URL"),
-    scale: int = Form(
-        10, ge=1, le=20, description="QR code pixel scale factor (1 to 20, default 10)"
-    ),
-    logo: UploadFile | None = File(None, description="Optional logo image overlay."),
+    scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
+    logo: UploadFile | None = File(None, description=_LOGO_DESC),
 ):
     if not name.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Name cannot be empty")
@@ -121,10 +120,8 @@ async def generate_qrcode_mecard(
     phone: str | None = Form(None, description="Phone number"),
     email: str | None = Form(None, description="Email address"),
     url: str | None = Form(None, description="Website URL"),
-    scale: int = Form(
-        10, ge=1, le=20, description="QR code pixel scale factor (1 to 20, default 10)"
-    ),
-    logo: UploadFile | None = File(None, description="Optional logo image overlay."),
+    scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
+    logo: UploadFile | None = File(None, description=_LOGO_DESC),
 ):
     if not name.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Name cannot be empty")
@@ -158,10 +155,8 @@ async def generate_qrcode_wifi(
     password: str | None = Form(None, description="Wi-Fi passphrase"),
     security: str | None = Form("WPA", description="Security type: WPA, WEP, or nopass"),
     hidden: bool = Form(False, description="True if hidden network SSID"),
-    scale: int = Form(
-        10, ge=1, le=20, description="QR code pixel scale factor (1 to 20, default 10)"
-    ),
-    logo: UploadFile | None = File(None, description="Optional logo image overlay."),
+    scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
+    logo: UploadFile | None = File(None, description=_LOGO_DESC),
 ):
     if not ssid.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="SSID cannot be empty")
@@ -198,10 +193,8 @@ async def generate_qrcode_geo(
     lng: float = Form(
         ..., ge=-180.0, le=180.0, description="Longitude coordinate (-180.0 to 180.0)"
     ),
-    scale: int = Form(
-        10, ge=1, le=20, description="QR code pixel scale factor (1 to 20, default 10)"
-    ),
-    logo: UploadFile | None = File(None, description="Optional logo image overlay."),
+    scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
+    logo: UploadFile | None = File(None, description=_LOGO_DESC),
 ):
     logo_bytes = await logo.read() if logo is not None else None
     png_data = await _run_qr_generator(
@@ -230,10 +223,8 @@ async def generate_qrcode_epc(
     text: str | None = Form(
         None, max_length=140, description="Remittance / payment reference text"
     ),
-    scale: int = Form(
-        10, ge=1, le=20, description="QR code pixel scale factor (1 to 20, default 10)"
-    ),
-    logo: UploadFile | None = File(None, description="Optional logo image overlay."),
+    scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
+    logo: UploadFile | None = File(None, description=_LOGO_DESC),
 ):
     if not name.strip():
         raise HTTPException(

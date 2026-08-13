@@ -63,7 +63,7 @@ class StorageBackend(ABC):
         StorageObject.url. Lets callers that hold only a key (e.g. serving a
         deduplicated record) rebuild the same source URL without re-uploading."""
 
-    async def aclose(self) -> None:  # noqa: B027 -- intentional no-op default, not abstract
+    async def aclose(self) -> None:  # noqa: B027
         """Release any long-lived clients. Default is a no-op."""
 
     async def presigned_get_url(  # noqa: B027 -- intentional default, not abstract
