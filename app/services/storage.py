@@ -320,7 +320,7 @@ class GCSStorage(StorageBackend):
         client = await self._get_client()
         size = await aiofiles.os.path.getsize(path)
         try:
-            with open(path, "rb") as f:  # noqa: ASYNC230 -- gcloud-aio needs a sync file object
+            with open(path, "rb") as f:  # noqa: ASYNC230  # NOSONAR -- gcloud-aio requires sync file object
                 await client.upload(
                     self._bucket, key, f, content_type=content_type, force_resumable_upload=True
                 )

@@ -461,7 +461,7 @@ async def upload_video(
             # Enqueue failed (e.g. Redis down): don't leave a row stuck
             # `processing` forever with no task behind it -- roll back the record
             # and the raw object, then surface a generic 502.
-            logger.error("Failed to enqueue compression for %s: %s", record.id, exc)
+            logger.exception("Failed to enqueue video compression task")
             with contextlib.suppress(MetadataError):
                 await store.delete(record.id, owner)
             with contextlib.suppress(StorageError):

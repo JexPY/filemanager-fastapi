@@ -83,7 +83,7 @@ async def download_file_endpoint(
             record.storage_key, filename=record.original_filename or "video.mp4"
         )
     except StorageError as exc:
-        logger.error("Failed to resolve playback for %s: %s", file_id, exc)
+        logger.exception("Failed to resolve playback")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Playback backend unavailable"
         ) from exc
@@ -93,20 +93,20 @@ async def download_file_endpoint(
     "/share/{share_token}",
     tags=["Sharing & Playback"],
     summary="Stream via share link",
+    response_class=RedirectResponse,
 )
-async def download_via_share(share_token: Annotated[str, Path(max_length=100)]):
-    """Permanent capability link: a valid share token serves the video regardless
-    of its `visibility`, with no bearer token. Unguessable + revocable (it lives
-    in our namespace, so it has an off switch, unlike a never-expiry presigned
-    URL). Unknown token -> 404."""
+async def play_shared_video(share_token: Annotated[str, Path(max_length=128)]):
+    """Public video streaming via an unlisted share token. Does NOT require
+    a bearer token -- the share token *is* the capability. 404 on revoked/unknown."""
     store = await get_metadata_store()
     try:
         record = await store.get_by_share_token(share_token)
     except MetadataError as exc:
-        logger.error("Failed to resolve share token: %s", exc)
+        logger.exception("Failed to load share token")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
         ) from exc
+
     if record is None or record.kind != KIND_VIDEO:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
@@ -115,7 +115,7 @@ async def download_via_share(share_token: Annotated[str, Path(max_length=100)]):
             record.storage_key, filename=record.original_filename or "video.mp4"
         )
     except StorageError as exc:
-        logger.error("Failed to resolve playback via share token: %s", exc)
+        logger.exception("Failed to resolve playback via share token")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Playback backend unavailable"
         ) from exc

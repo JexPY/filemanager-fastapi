@@ -21,7 +21,8 @@ router = APIRouter()
     response_model=WebhookRedeliverResponse,
 )
 async def redeliver_webhook(
-    file_id: Annotated[str, Path(max_length=64)], owner: str = Depends(verify_token)
+    file_id: Annotated[str, Path(max_length=64)],
+    owner: Annotated[str, Depends(verify_token)],
 ):
     """Re-enqueue the terminal-state webhook for one of the caller's uploads --
     the manual replay path for a dead-lettered (exhausted) delivery. Owner-scoped.
@@ -32,7 +33,7 @@ async def redeliver_webhook(
     try:
         record = await store.get(file_id, owner)
     except MetadataError as exc:
-        logger.error("Failed to load upload %s for redeliver: %s", file_id, exc)
+        logger.exception("Failed to load upload for redeliver")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
         ) from exc
@@ -58,7 +59,7 @@ async def redeliver_webhook(
     try:
         task = await deliver_webhook_task.kiq(upload_id=file_id, event=event)
     except Exception as exc:
-        logger.error("Failed to enqueue webhook redelivery for %s: %s", file_id, exc)
+        logger.exception("Failed to enqueue webhook redelivery")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Webhook redelivery temporarily unavailable",

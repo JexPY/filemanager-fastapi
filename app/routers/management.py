@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _STORE_UNAVAILABLE_DETAIL = "Metadata store unavailable"
+_NOT_FOUND_DETAIL = "Not found"
 
 
 @router.get(
@@ -26,10 +27,10 @@ _STORE_UNAVAILABLE_DETAIL = "Metadata store unavailable"
     response_model_exclude_unset=True,
 )
 async def list_files(
-    owner: str = Depends(verify_token),
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-    kind: str | None = Query(default=None),
+    owner: Annotated[str, Depends(verify_token)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    kind: Annotated[str | None, Query()] = None,
 ):
     """List the caller's uploads, newest first. Owner-scoped: a token only ever
     sees its own records. `kind` optionally filters to 'image' or 'video'."""
@@ -71,7 +72,7 @@ async def get_file(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
     return record.to_public()
 
 
@@ -108,7 +109,7 @@ async def set_file_visibility(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
     if record.kind != KIND_VIDEO:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Visibility only applies to videos"
@@ -124,7 +125,7 @@ async def set_file_visibility(
     # updated is None only on a delete race between the load and the update;
     # treat it as gone.
     if updated is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
     return updated.to_public()
 
 
@@ -153,7 +154,7 @@ async def create_share_link(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
     if record.kind != KIND_VIDEO:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Share links only apply to videos"
@@ -168,7 +169,7 @@ async def create_share_link(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if updated is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
     return {
         "id": file_id,
         "share_token": token,
@@ -197,7 +198,7 @@ async def revoke_share_link(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
 
     try:
         await store.clear_share_token(file_id, owner)
@@ -237,7 +238,7 @@ async def delete_upload(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
 
     try:
         await delete_file(record.storage_key)

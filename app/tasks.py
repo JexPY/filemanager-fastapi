@@ -327,6 +327,25 @@ async def _extract_and_store_poster(
             await aiofiles.os.remove(frame_path)
 
 
+async def _run_ffmpeg_compression(ffmpeg_args: list[str]) -> None:
+    process = await asyncio.create_subprocess_exec(
+        *ffmpeg_args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=settings.FFMPEG_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        raise RuntimeError(f"FFmpeg timed out after {settings.FFMPEG_TIMEOUT_SECONDS}s") from None
+
+    if process.returncode != 0:
+        raise RuntimeError(f"FFmpeg failed: {stderr.decode(errors='replace')}")
+
+
 @broker.task
 async def compress_video_task(
     raw_storage_key: str,
@@ -356,28 +375,7 @@ async def compress_video_task(
         ffmpeg_args = _build_ffmpeg_args(
             input_source, output_path, output_format, optimization, start_seconds, end_seconds
         )
-
-        process = await asyncio.create_subprocess_exec(
-            *ffmpeg_args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            _, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=settings.FFMPEG_TIMEOUT_SECONDS
-            )
-        except TimeoutError:
-            # Without this, a wedged ffmpeg (e.g. on a crafted/corrupt input)
-            # would hang this worker slot forever -- process.communicate()
-            # alone has no timeout.
-            process.kill()
-            await process.wait()
-            raise RuntimeError(
-                f"FFmpeg timed out after {settings.FFMPEG_TIMEOUT_SECONDS}s"
-            ) from None
-
-        if process.returncode != 0:
-            raise RuntimeError(f"FFmpeg failed: {stderr.decode(errors='replace')}")
+        await _run_ffmpeg_compression(ffmpeg_args)
 
         async with aiofiles.open(output_path, "rb") as f:
             output_data = await f.read()

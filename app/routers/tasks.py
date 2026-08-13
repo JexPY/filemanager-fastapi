@@ -20,7 +20,8 @@ router = APIRouter()
     response_model_exclude_unset=True,
 )
 async def get_task_status(
-    task_id: Annotated[str, Path(max_length=100)], owner: str = Depends(verify_token)
+    task_id: Annotated[str, Path(max_length=100)],
+    owner: Annotated[str, Depends(verify_token)],
 ):
     # Owner-scoped via the uploads record: a task_id that isn't this owner's
     # (or never existed) is a 404, so no one can poll another owner's task and
@@ -32,7 +33,7 @@ async def get_task_status(
     try:
         record = await store.get_by_task_id(task_id, owner)
     except MetadataError as exc:
-        logger.error("Failed to resolve task %s: %s", task_id, exc)
+        logger.exception("Failed to resolve task")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
         ) from exc

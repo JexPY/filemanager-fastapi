@@ -23,7 +23,7 @@ router = APIRouter()
 async def generate_poster(
     file_id: Annotated[str, Path(max_length=64)],
     response: Response,
-    owner: str = Depends(verify_token),
+    owner: Annotated[str, Depends(verify_token)],
     at_seconds: Annotated[float | None, Form(ge=0.0)] = None,
 ):
     """Generate a poster (thumbnail) image for one of the caller's *ready*
@@ -41,7 +41,7 @@ async def generate_poster(
     try:
         record = await store.get(file_id, owner)
     except MetadataError as exc:
-        logger.error("Failed to load upload %s for poster: %s", file_id, exc)
+        logger.exception("Failed to load upload for poster")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
         ) from exc
