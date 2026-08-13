@@ -2,6 +2,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import tempfile
 import uuid
 from typing import Any
 
@@ -251,7 +253,7 @@ async def _extract_and_store_poster(
     Caller owns cleanup of input_source; this function cleans its own temp frame.
     Raises RuntimeError on ffmpeg failure or TimeoutError on timeout."""
     store = await get_metadata_store()
-    frame_path = f"/tmp/{unique_id}_poster.png"
+    frame_path = os.path.join(tempfile.gettempdir(), f"{unique_id}_poster.png")
     try:
         process = await asyncio.create_subprocess_exec(
             "ffmpeg",
@@ -340,7 +342,7 @@ async def compress_video_task(
 
     ext = "webm" if output_format.startswith("webm") else "mp4"
     content_type = f"video/{ext}"
-    output_path = f"/tmp/{unique_id}_compressed.{ext}"
+    output_path = os.path.join(tempfile.gettempdir(), f"{unique_id}_compressed.{ext}")
     output_key = f"videos/{unique_id}_compressed.{ext}"
 
     store = await get_metadata_store()

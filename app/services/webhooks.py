@@ -98,7 +98,7 @@ def validate_callback_url(url: str) -> str:
     host = parsed.hostname
     if not host:
         raise WebhookValidationError("callback_url is missing a host")
-    if host.lower() not in settings.webhook_allowed_hosts:
+    if host.lower() not in settings.parsed_webhook_allowed_hosts:
         raise WebhookValidationError("callback_url host is not allowed")
 
     if not settings.WEBHOOK_ALLOW_PRIVATE_IPS:

@@ -228,7 +228,7 @@ class Settings(BaseSettings):
         return list(self.token_identities)
 
     @property
-    def webhook_allowed_hosts(self) -> frozenset[str]:
+    def parsed_webhook_allowed_hosts(self) -> frozenset[str]:
         """Lower-cased set of hostnames permitted as webhook callback targets."""
         return frozenset(
             h.strip().lower() for h in self.WEBHOOK_ALLOWED_HOSTS.split(",") if h.strip()
@@ -237,7 +237,7 @@ class Settings(BaseSettings):
     @property
     def webhooks_enabled(self) -> bool:
         """Callbacks require BOTH a signing secret and a non-empty host allow-list."""
-        return bool(self.WEBHOOK_SIGNING_SECRET) and bool(self.webhook_allowed_hosts)
+        return bool(self.WEBHOOK_SIGNING_SECRET) and bool(self.parsed_webhook_allowed_hosts)
 
 
 settings = Settings()
