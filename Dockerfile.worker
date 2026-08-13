@@ -18,7 +18,7 @@ WORKDIR /app
 # "app.main:app") in broker.py makes the worker import the full FastAPI app at
 # startup, which transitively imports app.routers.files -> image_vips -> pyvips.
 # Either way, without libvips installed the worker process crashes on boot.
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libvips \
     libvips-dev \
