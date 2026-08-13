@@ -59,7 +59,8 @@ async def list_files(
     response_model_exclude_unset=True,
 )
 async def get_file(
-    file_id: Annotated[str, Path(max_length=64)], owner: str = Depends(verify_token)
+    file_id: Annotated[str, Path(max_length=64)],
+    owner: Annotated[str, Depends(verify_token)],
 ):
     """Fetch one of the caller's upload records. 404 (not 403) when it isn't
     the caller's, so a record's existence never leaks across owners."""
@@ -67,7 +68,7 @@ async def get_file(
     try:
         record = await store.get(file_id, owner)
     except MetadataError as exc:
-        logger.error("Failed to load upload %s: %s", file_id, exc)
+        logger.exception("Failed to load upload")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
@@ -90,7 +91,7 @@ class _VisibilityBody(BaseModel):
 async def set_file_visibility(
     file_id: Annotated[str, Path(max_length=64)],
     body: _VisibilityBody,
-    owner: str = Depends(verify_token),
+    owner: Annotated[str, Depends(verify_token)],
 ):
     """Set a video's playback visibility (`private` | `public`). Owner-scoped
     (404, not 403, for anything that isn't the caller's, so existence never leaks).
@@ -104,7 +105,7 @@ async def set_file_visibility(
     try:
         record = await store.get(file_id, owner)
     except MetadataError as exc:
-        logger.error("Failed to load upload %s for visibility: %s", file_id, exc)
+        logger.exception("Failed to load upload for visibility")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
@@ -118,7 +119,7 @@ async def set_file_visibility(
     try:
         updated = await store.set_visibility(file_id, owner, body.visibility)
     except MetadataError as exc:
-        logger.error("Failed to set visibility on %s: %s", file_id, exc)
+        logger.exception("Failed to set visibility")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
@@ -136,7 +137,8 @@ async def set_file_visibility(
     response_model=ShareLinkResponse,
 )
 async def create_share_link(
-    file_id: Annotated[str, Path(max_length=64)], owner: str = Depends(verify_token)
+    file_id: Annotated[str, Path(max_length=64)],
+    owner: Annotated[str, Depends(verify_token)],
 ):
     """Mint (or rotate) an unlisted, revocable share token for one of the caller's
     videos. A valid token serves the video regardless of visibility via
@@ -149,7 +151,7 @@ async def create_share_link(
     try:
         record = await store.get(file_id, owner)
     except MetadataError as exc:
-        logger.error("Failed to load upload %s for share: %s", file_id, exc)
+        logger.exception("Failed to load upload for share")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
@@ -164,7 +166,7 @@ async def create_share_link(
     try:
         updated = await store.set_share_token(file_id, owner, token)
     except MetadataError as exc:
-        logger.error("Failed to set share token on %s: %s", file_id, exc)
+        logger.exception("Failed to set share token")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
@@ -184,7 +186,8 @@ async def create_share_link(
     summary="Revoke share link",
 )
 async def revoke_share_link(
-    file_id: Annotated[str, Path(max_length=64)], owner: str = Depends(verify_token)
+    file_id: Annotated[str, Path(max_length=64)],
+    owner: Annotated[str, Depends(verify_token)],
 ):
     """Revoke the caller's video share link (clears the token; the old URL now
     404s). Owner-scoped. Idempotent -- revoking when there's no token is a no-op
@@ -193,7 +196,7 @@ async def revoke_share_link(
     try:
         record = await store.get(file_id, owner)
     except MetadataError as exc:
-        logger.error("Failed to load upload %s for share revoke: %s", file_id, exc)
+        logger.exception("Failed to load upload for share revoke")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
@@ -203,7 +206,7 @@ async def revoke_share_link(
     try:
         await store.clear_share_token(file_id, owner)
     except MetadataError as exc:
-        logger.error("Failed to clear share token on %s: %s", file_id, exc)
+        logger.exception("Failed to clear share token")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
@@ -217,7 +220,8 @@ async def revoke_share_link(
     summary="Delete upload",
 )
 async def delete_upload(
-    file_id: Annotated[str, Path(max_length=64)], owner: str = Depends(verify_token)
+    file_id: Annotated[str, Path(max_length=64)],
+    owner: Annotated[str, Depends(verify_token)],
 ):
     """Delete one of the caller's uploads: its storage object, then its record.
     Owner-scoped (404 for anything that isn't the caller's, so no one can probe
@@ -233,7 +237,7 @@ async def delete_upload(
     try:
         record = await store.get(file_id, owner)
     except MetadataError as exc:
-        logger.error("Failed to load upload %s for delete: %s", file_id, exc)
+        logger.exception("Failed to load upload for delete")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
@@ -243,7 +247,7 @@ async def delete_upload(
     try:
         await delete_file(record.storage_key)
     except StorageError as exc:
-        logger.error("Failed to delete object %s: %s", record.storage_key, exc)
+        logger.exception("Failed to delete object")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
         ) from exc
@@ -251,7 +255,7 @@ async def delete_upload(
     try:
         await store.delete(file_id, owner)
     except MetadataError as exc:
-        logger.error("Failed to delete record %s: %s", file_id, exc)
+        logger.exception("Failed to delete record")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc

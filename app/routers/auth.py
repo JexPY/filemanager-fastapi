@@ -30,7 +30,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Annotated, Literal
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -242,7 +242,7 @@ class PresignedUploadResponse(BaseModel):
 )
 def create_presigned_upload(
     body: PresignedUploadRequest,
-    _owner: str = Depends(verify_static_token),
+    _owner: Annotated[str, Depends(verify_static_token)],
 ) -> PresignedUploadResponse:
     """Issue a short-lived, single-scope capability JWT -- and the ready-to-use
     URL embedding it -- for a direct *browser -> this service* upload, so the
