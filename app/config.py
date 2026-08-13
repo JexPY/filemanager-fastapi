@@ -19,9 +19,7 @@ class Settings(BaseSettings):
     # Postgres metadata store (system-of-record for every uploaded object).
     # Both the api and worker processes connect to this; the worker updates a
     # video's record on compression completion.
-    DATABASE_URL: str = Field(
-        default="postgresql://filemanager:filemanager@db:5432/filemanager"
-    )  # NOSONAR
+    DATABASE_URL: str = Field(default="")
 
     # Storage backend selection: "local" | "s3" | "gcp"
     STORAGE_BACKEND: str = Field(default="local")
