@@ -18,8 +18,21 @@ jobs:
           # Full history required for SonarCloud blame information
           fetch-depth: 0
 
+      - name: Provision .env for docker compose
+        run: cp .env-example .env
+
+      - name: Build test image & run pytest with coverage
+        run: |
+          docker compose build test
+          docker compose --profile s3-dev up -d db redis minio minio-init
+          docker compose run --rm -v $(pwd):/app test pytest --cov=app --cov-report=xml:coverage.xml
+
       - name: SonarCloud Scan
         uses: SonarSource/sonarcloud-github-action@master
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile s3-dev --profile test down -v
