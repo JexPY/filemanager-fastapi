@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+from urllib.parse import urlparse
 
 import pytest
 
@@ -27,14 +28,18 @@ def test_sign_url_matches_hmac_computed_independently() -> None:
 def test_sign_url_uses_base_url_prefix_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "IMGPROXY_BASE_URL", "http://imgproxy.internal:8080")
     result = sign_url("/rs:fill:300:300/aGVsbG8")
-    assert result.startswith("http://imgproxy.internal:8080/")
+    parsed = urlparse(result)
+    assert parsed.scheme == "http"
+    assert parsed.netloc == "imgproxy.internal:8080"
 
 
 def test_sign_url_is_path_only_when_base_url_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "IMGPROXY_BASE_URL", "")
     result = sign_url("/rs:fill:300:300/aGVsbG8")
+    parsed = urlparse(result)
+    assert parsed.scheme == ""
+    assert parsed.netloc == ""
     assert result.startswith("/")
-    assert "http" not in result
 
 
 def test_generate_signed_url_base64_encodes_source_url() -> None:
