@@ -126,7 +126,6 @@ async def set_file_visibility(
     return updated.to_public()
 
 
-
 @router.post(
     "/files/{file_id}/share",
     tags=["Sharing & Playback"],

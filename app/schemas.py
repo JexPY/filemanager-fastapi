@@ -193,7 +193,6 @@ class ShareLinkResponse(BaseModel):
     share_url: str = Field(description="Shareable URL embedding the token")
 
 
-
 # ---------------------------------------------------------------------------
 # Posters (two shapes, discriminated on `status`)
 # ---------------------------------------------------------------------------

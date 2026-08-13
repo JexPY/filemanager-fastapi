@@ -195,4 +195,3 @@ async def test_share_non_video_token_404(
     )
     await fake_metadata.set_share_token(image.id, OWNER, "img-token")
     assert (await client.get("/share/img-token")).status_code == 404
-

@@ -52,6 +52,132 @@ require_image_upload = require_scopes("upload:image")
 require_video_upload = require_scopes("upload:video")
 
 
+async def _process_single_image(
+    file_data: bytes,
+    owner: str,
+    optimization: str,
+    imgproxy_width: int | None,
+    imgproxy_height: int | None,
+    imgproxy_fit: str,
+    imgproxy_format: str | None,
+    *,
+    raise_on_error: bool,
+) -> dict | None:
+    """Process one image upload end-to-end: sha256 hash -> dedup check ->
+    validate/strip -> store -> record. If raise_on_error=True (single upload
+    endpoint), propagates HTTPException on client/server failures. If False
+    (bulk endpoint), returns None on any failure so the batch continues. Never
+    leaks storage internals to the caller."""
+    try:
+        # Content hash of the *input* bytes for idempotency. Hashing 25 MB is
+        # borderline CPU work, so offload it like the other CPU-bound steps.
+        # We include the optimization profile in the hash, so different
+        # optimization levels are treated as distinct uploads for the same
+        # source bytes.
+        signature = f"{await asyncio.to_thread(_sha256_hex, file_data)}:{optimization}"
+        content_hash = hashlib.sha256(signature.encode()).hexdigest()
+
+        store = await get_metadata_store()
+        # Idempotency: the exact same bytes already stored (and ready) by this
+        # owner returns the existing record instead of re-decoding/
+        # re-encoding/re-storing. Owner-scoped so hashes never collide or leak
+        # across tenants. A lookup failure must not fail the upload -- fall
+        # through and process normally.
+        try:
+            existing = await store.find_ready_by_hash(owner, content_hash)
+        except MetadataError as exc:
+            logger.warning("Idempotency lookup failed (processing normally): %s", exc)
+            existing = None
+        if existing is not None:
+            source_url = await _image_source_url(existing.storage_key)
+            return _image_response(
+                existing.id,
+                existing.width,
+                existing.height,
+                existing.size_bytes,
+                source_url,
+                custom_width=imgproxy_width,
+                custom_height=imgproxy_height,
+                custom_fit=imgproxy_fit,
+                custom_format=imgproxy_format,
+            )
+
+        # Client-side failures (bad/unsupported image) => 400, generic detail.
+        try:
+            optimized_buffer, content_type, width, height = await asyncio.to_thread(
+                validate_and_strip_image, file_data, optimization
+            )
+        except ImageValidationError as exc:
+            logger.warning("Image validation rejected upload: %s", exc)
+            if not raise_on_error:
+                return None
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or unsupported image"
+            ) from exc
+
+        unique_id = uuid.uuid4().hex
+        object_name = f"images/{unique_id}.webp"
+
+        # Storage failures are server-side; never surface backend internals to
+        # the caller.
+        if raise_on_error:
+            try:
+                obj = await upload_file(optimized_buffer, object_name, content_type)
+            except StorageError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
+                ) from exc
+        else:
+            obj = await upload_file(optimized_buffer, object_name, content_type)
+
+        # Record the object in the system-of-record (owner-scoped, immediately
+        # ready, with the content hash so a later identical upload dedupes). If
+        # this fails the stored object would be orphaned with no way to ever
+        # find or delete it, so roll it back before surfacing a generic 502.
+        try:
+            record = await store.create(
+                owner=owner,
+                kind=KIND_IMAGE,
+                storage_key=obj.key,
+                content_type=content_type,
+                size_bytes=obj.size,
+                status=STATUS_READY,
+                width=width,
+                height=height,
+                content_hash=content_hash,
+                visibility="public",
+            )
+        except MetadataError as exc:
+            logger.error("Failed to record image upload %s: %s", obj.key, exc)
+            with contextlib.suppress(StorageError):
+                await delete_file(obj.key)
+            if not raise_on_error:
+                return None
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
+            ) from exc
+
+        source_url = await _image_source_url(obj.key)
+        return _image_response(
+            record.id,
+            width,
+            height,
+            record.size_bytes,
+            source_url,
+            custom_width=imgproxy_width,
+            custom_height=imgproxy_height,
+            custom_fit=imgproxy_fit,
+            custom_format=imgproxy_format,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if raise_on_error:
+            raise
+        logger.error("Failed to process bulk image item: %s", exc)
+        return None
+
+
 @router.post(
     "/upload/image",
     tags=["Uploads"],
@@ -80,97 +206,68 @@ async def upload_image(
     owner: str = Depends(require_image_upload),
 ):
     file_data = await _read_capped(file, request, settings.MAX_IMAGE_UPLOAD_BYTES)
-
-    # Content hash of the *input* bytes for idempotency. Hashing 25 MB is
-    # borderline CPU work, so offload it like the other CPU-bound steps.
-    # We include the optimization profile in the hash, so different optimization
-    # levels are treated as distinct uploads for the same source bytes.
-    signature = f"{await asyncio.to_thread(_sha256_hex, file_data)}:{optimization}"
-    content_hash = hashlib.sha256(signature.encode()).hexdigest()
-
-    store = await get_metadata_store()
-    # Idempotency: the exact same bytes already stored (and ready) by this owner
-    # returns the existing record instead of re-decoding/re-encoding/re-storing.
-    # Owner-scoped so hashes never collide or leak across tenants. A lookup
-    # failure must not fail the upload -- fall through and process normally.
-    try:
-        existing = await store.find_ready_by_hash(owner, content_hash)
-    except MetadataError as exc:
-        logger.warning("Idempotency lookup failed (processing normally): %s", exc)
-        existing = None
-    if existing is not None:
-        source_url = await _image_source_url(existing.storage_key)
-        return _image_response(
-            existing.id,
-            existing.width,
-            existing.height,
-            existing.size_bytes,
-            source_url,
-            custom_width=imgproxy_width,
-            custom_height=imgproxy_height,
-            custom_fit=imgproxy_fit,
-            custom_format=imgproxy_format,
-        )
-
-    # Client-side failures (bad/unsupported image) => 400, generic detail.
-    try:
-        optimized_buffer, content_type, width, height = await asyncio.to_thread(
-            validate_and_strip_image, file_data, optimization
-        )
-    except ImageValidationError as exc:
-        logger.warning("Image validation rejected upload: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or unsupported image"
-        ) from exc
-
-    unique_id = uuid.uuid4().hex
-    object_name = f"images/{unique_id}.webp"
-
-    # Storage failures are server-side; never surface backend internals to the caller.
-    try:
-        obj = await upload_file(optimized_buffer, object_name, content_type)
-    except StorageError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
-        ) from exc
-
-    # Record the object in the system-of-record (owner-scoped, immediately
-    # ready, with the content hash so a later identical upload dedupes). If this
-    # fails the stored object would be orphaned with no way to ever find or
-    # delete it, so roll it back before surfacing a generic 502.
-    try:
-        record = await store.create(
-            owner=owner,
-            kind=KIND_IMAGE,
-            storage_key=obj.key,
-            content_type=content_type,
-            size_bytes=obj.size,
-            status=STATUS_READY,
-            width=width,
-            height=height,
-            content_hash=content_hash,
-            visibility="public",
-        )
-    except MetadataError as exc:
-        logger.error("Failed to record image upload %s: %s", obj.key, exc)
-        with contextlib.suppress(StorageError):
-            await delete_file(obj.key)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
-        ) from exc
-
-    source_url = await _image_source_url(obj.key)
-    return _image_response(
-        record.id,
-        width,
-        height,
-        record.size_bytes,
-        source_url,
-        custom_width=imgproxy_width,
-        custom_height=imgproxy_height,
-        custom_fit=imgproxy_fit,
-        custom_format=imgproxy_format,
+    return await _process_single_image(
+        file_data,
+        owner,
+        optimization,
+        imgproxy_width,
+        imgproxy_height,
+        imgproxy_fit,
+        imgproxy_format,
+        raise_on_error=True,
     )
+
+
+# FastAPI's OpenAPI generation can't natively express `List[UploadFile]` in the
+# multipart Swagger schema; this workaround describes the request body by hand
+# so the docs UI renders a usable "files" array picker. Module-level so the
+# route decorator stays readable.
+_BULK_UPLOAD_OPENAPI_EXTRA = {
+    "requestBody": {
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "items": {"type": "string", "format": "binary"},
+                            "description": "Multiple image files to upload",
+                        },
+                        "imgproxy_width": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 8192,
+                            "nullable": True,
+                        },
+                        "imgproxy_height": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 8192,
+                            "nullable": True,
+                        },
+                        "imgproxy_fit": {
+                            "type": "string",
+                            "enum": ["auto", "fit", "fill", "fill-down", "force"],
+                            "default": "auto",
+                        },
+                        "imgproxy_format": {
+                            "type": "string",
+                            "enum": ["webp", "png", "jpg", "jpeg", "avif", "gif"],
+                            "nullable": True,
+                        },
+                        "optimization": {
+                            "type": "string",
+                            "enum": ["size", "balanced", "quality"],
+                            "default": "balanced",
+                        },
+                    },
+                    "required": ["files"],
+                }
+            }
+        }
+    }
+}
 
 
 @router.post(
@@ -179,52 +276,7 @@ async def upload_image(
     summary="Bulk upload images",
     response_model=BulkImageUploadResponse,
     response_model_exclude_unset=True,
-    openapi_extra={
-        "requestBody": {
-            "content": {
-                "multipart/form-data": {
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "files": {
-                                "type": "array",
-                                "items": {"type": "string", "format": "binary"},
-                                "description": "Multiple image files to upload",
-                            },
-                            "imgproxy_width": {
-                                "type": "integer",
-                                "minimum": 0,
-                                "maximum": 8192,
-                                "nullable": True,
-                            },
-                            "imgproxy_height": {
-                                "type": "integer",
-                                "minimum": 0,
-                                "maximum": 8192,
-                                "nullable": True,
-                            },
-                            "imgproxy_fit": {
-                                "type": "string",
-                                "enum": ["auto", "fit", "fill", "fill-down", "force"],
-                                "default": "auto",
-                            },
-                            "imgproxy_format": {
-                                "type": "string",
-                                "enum": ["webp", "png", "jpg", "jpeg", "avif", "gif"],
-                                "nullable": True,
-                            },
-                            "optimization": {
-                                "type": "string",
-                                "enum": ["size", "balanced", "quality"],
-                                "default": "balanced",
-                            },
-                        },
-                        "required": ["files"],
-                    }
-                }
-            }
-        }
-    },
+    openapi_extra=_BULK_UPLOAD_OPENAPI_EXTRA,
 )
 async def upload_images(
     request: Request,
@@ -247,9 +299,7 @@ async def upload_images(
     owner: str = Depends(require_image_upload),
 ):
     if not files or len(files) == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="No files provided"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files provided")
     if len(files) > 10:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Maximum of 10 files allowed"
@@ -265,78 +315,21 @@ async def upload_images(
         total_bytes += len(data)
         files_data.append(data)
 
-    store = await get_metadata_store()
-
-    async def _process_single(file_data: bytes) -> dict | None:
-        try:
-            signature = f"{await asyncio.to_thread(_sha256_hex, file_data)}:{optimization}"
-            content_hash = hashlib.sha256(signature.encode()).hexdigest()
-
-            try:
-                existing = await store.find_ready_by_hash(owner, content_hash)
-            except MetadataError as exc:
-                logger.warning("Idempotency lookup failed (processing normally): %s", exc)
-                existing = None
-
-            if existing is not None:
-                source_url = await _image_source_url(existing.storage_key)
-                return _image_response(
-                    existing.id,
-                    existing.width,
-                    existing.height,
-                    existing.size_bytes,
-                    source_url,
-                    custom_width=imgproxy_width,
-                    custom_height=imgproxy_height,
-                    custom_fit=imgproxy_fit,
-                    custom_format=imgproxy_format,
-                )
-
-            optimized_buffer, content_type, width, height = await asyncio.to_thread(
-                validate_and_strip_image, file_data, optimization
+    results = await asyncio.gather(
+        *[
+            _process_single_image(
+                data,
+                owner,
+                optimization,
+                imgproxy_width,
+                imgproxy_height,
+                imgproxy_fit,
+                imgproxy_format,
+                raise_on_error=False,
             )
-
-            unique_id = uuid.uuid4().hex
-            object_name = f"images/{unique_id}.webp"
-
-            obj = await upload_file(optimized_buffer, object_name, content_type)
-
-            try:
-                record = await store.create(
-                    owner=owner,
-                    kind=KIND_IMAGE,
-                    storage_key=obj.key,
-                    content_type=content_type,
-                    size_bytes=obj.size,
-                    status=STATUS_READY,
-                    width=width,
-                    height=height,
-                    content_hash=content_hash,
-                    visibility="public",
-                )
-            except MetadataError as exc:
-                logger.error("Failed to record bulk image upload %s: %s", obj.key, exc)
-                with contextlib.suppress(StorageError):
-                    await delete_file(obj.key)
-                return None
-
-            source_url = await _image_source_url(obj.key)
-            return _image_response(
-                record.id,
-                width,
-                height,
-                record.size_bytes,
-                source_url,
-                custom_width=imgproxy_width,
-                custom_height=imgproxy_height,
-                custom_fit=imgproxy_fit,
-                custom_format=imgproxy_format,
-            )
-        except Exception as exc:
-            logger.error("Failed to process bulk image item: %s", exc)
-            return None
-
-    results = await asyncio.gather(*[_process_single(d) for d in files_data])
+            for data in files_data
+        ]
+    )
     items = [r for r in results if r is not None]
 
     return {"count": len(items), "items": items}
@@ -385,8 +378,7 @@ async def upload_video(
     # The deduplication hash must include the processing parameters, otherwise
     # uploading the same video with different formats/cuts would falsely dedupe.
     signature = (
-        f"{raw_content_hash}:{format}:{optimization}:{start_seconds}:"
-        f"{end_seconds}:{poster_seconds}"
+        f"{raw_content_hash}:{format}:{optimization}:{start_seconds}:{end_seconds}:{poster_seconds}"
     )
     content_hash = hashlib.sha256(signature.encode()).hexdigest()
     content_type = file.content_type or "application/octet-stream"

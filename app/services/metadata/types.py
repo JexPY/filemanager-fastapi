@@ -42,9 +42,7 @@ def _build_imgproxy_url(storage_key: str, processing_options: str = "rs:auto") -
         from app.services.storage import _build_backend, _storage
 
         backend = _storage if _storage is not None else _build_backend()
-        source_url = build_source_url(
-            storage_key, backend.public_url(storage_key)
-        )
+        source_url = build_source_url(storage_key, backend.public_url(storage_key))
 
     return generate_signed_url(source_url, processing_options=processing_options)
 

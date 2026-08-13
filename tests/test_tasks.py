@@ -35,7 +35,9 @@ async def test_compress_video_task_automated_poster_extraction(
 ) -> None:
     raw_key = "raw/videos/test_poster_auto.mp4"
     fake_storage.objects[raw_key] = fixture_bytes("tiny.mp4")
-    upload_id = await _seed_video_processing(fake_metadata, raw_key, callback_url="https://example.com/webhook")
+    upload_id = await _seed_video_processing(
+        fake_metadata, raw_key, callback_url="https://example.com/webhook"
+    )
 
     webhook_calls: list[dict[str, Any]] = []
 

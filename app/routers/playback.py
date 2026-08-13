@@ -119,4 +119,3 @@ async def download_via_share(share_token: Annotated[str, Path(max_length=100)]):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Playback backend unavailable"
         ) from exc
-

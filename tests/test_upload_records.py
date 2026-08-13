@@ -146,4 +146,3 @@ async def test_to_public_returns_direct_imgproxy_url(
     assert "/rs:auto/" in video_data["poster_url"]
     assert "/files/" not in video_data["poster_url"]
     assert video_data["poster_upload_id"] == "poster_abc"
-

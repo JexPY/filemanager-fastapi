@@ -1,0 +1,87 @@
+name: Snyk
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  schedule:
+    # Weekly scan every Wednesday at 06:00 UTC
+    - cron: "0 6 * * 3"
+
+jobs:
+  snyk-python:
+    name: Snyk — Python Dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Export requirements from uv lockfile
+        run: uv export --no-dev --format requirements-txt -o requirements-snyk.txt
+
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+
+      - name: Snyk test — Python deps
+        run: snyk test --file=requirements-snyk.txt --package-manager=pip --severity-threshold=high
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        continue-on-error: true
+
+      - name: Snyk monitor — Python deps (master or main)
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+        run: snyk monitor --file=requirements-snyk.txt --package-manager=pip --project-name=filemanager-fastapi-python
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        continue-on-error: true
+
+  snyk-docker-api:
+    name: Snyk — Docker (API)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Provision .env for docker build
+        run: cp .env-example .env
+
+      - name: Build API image
+        run: docker build -f Dockerfile.api -t filemanager-api:snyk .
+
+      - name: Snyk Docker test — API image
+        uses: snyk/actions/docker@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: filemanager-api:snyk
+          args: --severity-threshold=high --file=Dockerfile.api
+        continue-on-error: true
+
+  snyk-docker-worker:
+    name: Snyk — Docker (Worker)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Provision .env for docker build
+        run: cp .env-example .env
+
+      - name: Build Worker image
+        run: docker build -f Dockerfile.worker -t filemanager-worker:snyk .
+
+      - name: Snyk Docker test — Worker image
+        uses: snyk/actions/docker@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: filemanager-worker:snyk
+          args: --severity-threshold=high --file=Dockerfile.worker
+        continue-on-error: true

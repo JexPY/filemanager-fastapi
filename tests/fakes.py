@@ -334,7 +334,5 @@ class InMemoryMetadataStore(MetadataStore):
                 return record
         return None
 
-
-
     async def aclose(self) -> None:
         self.closed = True

@@ -24,7 +24,7 @@ from app.routers.auth import (
 )
 from tests.conftest import fixture_bytes
 
-SECRET = "unit-test-jwt-secret"  # test-only signing key
+SECRET = "unit-test-jwt-secret-that-is-long-enough-for-hs256"  # test-only signing key, >=32 bytes
 STATIC = "static-master-token"  # test-only bearer secret
 
 
@@ -80,7 +80,7 @@ def test_expired_jwt_is_rejected(jwt_env: None) -> None:
 
 
 def test_wrong_signature_jwt_is_rejected(jwt_env: None) -> None:
-    assert resolve_principal(_mint(secret="not-the-real-secret")) is None
+    assert resolve_principal(_mint(secret="not-the-real-secret-but-still-long-enough")) is None
 
 
 def test_jwt_without_any_upload_scope_is_rejected(jwt_env: None) -> None:
@@ -94,7 +94,7 @@ def test_jwt_ignored_entirely_when_secret_unset(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(settings, "FILE_MANAGER_BEARER_TOKENS", f"master:{STATIC}")
     monkeypatch.setattr(settings, "JWT_SECRET_KEY", "")
     # Even a perfectly-formed token is refused when the feature is disabled...
-    assert resolve_principal(_mint(secret="whatever")) is None
+    assert resolve_principal(_mint(secret="whatever-but-long-enough-for-hs256")) is None
     # ...while the static token keeps working (backward compatibility).
     assert resolve_principal(STATIC) is not None
 

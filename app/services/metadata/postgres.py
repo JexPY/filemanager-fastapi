@@ -405,8 +405,6 @@ class PostgresMetadataStore(MetadataStore):
         )
         return _row_to_record(row) if row is not None else None
 
-
-
     async def aclose(self) -> None:
         if self._pool is not None:
             await self._pool.close()

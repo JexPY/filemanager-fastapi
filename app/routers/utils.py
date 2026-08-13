@@ -27,7 +27,7 @@ async def _read_capped(file: UploadFile, request: Request, max_bytes: int) -> by
         content.extend(chunk)
         if len(content) > max_bytes:
             raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                 detail=f"File exceeds {max_bytes} bytes",
             )
     return bytes(content)
@@ -60,7 +60,7 @@ async def _stream_capped_to_temp(
                 size += len(chunk)
                 if size > max_bytes:
                     raise HTTPException(
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                         detail=f"File exceeds {max_bytes} bytes",
                     )
                 await out.write(chunk)

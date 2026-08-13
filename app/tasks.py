@@ -111,6 +111,220 @@ async def _probe_video_metadata(input_path: str) -> tuple[float | None, int | No
         return None, None, None
 
 
+def _build_ffmpeg_args(
+    input_source: str,
+    output_path: str,
+    output_format: str,
+    optimization: str,
+    start_seconds: float | None,
+    end_seconds: float | None,
+) -> list[str]:
+    """Build the full ffmpeg argument list for video compression.
+    Pure function: no I/O, no state. Testable in isolation."""
+    ffmpeg_args = ["ffmpeg", "-y"]
+    if start_seconds is not None:
+        ffmpeg_args.extend(["-ss", str(start_seconds)])
+    if end_seconds is not None:
+        ffmpeg_args.extend(["-to", str(end_seconds)])
+
+    ffmpeg_args.extend(["-i", input_source])
+
+    if optimization == "balanced":
+        ffmpeg_args.extend(["-vf", "scale='min(1280,iw)':-2"])
+        if output_format == "webm_vp9":
+            ffmpeg_args.extend(
+                [
+                    "-c:v",
+                    "libvpx-vp9",
+                    "-crf",
+                    "35",
+                    "-b:v",
+                    "0",
+                    "-cpu-used",
+                    "4",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "96k",
+                ]
+            )
+        elif output_format == "webm_av1":
+            ffmpeg_args.extend(
+                [
+                    "-c:v",
+                    "libsvtav1",
+                    "-preset",
+                    "8",
+                    "-crf",
+                    "45",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "96k",
+                ]
+            )
+        else:
+            ffmpeg_args.extend(
+                [
+                    "-c:v",
+                    "libx264",
+                    "-crf",
+                    "28",
+                    "-preset",
+                    "fast",
+                    "-movflags",
+                    "+faststart",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                ]
+            )
+    else:  # "quality"
+        ffmpeg_args.extend(["-vf", "scale='min(1920,iw)':-2"])
+        if output_format == "webm_vp9":
+            ffmpeg_args.extend(
+                [
+                    "-c:v",
+                    "libvpx-vp9",
+                    "-crf",
+                    "30",
+                    "-b:v",
+                    "0",
+                    "-cpu-used",
+                    "2",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "128k",
+                ]
+            )
+        elif output_format == "webm_av1":
+            ffmpeg_args.extend(
+                [
+                    "-c:v",
+                    "libsvtav1",
+                    "-preset",
+                    "6",
+                    "-crf",
+                    "35",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "128k",
+                ]
+            )
+        else:
+            ffmpeg_args.extend(
+                [
+                    "-c:v",
+                    "libx264",
+                    "-crf",
+                    "23",
+                    "-preset",
+                    "medium",
+                    "-movflags",
+                    "+faststart",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                ]
+            )
+
+    ffmpeg_args.append(output_path)
+    return ffmpeg_args
+
+
+async def _extract_and_store_poster(
+    unique_id: str,
+    input_source: str,
+    seek_seconds: float,
+    owner: str,
+    upload_id: str,
+    visibility: str = "public",
+) -> UploadRecord | None:
+    """Extract one frame from input_source at seek_seconds, process through the
+    image pipeline (validate/strip -> WebP), store it, and link it to upload_id.
+    Returns the linked video UploadRecord on success, None if the video was
+    deleted mid-generation (mirrors compress_video_task's mark_ready check).
+    Caller owns cleanup of input_source; this function cleans its own temp frame.
+    Raises RuntimeError on ffmpeg failure or TimeoutError on timeout."""
+    store = await get_metadata_store()
+    frame_path = f"/tmp/{unique_id}_poster.png"
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{seek_seconds:.3f}",
+            "-i",
+            input_source,
+            "-frames:v",
+            "1",
+            "-f",
+            "image2",
+            "-c:v",
+            "png",
+            frame_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=settings.FFMPEG_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise RuntimeError(
+                f"Poster ffmpeg timed out after {settings.FFMPEG_TIMEOUT_SECONDS}s"
+            ) from None
+        if process.returncode != 0:
+            raise RuntimeError(f"Poster extract failed: {stderr.decode(errors='replace')}")
+
+        async with aiofiles.open(frame_path, "rb") as f:
+            frame_bytes = await f.read()
+
+        # Reuse the exact image validate/strip path (CPU-bound -> threadpool).
+        webp_bytes, content_type, width, height = await asyncio.to_thread(
+            validate_and_strip_image, frame_bytes
+        )
+        poster_key = f"posters/{unique_id}.webp"
+        obj = await upload_file(webp_bytes, poster_key, content_type)
+
+        poster = await store.create(
+            owner=owner,
+            kind=KIND_IMAGE,
+            storage_key=obj.key,
+            content_type=content_type,
+            size_bytes=obj.size,
+            status=STATUS_READY,
+            width=width,
+            height=height,
+            visibility=visibility,
+        )
+
+        # Link the video to its poster. None means the owner DELETEd the video
+        # mid-generation -- discard the poster we just wrote (object + record)
+        # instead of orphaning it.
+        linked = await store.set_poster(upload_id, poster.id)
+        if linked is None:
+            logger.warning(
+                "Upload %s gone during poster generation; discarding %s", upload_id, obj.key
+            )
+            with contextlib.suppress(StorageError):
+                await delete_file(obj.key)
+            with contextlib.suppress(MetadataError):
+                await store.delete(poster.id, owner)
+            return None
+
+        return linked
+    finally:
+        if await aiofiles.os.path.exists(frame_path):
+            await aiofiles.os.remove(frame_path)
+
+
 @broker.task
 async def compress_video_task(
     raw_storage_key: str,
@@ -137,118 +351,9 @@ async def compress_video_task(
 
         truncated = start_seconds is not None or end_seconds is not None
 
-        ffmpeg_args = ["ffmpeg", "-y"]
-        if start_seconds is not None:
-            ffmpeg_args.extend(["-ss", str(start_seconds)])
-        if end_seconds is not None:
-            ffmpeg_args.extend(["-to", str(end_seconds)])
-
-        ffmpeg_args.extend(["-i", input_source])
-
-        if optimization == "balanced":
-            ffmpeg_args.extend(["-vf", "scale='min(1280,iw)':-2"])
-            if output_format == "webm_vp9":
-                ffmpeg_args.extend(
-                    [
-                        "-c:v",
-                        "libvpx-vp9",
-                        "-crf",
-                        "35",
-                        "-b:v",
-                        "0",
-                        "-cpu-used",
-                        "4",
-                        "-c:a",
-                        "libopus",
-                        "-b:a",
-                        "96k",
-                    ]
-                )
-            elif output_format == "webm_av1":
-                ffmpeg_args.extend(
-                    [
-                        "-c:v",
-                        "libsvtav1",
-                        "-preset",
-                        "8",
-                        "-crf",
-                        "45",
-                        "-c:a",
-                        "libopus",
-                        "-b:a",
-                        "96k",
-                    ]
-                )
-            else:
-                ffmpeg_args.extend(
-                    [
-                        "-c:v",
-                        "libx264",
-                        "-crf",
-                        "28",
-                        "-preset",
-                        "fast",
-                        "-movflags",
-                        "+faststart",
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        "128k",
-                    ]
-                )
-        else:  # "quality"
-            ffmpeg_args.extend(["-vf", "scale='min(1920,iw)':-2"])
-            if output_format == "webm_vp9":
-                ffmpeg_args.extend(
-                    [
-                        "-c:v",
-                        "libvpx-vp9",
-                        "-crf",
-                        "30",
-                        "-b:v",
-                        "0",
-                        "-cpu-used",
-                        "2",
-                        "-c:a",
-                        "libopus",
-                        "-b:a",
-                        "128k",
-                    ]
-                )
-            elif output_format == "webm_av1":
-                ffmpeg_args.extend(
-                    [
-                        "-c:v",
-                        "libsvtav1",
-                        "-preset",
-                        "6",
-                        "-crf",
-                        "35",
-                        "-c:a",
-                        "libopus",
-                        "-b:a",
-                        "128k",
-                    ]
-                )
-            else:
-                ffmpeg_args.extend(
-                    [
-                        "-c:v",
-                        "libx264",
-                        "-crf",
-                        "23",
-                        "-preset",
-                        "medium",
-                        "-movflags",
-                        "+faststart",
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        "192k",
-                    ]
-                )
-
-        ffmpeg_args.append(output_path)
+        ffmpeg_args = _build_ffmpeg_args(
+            input_source, output_path, output_format, optimization, start_seconds, end_seconds
+        )
 
         process = await asyncio.create_subprocess_exec(
             *ffmpeg_args,
@@ -303,71 +408,19 @@ async def compress_video_task(
 
         # Automated single-step poster extraction if poster_seconds is provided
         if poster_seconds is not None:
-            frame_path = f"/tmp/{unique_id}_poster.png"
             try:
-                seek = (
-                    poster_seconds
-                    if poster_seconds is not None
-                    else await _poster_seek_seconds(output_path)
-                )
-                process_poster = await asyncio.create_subprocess_exec(
-                    "ffmpeg",
-                    "-y",
-                    "-ss",
-                    f"{seek:.3f}",
-                    "-i",
+                linked = await _extract_and_store_poster(
+                    unique_id,
                     output_path,
-                    "-frames:v",
-                    "1",
-                    "-f",
-                    "image2",
-                    "-c:v",
-                    "png",
-                    frame_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                    poster_seconds,
+                    record.owner,
+                    upload_id,
+                    visibility=record.visibility,
                 )
-                try:
-                    _, stderr_poster = await asyncio.wait_for(
-                        process_poster.communicate(), timeout=settings.FFMPEG_TIMEOUT_SECONDS
-                    )
-                except TimeoutError:
-                    process_poster.kill()
-                    await process_poster.wait()
-                    raise RuntimeError(
-                        f"Poster ffmpeg timed out after {settings.FFMPEG_TIMEOUT_SECONDS}s"
-                    ) from None
-
-                if process_poster.returncode == 0 and await aiofiles.os.path.exists(frame_path):
-                    async with aiofiles.open(frame_path, "rb") as pf:
-                        frame_bytes = await pf.read()
-
-                    webp_bytes, p_content_type, p_width, p_height = await asyncio.to_thread(
-                        validate_and_strip_image, frame_bytes
-                    )
-                    poster_key = f"posters/{unique_id}.webp"
-                    poster_obj = await upload_file(webp_bytes, poster_key, p_content_type)
-
-                    poster = await store.create(
-                        owner=record.owner,
-                        kind=KIND_IMAGE,
-                        storage_key=poster_obj.key,
-                        content_type=p_content_type,
-                        size_bytes=poster_obj.size,
-                        status=STATUS_READY,
-                        width=p_width,
-                        height=p_height,
-                        visibility=record.visibility,
-                    )
-
-                    linked = await store.set_poster(upload_id, poster.id)
-                    if linked is not None:
-                        record = linked
+                if linked is not None:
+                    record = linked
             except Exception as p_exc:
                 logger.warning("Automated poster extraction failed for %s: %s", upload_id, p_exc)
-            finally:
-                if await aiofiles.os.path.exists(frame_path):
-                    await aiofiles.os.remove(frame_path)
 
         # Push completion to the client's callback (if any) on its own task, so
         # they don't have to poll GET /tasks/{id} and a slow receiver can't block
@@ -479,88 +532,18 @@ async def generate_poster_task(upload_id: str, at_seconds: float | None = None) 
 
     unique_id = uuid.uuid4().hex
     src_key = video.storage_key  # the compressed mp4
-    frame_path = f"/tmp/{unique_id}_poster.png"
 
-    try:
-        # Read the compressed video in place (local path or presigned URL) rather
-        # than downloading it into RAM first.
-        input_source = await _resolve_ffmpeg_input(src_key)
+    # Read the compressed video in place (local path or presigned URL) rather
+    # than downloading it into RAM first.
+    input_source = await _resolve_ffmpeg_input(src_key)
+    seek = at_seconds if at_seconds is not None else await _poster_seek_seconds(input_source)
 
-        seek = at_seconds if at_seconds is not None else await _poster_seek_seconds(input_source)
-        process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-y",
-            "-ss",
-            f"{seek:.3f}",
-            "-i",
-            input_source,
-            "-frames:v",
-            "1",
-            "-f",
-            "image2",
-            "-c:v",
-            "png",
-            frame_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            _, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=settings.FFMPEG_TIMEOUT_SECONDS
-            )
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-            raise RuntimeError(
-                f"Poster ffmpeg timed out after {settings.FFMPEG_TIMEOUT_SECONDS}s"
-            ) from None
-        if process.returncode != 0:
-            raise RuntimeError(f"Poster extract failed: {stderr.decode(errors='replace')}")
+    linked = await _extract_and_store_poster(unique_id, input_source, seek, video.owner, upload_id)
+    if linked is None:
+        return {"status": "discarded", "upload_id": upload_id}
 
-        async with aiofiles.open(frame_path, "rb") as f:
-            frame_bytes = await f.read()
-
-        # Reuse the exact image validate/strip path (CPU-bound -> threadpool).
-        webp_bytes, content_type, width, height = await asyncio.to_thread(
-            validate_and_strip_image, frame_bytes
-        )
-        poster_key = f"posters/{unique_id}.webp"
-        obj = await upload_file(webp_bytes, poster_key, content_type)
-
-        poster = await store.create(
-            owner=video.owner,
-            kind=KIND_IMAGE,
-            storage_key=obj.key,
-            content_type=content_type,
-            size_bytes=obj.size,
-            status=STATUS_READY,
-            width=width,
-            height=height,
-        )
-
-        # Link the video to its poster. None means the owner DELETEd the video
-        # mid-generation -- discard the poster we just wrote (object + record)
-        # instead of orphaning it, mirroring compress_video_task's mark_ready.
-        linked = await store.set_poster(upload_id, poster.id)
-        if linked is None:
-            logger.warning(
-                "Video %s gone during poster generation; discarding %s", upload_id, obj.key
-            )
-            with contextlib.suppress(StorageError):
-                await delete_file(obj.key)
-            with contextlib.suppress(MetadataError):
-                await store.delete(poster.id, video.owner)
-            return {"status": "discarded", "upload_id": upload_id}
-
-        return {
-            "status": "success",
-            "upload_id": upload_id,
-            "poster_id": poster.id,
-            "key": obj.key,
-            "width": width,
-            "height": height,
-        }
-
-    finally:
-        if await aiofiles.os.path.exists(frame_path):
-            await aiofiles.os.remove(frame_path)
+    return {
+        "status": "success",
+        "upload_id": upload_id,
+        "poster_id": linked.poster_upload_id,
+    }
