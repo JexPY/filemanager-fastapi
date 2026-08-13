@@ -170,7 +170,7 @@ async def deliver_webhook(
                         attempt,
                         resp.status,
                     )
-            except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+            except (aiohttp.ClientError, OSError) as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 logger.warning(
                     "Webhook %s delivery to %s failed (attempt %d): %s",

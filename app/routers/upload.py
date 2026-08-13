@@ -118,57 +118,22 @@ async def _process_single_image(
         unique_id = uuid.uuid4().hex
         object_name = f"images/{unique_id}.webp"
 
-        # Storage failures are server-side; never surface backend internals to
-        # the caller.
-        if raise_on_error:
-            try:
-                obj = await upload_file(optimized_buffer, object_name, content_type)
-            except StorageError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
-                ) from exc
-        else:
-            obj = await upload_file(optimized_buffer, object_name, content_type)
-
-        # Record the object in the system-of-record (owner-scoped, immediately
-        # ready, with the content hash so a later identical upload dedupes). If
-        # this fails the stored object would be orphaned with no way to ever
-        # find or delete it, so roll it back before surfacing a generic 502.
-        try:
-            record = await store.create(
-                owner=owner,
-                kind=KIND_IMAGE,
-                storage_key=obj.key,
-                content_type=content_type,
-                size_bytes=obj.size,
-                status=STATUS_READY,
-                width=width,
-                height=height,
-                content_hash=content_hash,
-                visibility="public",
-            )
-        except MetadataError as exc:
-            logger.error("Failed to record image upload %s: %s", obj.key, exc)
-            with contextlib.suppress(StorageError):
-                await delete_file(obj.key)
-            if not raise_on_error:
-                return None
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
-            ) from exc
-
-        source_url = await _image_source_url(obj.key)
-        return _image_response(
-            record.id,
+        return await _store_and_record_image(
+            store,
+            owner,
+            object_name,
+            optimized_buffer,
+            content_type,
             width,
             height,
-            record.size_bytes,
-            source_url,
-            custom_width=imgproxy_width,
-            custom_height=imgproxy_height,
-            custom_fit=imgproxy_fit,
-            custom_format=imgproxy_format,
+            content_hash,
+            imgproxy_width,
+            imgproxy_height,
+            imgproxy_fit,
+            imgproxy_format,
+            raise_on_error=raise_on_error,
         )
+
     except HTTPException:
         raise
     except Exception as exc:
@@ -176,6 +141,69 @@ async def _process_single_image(
             raise
         logger.error("Failed to process bulk image item: %s", exc)
         return None
+
+
+async def _store_and_record_image(
+    store,
+    owner: str,
+    object_name: str,
+    optimized_buffer: bytes,
+    content_type: str,
+    width: int,
+    height: int,
+    content_hash: str,
+    imgproxy_width: int | None,
+    imgproxy_height: int | None,
+    imgproxy_fit: str,
+    imgproxy_format: str | None,
+    *,
+    raise_on_error: bool,
+) -> dict | None:
+    if raise_on_error:
+        try:
+            obj = await upload_file(optimized_buffer, object_name, content_type)
+        except StorageError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
+            ) from exc
+    else:
+        obj = await upload_file(optimized_buffer, object_name, content_type)
+
+    try:
+        record = await store.create(
+            owner=owner,
+            kind=KIND_IMAGE,
+            storage_key=obj.key,
+            content_type=content_type,
+            size_bytes=obj.size,
+            status=STATUS_READY,
+            width=width,
+            height=height,
+            content_hash=content_hash,
+            visibility="public",
+        )
+    except MetadataError as exc:
+        logger.exception("Failed to record image upload")
+        with contextlib.suppress(StorageError):
+            await delete_file(obj.key)
+        if not raise_on_error:
+            return None
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
+        ) from exc
+
+    source_url = await _image_source_url(obj.key)
+    return _image_response(
+        record.id,
+        record.width,
+        record.height,
+        record.size_bytes,
+        source_url,
+        custom_width=imgproxy_width,
+        custom_height=imgproxy_height,
+        custom_fit=imgproxy_fit,
+        custom_format=imgproxy_format,
+    )
 
 
 @router.post(
@@ -438,7 +466,7 @@ async def upload_video(
                 visibility=visibility,
             )
         except MetadataError as exc:
-            logger.error("Failed to record video upload %s: %s", raw_key, exc)
+            logger.exception("Failed to record video upload")
             with contextlib.suppress(StorageError):
                 await delete_file(raw_key)
             raise HTTPException(

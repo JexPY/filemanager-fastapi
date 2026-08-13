@@ -238,7 +238,6 @@ class PresignedUploadResponse(BaseModel):
     "/upload/presign",
     tags=["Uploads"],
     summary="Mint a presigned upload URL",
-    response_model=PresignedUploadResponse,
 )
 def create_presigned_upload(
     body: PresignedUploadRequest,
