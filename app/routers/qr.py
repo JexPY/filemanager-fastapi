@@ -194,9 +194,7 @@ async def generate_qrcode_wifi(
     dependencies=[Depends(verify_token)],
 )
 async def generate_qrcode_geo(
-    lat: float = Form(
-        ..., ge=-90.0, le=90.0, description="Latitude coordinate (-90.0 to 90.0)"
-    ),
+    lat: float = Form(..., ge=-90.0, le=90.0, description="Latitude coordinate (-90.0 to 90.0)"),
     lng: float = Form(
         ..., ge=-180.0, le=180.0, description="Longitude coordinate (-180.0 to 180.0)"
     ),
@@ -258,8 +256,3 @@ async def generate_qrcode_epc(
         logo_bytes=logo_bytes,
     )
     return Response(content=png_data, media_type="image/png")
-
-
-
-
-

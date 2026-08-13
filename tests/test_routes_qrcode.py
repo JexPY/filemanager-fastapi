@@ -1,5 +1,3 @@
-import io
-
 import httpx
 import pyvips
 
@@ -45,7 +43,6 @@ async def test_content_exceeding_qr_capacity_is_rejected_without_leaking_detail(
     assert detail == "Invalid QR content"
     assert "DataOverflow" not in detail
     assert "segno" not in detail.lower()
-
 
 
 async def test_qrcode_with_logo(client: httpx.AsyncClient, auth_headers: dict[str, str]) -> None:
@@ -223,6 +220,3 @@ async def test_qrcode_epc_valid_and_validation(
     )
     assert resp_bad.status_code == 400
     assert resp_bad.json()["detail"] == "Invalid SEPA IBAN format"
-
-
-

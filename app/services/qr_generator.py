@@ -45,7 +45,7 @@ def _overlay_logo(
     qr_image: pyvips.Image,
     logo_bytes: bytes,
     scale: int = 10,
-    symbol_size: tuple[int, int] | None = None,
+    symbol_size: tuple[int | float, int | float] | None = None,
     light: str = "#ffffff",
 ) -> pyvips.Image:
     if sniff_format(logo_bytes) is None:
@@ -100,9 +100,6 @@ def _overlay_logo(
     return qr_image.insert(backing, x_px, y_px)
 
 
-
-
-
 def generate_qr_image(
     content: str,
     scale: int = 10,
@@ -125,7 +122,6 @@ def generate_qr_image(
         version=min_version,
     )
 
-
     image = _render_qr_image(qr, scale, dark, light)
     if logo_bytes is not None:
         image = _overlay_logo(
@@ -146,7 +142,7 @@ def generate_vcard_qr(
 ) -> bytes:
     content = segno.helpers.make_vcard_data(
         name=name,
-        displayname=displayname,
+        displayname=displayname if displayname is not None else name,
         email=email,
         phone=phone,
         url=url,
@@ -207,17 +203,10 @@ def generate_epc_qr(
     scale: int = 10,
     logo_bytes: bytes | None = None,
 ) -> bytes:
-    content = segno.helpers._make_epc_qr_data(
+    content = segno.helpers._make_epc_qr_data(  # type: ignore[attr-defined]
         name=name,
         iban=iban,
         amount=amount,
         text=text,
     )
     return generate_qr_image(content, scale=scale, logo_bytes=logo_bytes)
-
-
-
-
-
-
-
