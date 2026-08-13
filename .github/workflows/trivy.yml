@@ -33,10 +33,11 @@ jobs:
 
       - name: Upload Trivy filesystem SARIF
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        if: success() || failure()
         with:
           sarif_file: "trivy-fs.sarif"
           category: "trivy-filesystem"
+        continue-on-error: true
 
   config:
     name: Trivy — Dockerfile Misconfiguration
@@ -60,7 +61,8 @@ jobs:
 
       - name: Upload Trivy config SARIF
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        if: success() || failure()
         with:
           sarif_file: "trivy-config.sarif"
           category: "trivy-config"
+        continue-on-error: true

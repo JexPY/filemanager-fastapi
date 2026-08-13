@@ -104,13 +104,15 @@ class LocalStorage(StorageBackend):
 
     def _resolve(self, key: str) -> Path:
         # Guard against path traversal escaping the storage root.
-        target = (self._root / key).resolve()
-        if target != self._root and self._root not in target.parents:
+        safe_key = key.lstrip("/\\")
+        target = (self._root / safe_key).resolve()
+        if not target.is_relative_to(self._root):
             raise StorageError(f"Invalid object key outside storage root: {key!r}")
         return target
 
     def public_url(self, key: str) -> str:
-        return f"{self._base}/{key}" if self._base else key
+        safe_key = key.lstrip("/")
+        return f"{self._base}/{safe_key}" if self._base else safe_key
 
     def local_path(self, key: str) -> str:
         """The object's on-disk path, through the same traversal guard as
@@ -196,15 +198,16 @@ class S3Storage(StorageBackend):
         return self._client
 
     def _object_url(self, key: str) -> str:
+        safe_key = key.lstrip("/")
         # Explicit CDN / public base wins (CloudFront, custom domain).
         if self._public_base:
-            return f"{self._public_base}/{key}"
+            return f"{self._public_base}/{safe_key}"
         # R2 / MinIO expose a path-style endpoint.
         if self._endpoint:
-            return f"{self._endpoint.rstrip('/')}/{self._bucket}/{key}"
+            return f"{self._endpoint.rstrip('/')}/{self._bucket}/{safe_key}"
         # Real AWS: virtual-hosted style.
         host = f"s3.{self._region}.amazonaws.com" if self._region else "s3.amazonaws.com"
-        return f"https://{self._bucket}.{host}/{key}"
+        return f"https://{self._bucket}.{host}/{safe_key}"
 
     def public_url(self, key: str) -> str:
         return self._object_url(key)
@@ -295,9 +298,10 @@ class GCSStorage(StorageBackend):
         return self._client
 
     def _object_url(self, key: str) -> str:
+        safe_key = key.lstrip("/")
         if self._public_base:
-            return f"{self._public_base}/{key}"
-        return f"https://storage.googleapis.com/{self._bucket}/{key}"
+            return f"{self._public_base}/{safe_key}"
+        return f"https://storage.googleapis.com/{self._bucket}/{safe_key}"
 
     def public_url(self, key: str) -> str:
         return self._object_url(key)
