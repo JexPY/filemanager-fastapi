@@ -115,12 +115,10 @@ def generate_qr_image(
     # modules, exceeding Reed-Solomon Level H capacity (~30%).
     # When a logo is present, set a minimum QR version of 3 (29x29 modules)
     # so logo coverage stays ~3% of data modules, keeping the code compact and scannable.
-    min_version = 3 if logo_bytes is not None else None
-    qr = segno.make(
-        content,
-        error="h" if logo_bytes is not None else None,
-        version=min_version,
-    )
+    error_level = "h" if logo_bytes is not None else None
+    qr = segno.make(content, error=error_level)
+    if logo_bytes is not None and isinstance(qr.version, int) and qr.version < 3:
+        qr = segno.make(content, error=error_level, version=3)
 
     image = _render_qr_image(qr, scale, dark, light)
     if logo_bytes is not None:
