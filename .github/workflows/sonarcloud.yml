@@ -28,6 +28,8 @@ jobs:
           docker compose run --name test-runner test pytest --cov=app --cov-report=xml:coverage.xml
           docker cp test-runner:/app/coverage.xml ./coverage.xml
           docker rm -f test-runner
+          sed -i 's|/app/app|app|g' coverage.xml || true
+          sed -i 's|/app/|./|g' coverage.xml || true
 
       - name: SonarCloud Scan
         uses: SonarSource/sonarcloud-github-action@master
