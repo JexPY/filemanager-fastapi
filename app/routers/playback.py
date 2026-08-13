@@ -18,16 +18,19 @@ from app.services.storage import StorageError, get_storage
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+_NOT_FOUND_DETAIL = "Not found"
+
 
 @router.get(
     "/files/{file_id}/download",
     tags=["Sharing & Playback"],
-    summary="Download / stream video",
+    summary="Get video stream redirect",
+    response_class=RedirectResponse,
 )
-async def download_file_endpoint(
+async def stream_video(
     file_id: Annotated[str, Path(max_length=64)],
     request: Request,
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)] = None,
 ):
     """The permanent, backend-agnostic playback URL -- the one clients embed.
     Visibility decides the auth *and* the URL form:
@@ -48,12 +51,12 @@ async def download_file_endpoint(
     try:
         record = await store.get_by_id(file_id)
     except MetadataError as exc:
-        logger.error("Failed to load upload %s for download: %s", file_id, exc)
+        logger.exception("Failed to load upload for download")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
         ) from exc
     if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
     if record.kind != KIND_VIDEO:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Downloads are only for videos"
@@ -108,7 +111,7 @@ async def play_shared_video(share_token: Annotated[str, Path(max_length=128)]):
         ) from exc
 
     if record is None or record.kind != KIND_VIDEO:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
 
     try:
         return await resolve_playback(

@@ -65,7 +65,7 @@ async def generate_poster(
     try:
         task = await generate_poster_task.kiq(upload_id=file_id, at_seconds=at_seconds)
     except Exception as exc:
-        logger.error("Failed to enqueue poster generation for %s: %s", file_id, exc)
+        logger.exception("Failed to enqueue poster generation task")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Poster generation temporarily unavailable",

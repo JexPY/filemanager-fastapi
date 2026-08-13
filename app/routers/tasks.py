@@ -60,7 +60,7 @@ async def get_task_status(
         # internal /tmp paths) is server-side detail only -- never echoed to
         # the caller, unlike the rest of this route which was already careful
         # about that (StorageError -> generic 502 above).
-        logger.error("Task %s failed: %s", task_id, task_result.error)
+        logger.warning("Task execution failed")
         return {"task_id": task_id, "status": "failed", "error": "Video processing failed"}
 
     return {"task_id": task_id, "status": "completed", "result": task_result.return_value}
