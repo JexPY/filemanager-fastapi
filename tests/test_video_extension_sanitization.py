@@ -18,7 +18,7 @@ from tests.conftest import fixture_bytes
         ("weird.m/p4", "mp4"),  # '/' is stripped, not treated as a separator
         ("weird.m\x00p4", "mp4"),
         ("long." + "a" * 40, "aaaaaaaa"),
-        ("unicode.‮", "bin"),  # right-to-left override char -> stripped to nothing
+        ("unicode.\u202e", "bin"),  # right-to-left override char -> stripped to nothing
         ("", "bin"),
     ],
 )

@@ -136,10 +136,10 @@ async def _process_single_image(
 
     except HTTPException:
         raise
-    except Exception as exc:
+    except Exception:
         if raise_on_error:
             raise
-        logger.error("Failed to process bulk image item: %s", exc)
+        logger.exception("Failed to process bulk image item")
         return None
 
 
