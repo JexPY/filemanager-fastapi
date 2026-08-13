@@ -49,13 +49,31 @@ a production-grade feature set — but the spirit is the same.
 
 Two containers, one codebase:
 
-- **`api`** — FastAPI + uvicorn. Handles all HTTP. Validates, processes, and stores uploads.
-- **`worker`** — TaskIQ. Runs FFmpeg video compression asynchronously via Redis.
+- **`api`** — FastAPI + uvicorn. Handles all HTTP endpoints, validation, and direct storage.
+- **`worker`** — TaskIQ + FFmpeg. Processes video compression asynchronously via Redis.
 
-```
-client → api ──► image : pyvips strip/encode → storage → imgproxy thumbnail URL
-              ──► video : storage (raw key) → Redis → worker → ffmpeg → storage
-              ──► qrcode: segno → pyvips → PNG (returned inline)
+```mermaid
+flowchart TD
+    Client[Client] -->|HTTP Request| API[api container: FastAPI + Uvicorn]
+
+    subgraph Image ["📷 Image Flow"]
+        API -->|Image Upload| VIPS["pyvips (Strip Metadata & Encode WebP)"]
+        VIPS --> Storage[("Storage (Local / S3 / GCS)")]
+        Storage --> Imgproxy["imgproxy (Signed Thumbnails)"]
+    end
+
+    subgraph Video ["🎥 Video Flow (Async)"]
+        API -->|Video Upload| Stage["Stage Raw File to Storage"]
+        Stage --> Redis[("Redis Queue")]
+        Redis --> Worker["worker container (TaskIQ)"]
+        Worker --> FFmpeg["FFmpeg (H.264 / AAC Compression)"]
+        FFmpeg --> Storage
+    end
+
+    subgraph QR ["📱 QR Code Flow"]
+        API -->|Generate QR| Segno["segno + pyvips"]
+        Segno -->|PNG Response| Client
+    end
 ```
 
 Key behaviours worth knowing upfront:
