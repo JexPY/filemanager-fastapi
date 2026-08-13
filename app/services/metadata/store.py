@@ -152,5 +152,5 @@ class MetadataStore(ABC):
         """Unscoped lookup by share token -- the token *is* the grant (like
         get_by_id for the worker), so no owner scoping. Unknown token -> None."""
 
-    async def aclose(self) -> None:  # noqa: B027 -- intentional no-op default, not abstract
+    async def aclose(self) -> None:  # noqa: B027
         """Release any pooled clients. Default is a no-op."""

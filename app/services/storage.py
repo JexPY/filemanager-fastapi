@@ -66,7 +66,7 @@ class StorageBackend(ABC):
     async def aclose(self) -> None:  # noqa: B027
         """Release any long-lived clients. Default is a no-op."""
 
-    async def presigned_get_url(  # noqa: B027 -- intentional default, not abstract
+    async def presigned_get_url(  # noqa: B027
         self, key: str, expires_in: int = 3600
     ) -> str | None:
         """Temporary signed GET URL, for backends where the plain object URL

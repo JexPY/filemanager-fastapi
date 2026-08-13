@@ -20,11 +20,12 @@ from app.services.qr_generator import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 _IBAN_RE = re.compile(r"^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$")
 
 _SCALE_DESC = "QR code pixel scale factor (1 to 20, default 10)"
 _LOGO_DESC = "Optional logo image overlay."
+_MEDIA_TYPE_PNG = "image/png"
 
 
 async def _run_qr_generator(func, *args, **kwargs) -> bytes:
@@ -68,7 +69,7 @@ async def generate_qrcode(
     png_data = await _run_qr_generator(
         generate_qr_image, content, scale=scale, logo_bytes=logo_bytes
     )
-    return Response(content=png_data, media_type="image/png")
+    return Response(content=png_data, media_type=_MEDIA_TYPE_PNG)
 
 
 @router.post(
@@ -105,7 +106,7 @@ async def generate_qrcode_vcard(
         scale=scale,
         logo_bytes=logo_bytes,
     )
-    return Response(content=png_data, media_type="image/png")
+    return Response(content=png_data, media_type=_MEDIA_TYPE_PNG)
 
 
 @router.post(
@@ -140,7 +141,7 @@ async def generate_qrcode_mecard(
         scale=scale,
         logo_bytes=logo_bytes,
     )
-    return Response(content=png_data, media_type="image/png")
+    return Response(content=png_data, media_type=_MEDIA_TYPE_PNG)
 
 
 @router.post(
@@ -176,7 +177,7 @@ async def generate_qrcode_wifi(
         scale=scale,
         logo_bytes=logo_bytes,
     )
-    return Response(content=png_data, media_type="image/png")
+    return Response(content=png_data, media_type=_MEDIA_TYPE_PNG)
 
 
 @router.post(
@@ -204,7 +205,7 @@ async def generate_qrcode_geo(
         scale=scale,
         logo_bytes=logo_bytes,
     )
-    return Response(content=png_data, media_type="image/png")
+    return Response(content=png_data, media_type=_MEDIA_TYPE_PNG)
 
 
 @router.post(
@@ -246,4 +247,4 @@ async def generate_qrcode_epc(
         scale=scale,
         logo_bytes=logo_bytes,
     )
-    return Response(content=png_data, media_type="image/png")
+    return Response(content=png_data, media_type=_MEDIA_TYPE_PNG)

@@ -15,6 +15,8 @@ from app.urls import public_url
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+_STORE_UNAVAILABLE_DETAIL = "Metadata store unavailable"
+
 
 @router.get(
     "/files",
@@ -36,9 +38,9 @@ async def list_files(
         records = await store.list(owner, kind=kind, limit=limit, offset=offset)
         total_count = await store.count(owner, kind=kind)
     except MetadataError as exc:
-        logger.error("Failed to list uploads for %s: %s", owner, exc)
+        logger.exception("Failed to list uploads")
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     return {
         "files": [record.to_public() for record in records],
@@ -66,7 +68,7 @@ async def get_file(
     except MetadataError as exc:
         logger.error("Failed to load upload %s: %s", file_id, exc)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -103,7 +105,7 @@ async def set_file_visibility(
     except MetadataError as exc:
         logger.error("Failed to load upload %s for visibility: %s", file_id, exc)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -117,7 +119,7 @@ async def set_file_visibility(
     except MetadataError as exc:
         logger.error("Failed to set visibility on %s: %s", file_id, exc)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     # updated is None only on a delete race between the load and the update;
     # treat it as gone.
@@ -148,7 +150,7 @@ async def create_share_link(
     except MetadataError as exc:
         logger.error("Failed to load upload %s for share: %s", file_id, exc)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -163,7 +165,7 @@ async def create_share_link(
     except MetadataError as exc:
         logger.error("Failed to set share token on %s: %s", file_id, exc)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -192,7 +194,7 @@ async def revoke_share_link(
     except MetadataError as exc:
         logger.error("Failed to load upload %s for share revoke: %s", file_id, exc)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -202,7 +204,7 @@ async def revoke_share_link(
     except MetadataError as exc:
         logger.error("Failed to clear share token on %s: %s", file_id, exc)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -232,7 +234,7 @@ async def delete_upload(
     except MetadataError as exc:
         logger.error("Failed to load upload %s for delete: %s", file_id, exc)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -250,7 +252,7 @@ async def delete_upload(
     except MetadataError as exc:
         logger.error("Failed to delete record %s: %s", file_id, exc)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
 
     # Cascade: a video's poster is a derived object with no standalone meaning,
