@@ -45,48 +45,92 @@ a production-grade feature set — but the spirit is the same.
 
 ---
 
-## What it does
+## Architecture & How It Works
 
-Two containers, one codebase:
-
-- **`api`** — FastAPI + uvicorn. Handles all HTTP endpoints, validation, and direct storage.
-- **`worker`** — TaskIQ + FFmpeg. Processes video compression asynchronously via Redis.
+Filemanager-FastAPI is built around an **Origin Shield** and **Async Worker** architecture designed for ultra-low latency, zero-copy streaming, and resilient media processing.
 
 ```mermaid
+%%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#1e293b', 'primaryTextColor': '#f8fafc', 'primaryBorderColor': '#3b82f6', 'lineColor': '#60a5fa', 'secondaryColor': '#0f172a', 'tertiaryColor': '#1e1e2e'}}}%%
 flowchart TD
-    Client[Client] -->|HTTP Request| API[api container: FastAPI + Uvicorn]
-
-    subgraph Image ["📷 Image Flow"]
-        API -->|Image Upload| VIPS["pyvips (Strip Metadata & Encode WebP)"]
-        VIPS --> Storage[("Storage (Local / S3 / GCS)")]
-        Storage --> Imgproxy["imgproxy (Signed Thumbnails)"]
+    subgraph Ingress ["🛡️ Ingress & Edge Layer"]
+        Client(["🌍 Client / App / Browser"])
+        Nginx["🚀 NGINX Entry Proxy (:9000)<br/><i>Rate Limiting • Cache Shield • Range/Seek</i>"]
     end
 
-    subgraph Video ["🎥 Video Flow (Async)"]
-        API -->|Video Upload| Stage["Stage Raw File to Storage"]
-        Stage --> Redis[("Redis Queue")]
-        Redis --> Worker["worker container (TaskIQ)"]
-        Worker --> FFmpeg["FFmpeg (H.264 / AAC Compression)"]
-        FFmpeg --> Storage
+    subgraph AppPlane ["⚡ API Control Plane (FastAPI)"]
+        API["📡 FastAPI Application (:9001)<br/><i>Auth • Validation • Dedup • Routing</i>"]
+        AuthModule{"🔑 Auth & Scope Guard<br/><i>Static Tokens | HS256 JWTs</i>"}
+        VIPS["⚡ libvips Pipeline<br/><i>Strip EXIF/GPS • WebP Encode</i>"]
+        Segno["📱 Segno Engine<br/><i>QR Codes • Logo Overlays</i>"]
+        DB[(🐘 PostgreSQL 17<br/><i>Metadata & System of Record</i>)]
     end
 
-    subgraph QR ["📱 QR Code Flow"]
-        API -->|Generate QR| Segno["segno + pyvips"]
-        Segno -->|PNG Response| Client
+    subgraph AsyncPlane ["⚙️ Async Worker Plane (TaskIQ)"]
+        Redis[("⚡ Redis Broker & Queue")]
+        Worker["🛠️ TaskIQ Worker<br/><i>FFmpeg Engine + libvips</i>"]
+        PosterTask["🖼️ Poster Frame Extraction"]
+        WebhookTask["🔔 HMAC-Signed Webhook Dispatcher"]
     end
+
+    subgraph StoragePlane ["💾 Storage & Serving Tier"]
+        Storage[("📦 Storage Backend<br/><i>Local Disk / S3 / GCS</i>")]
+        Imgproxy["🖼️ imgproxy<br/><i>On-Demand Signed Transforms</i>"]
+    end
+
+    %% Ingress Connections
+    Client -->|HTTP Requests| Nginx
+    Nginx -->|Proxy Pass| API
+    Nginx -.->|⚡ X-Accel-Redirect / Native Range| Storage
+
+    %% API Internal Flow
+    API --> AuthModule
+    AuthModule -->|POST /upload/image| VIPS
+    AuthModule -->|POST /generate/qrcode/*| Segno
+    AuthModule -->|POST /upload/video| API
+    
+    VIPS -->|Stream WebP| Storage
+    API -->|Stage Raw Video Key| Storage
+    API -->|Enqueue Task| Redis
+    API <-->|Idempotency & State| DB
+    Segno -->|PNG Response| Client
+
+    %% Worker Flow
+    Redis --> Worker
+    Worker -->|Fetch Raw Key| Storage
+    Worker -->|Transcode & Compress| Storage
+    Worker --> PosterTask
+    PosterTask -->|Generate Poster WebP| Storage
+    Worker -->|Update State| DB
+    Worker --> WebhookTask
+    WebhookTask -.->|Signed POST + SSRF Guard| Client
+
+    %% Playback & Serving Flow
+    Imgproxy <--> Storage
+    Nginx <-->|Origin Cached Shield| Imgproxy
 ```
 
-Key behaviours worth knowing upfront:
+### Core Architecture Highlights
 
-- **Images** are decoded, stripped of all metadata (EXIF/GPS/ICC), re-encoded to WebP, and
-  stored. The response includes signed imgproxy URLs for a thumbnail and an optimized version.
-- **Videos** are staged, then compressed asynchronously. Poll `GET /tasks/{id}` or supply a
-  `callback_url` for a signed webhook on completion.
-- **QR Codes** are generated using Segno + pyvips with optional logo overlay. Accepted logo formats: **PNG, JPEG, GIF, WebP, HEIC** (SVG is rejected for security).
-- **Uploads are idempotent** — re-uploading identical bytes (per token) returns the existing
-  record instead of creating a duplicate, keyed on SHA-256.
-- **Every upload is owner-scoped** — each bearer token maps to an owner; listing and deletion
-  are isolated.
+- **🛡️ Origin Shield NGINX Reverse Proxy (`:9000`)**  
+  Terminates external traffic, enforces burst-safe rate limiting on upload routes, isolates `imgproxy` behind cache locks to prevent thundering-herd stampedes, and delivers local video via zero-copy **`X-Accel-Redirect`** (the Python process never touches video playback bytes).
+  
+- **⚡ Synchronous Image Engine (libvips)**  
+  Blazing-fast image validation, decompression-bomb protection, EXIF/GPS/ICC metadata stripping, and instant WebP encoding. Serves dynamically resized & cropped thumbnails via HMAC-SHA256 signed `imgproxy` URLs.
+
+- **🎬 Async Video Pipeline (TaskIQ + FFmpeg)**  
+  Offloads heavy video encoding (H.264/AAC, WebM VP9/AV1) to dedicated worker processes. Supports automated duration capping, thumbnail poster frame extraction, and real-time task status polling.
+
+- **📱 Versatile QR Code Generator (Segno + pyvips)**  
+  Stateless, lightning-fast QR generation for plain URLs, vCards, MeCards, Wi-Fi networks, Geo-coordinates, and SEPA EPC bank transfers with high-res logo overlays and byte-capped security.
+
+- **🐘 PostgreSQL System of Record & Alembic**  
+  Every media asset is tracked with immutable owner-scoping, content-hash deduplication (SHA-256), and playback visibility (`private` vs. `public`).
+
+- **🔒 Capability-Based Security & Dual Auth**  
+  Supports static backend master tokens for internal services and scoped HS256 capability JWTs (`upload:image`, `upload:video`) for secure, direct client uploads without leaking master credentials.
+
+- **🔔 Resilient Webhook Delivery with SSRF Guard**  
+  Pushes HMAC-SHA256 signed event notifications upon video processing completion, complete with strict DNS/IP validation, dead-letter recording, and manual redelivery replay.
 
 ---
 
