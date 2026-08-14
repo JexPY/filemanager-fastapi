@@ -35,7 +35,8 @@ async def test_list_returns_only_callers_records_newest_first(
     assert resp.status_code == 200
     files = resp.json()["files"]
     assert [f["id"] for f in files] == [second.id, first.id]  # newest first, no leakage
-    assert files[0]["storage_key"] == "images/b.webp"
+    assert "storage_key" not in files[0]
+    assert "content_hash" not in files[0]
     assert "thumbnail_url" in files[0]
     assert "/rs:fill:300:300:0/g:no/" in files[0]["thumbnail_url"]
 
@@ -99,7 +100,8 @@ async def test_get_returns_the_record(
     assert resp.status_code == 200
     body = resp.json()
     assert body["id"] == record.id
-    assert body["storage_key"] == "images/a.webp"
+    assert "storage_key" not in body
+    assert "content_hash" not in body
     assert body["status"] == "ready"
     assert "thumbnail_url" in body
     assert "/rs:fill:300:300:0/g:no/" in body["thumbnail_url"]

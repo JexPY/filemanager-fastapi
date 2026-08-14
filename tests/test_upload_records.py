@@ -124,6 +124,8 @@ async def test_to_public_returns_direct_imgproxy_url(
         status="ready",
     )
     public_data = image.to_public()
+    assert "storage_key" not in public_data
+    assert "content_hash" not in public_data
     assert "url" in public_data
     assert "/rs:auto/" in public_data["url"]
     assert "/files/" not in public_data["url"]

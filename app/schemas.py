@@ -110,12 +110,10 @@ class FileRecord(BaseModel):
     id: str
     kind: str = Field(description="'image' or 'video'")
     status: str = Field(description="'processing' | 'ready' | 'failed'")
-    storage_key: str
     content_type: str
     size_bytes: int
     width: int | None = None
     height: int | None = None
-    content_hash: str | None = None
     task_id: str | None = None
     original_filename: str | None = None
     duration_seconds: float | None = None
