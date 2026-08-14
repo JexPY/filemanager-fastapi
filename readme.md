@@ -43,51 +43,148 @@ a production-grade feature set — but the spirit is the same.
 
 ---
 
-## Architecture
+## Architecture & System Design
+
+Filemanager-FastAPI is architected as an **Origin Shield** and **Distributed Worker** system designed for high throughput, bounded memory consumption, and zero-copy media streaming.
+
+### Container Topology
 
 ```mermaid
-flowchart LR
-    Client[Client / App] -->|HTTP Requests| Nginx[NGINX Entry Proxy<br/>:9000]
-    
-    Nginx -->|API Routes| API[FastAPI App<br/>:9001]
-    Nginx -->|Image Transforms| Imgproxy[imgproxy]
-    Nginx -.->|X-Accel Video Stream| Storage[(Storage Backend<br/>Local / S3 / GCS)]
+flowchart TD
+    Client[Client Applications / Web / Mobile] -->|HTTP Requests :9000| Nginx[NGINX Entry Proxy<br/>Rate Limiting • Cache Shield • X-Accel]
 
-    API -->|Auth & Metadata| DB[(PostgreSQL 17)]
-    API -->|Sync WebP Process| Storage
-    API -->|Enqueue Video Job| Redis[(Redis Queue)]
+    Nginx -->|API Requests| API[FastAPI Application :9001<br/>Auth • Ingestion • libvips Engine • QR Engine]
+    Nginx -->|Transformed Thumbnail Requests| Imgproxy[imgproxy :8080<br/>Dynamic Image Transforms]
+    Nginx -.->|Zero-Copy Local Video Stream| Storage[(Storage Backend<br/>Local Disk / S3 / GCS)]
 
-    Redis --> Worker[TaskIQ Worker<br/>FFmpeg Engine]
-    Worker -->|Transcode & Poster| Storage
-    Worker -->|Update Status| DB
-    Worker -.->|Signed Webhook| Client
+    API -->|Metadata & Deduplication| DB[(PostgreSQL 17)]
+    API -->|Save WebP / Stage Raw Video| Storage
+    API -->|Enqueue Video Transcode| Redis[(Redis 7)]
 
-    Imgproxy -->|Read Source| Storage
+    Redis --> Worker[TaskIQ Worker<br/>FFmpeg Transcoding Engine]
+    Worker -->|Read Raw & Save Transcoded MP4| Storage
+    Worker -->|Update Status & Link Poster| DB
+    Worker -.->|Signed Webhook Notification| Client
+
+    Imgproxy -->|Read Source Image| Storage
 ```
 
-### How It Works
+---
 
-1. **Ingress Layer (NGINX on `:9000`)**
-   - Single public entry point for all API and media traffic.
-   - Enforces burst-safe rate limiting on upload endpoints.
-   - Streams local video directly via zero-copy `X-Accel-Redirect` without loading bytes through the Python application.
-   - Protects `imgproxy` with cache locks to prevent duplicate image rendering.
+### Core Processing Workflows
 
-2. **API Control Plane (FastAPI on `:9001`)**
-   - **Authentication**: Supports static master bearer tokens and scoped HS256 capability JWTs (`upload:image`, `upload:video`).
-   - **Image Pipeline**: Validates dimensions, strips EXIF/GPS/ICC metadata, and encodes to WebP in-memory using `libvips`.
-   - **QR Generator**: Generates PNG QR codes with optional logo overlays (Wi-Fi, vCard, MeCard, Geo, EPC, plain text/URL) via `segno` + `pyvips`.
-   - **State Management**: Tracks asset ownership, SHA-256 idempotency hashes, and access visibility (`public` / `private`) in PostgreSQL.
+#### 1. Image Ingestion & Thumbnail Delivery
+Images are processed synchronously in-memory: metadata (EXIF, GPS, ICC profiles) is stripped, the image is re-encoded to WebP using `libvips`, and stored. The client receives signed `imgproxy` URLs for on-demand resizing and caching.
 
-3. **Async Processing Plane (TaskIQ + FFmpeg)**
-   - Consumes background video transcoding tasks from Redis.
-   - Compresses video to H.264/AAC MP4 with optional duration trimming and optimization presets.
-   - Automatically extracts poster preview frames and saves them as linked image records.
-   - Dispatches HMAC-SHA256 signed event notifications to `callback_url` with SSRF protection.
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant Nginx as NGINX (:9000)
+    participant API as FastAPI (:9001)
+    participant Storage as Storage Backend
+    participant Imgproxy as imgproxy (:8080)
 
-4. **Storage & Serving Tier**
-   - Pluggable storage adapters: Local disk, Amazon S3, Cloudflare R2, MinIO, or Google Cloud Storage.
-   - On-demand image resizing, cropping, and formatting via signed `imgproxy` URLs.
+    Note over Client,API: 1. Image Upload
+    Client->>Nginx: POST /upload/image (Multipart)
+    Nginx->>API: Proxy pass (Rate-limited)
+    API->>API: Strip EXIF/GPS & Encode WebP (libvips)
+    API->>Storage: Save WebP
+    API-->>Client: 200 OK (FileRecord + signed imgproxy URLs)
+
+    Note over Client,Imgproxy: 2. Thumbnail Delivery
+    Client->>Nginx: GET /imgproxy/<signed_url>
+    opt Cache Miss
+        Nginx->>Imgproxy: Fetch resized image
+        Imgproxy->>Storage: Read source WebP
+        Imgproxy-->>Nginx: Return resized bytes
+    end
+    Nginx-->>Client: 200 OK (Cached image bytes)
+```
+
+#### 2. Asynchronous Video Transcoding & Webhooks
+Video uploads stream directly to a disk buffer, stage to storage, and enqueue an asynchronous compression job. The background worker compresses video to H.264/AAC MP4, extracts poster preview frames, updates the database, and fires signed webhooks.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant Nginx as NGINX (:9000)
+    participant API as FastAPI (:9001)
+    participant Redis as Redis Queue
+    participant Worker as TaskIQ Worker
+    participant Storage as Storage Backend
+    participant Webhook as Webhook Receiver
+
+    Client->>Nginx: POST /upload/video (+ optional callback_url)
+    Nginx->>API: Stream upload
+    API->>Storage: Stage raw video
+    API->>Redis: Enqueue transcode job
+    API-->>Client: 202 Accepted (task_id + upload id)
+
+    Redis->>Worker: Consume transcode job
+    Worker->>Storage: Transcode to H.264/AAC MP4 (FFmpeg)
+    Worker->>Storage: Extract poster frame & save WebP
+    Worker->>Worker: Update record status to 'ready'
+
+    opt If callback_url configured
+        Worker->>Webhook: POST HMAC-SHA256 signed event (SSRF Guarded)
+    end
+```
+
+#### 3. Zero-Copy Playback & Streaming
+Videos can be streamed directly with full HTTP Range seeking support. For local disk storage, NGINX handles playback directly via `X-Accel-Redirect` without touching Python runtime memory. For cloud storage (S3/GCS), clients are redirected to secure timed presigned URLs.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant Nginx as NGINX (:9000)
+    participant API as FastAPI (:9001)
+    participant Storage as Storage Backend
+
+    Client->>Nginx: GET /files/{id}/download (or /share/{token})
+    Nginx->>API: Verify auth and visibility
+    
+    alt Local Storage Backend
+        API-->>Nginx: 200 OK (X-Accel-Redirect: /internal-media/<key>)
+        Nginx->>Storage: Zero-copy sendfile from disk
+        Nginx-->>Client: 206 Partial Content (HTTP Range Seeking)
+    else Cloud Storage (S3 / R2 / GCS)
+        API-->>Client: 302 Redirect to timed Presigned URL
+        Client->>Storage: Direct stream from Object Store
+    end
+```
+
+---
+
+### Endpoint Directory
+
+| Category | Method | Endpoint | Auth Required | Description |
+|---|---|---|---|---|
+| **Uploads** | `POST` | `/upload/image` | `upload:image` scope / Master | Synchronous image ingestion: metadata strip + WebP encode. |
+| | `POST` | `/upload/images` | `upload:image` scope / Master | Bulk image ingestion (concurrency limited to 4). |
+| | `POST` | `/upload/video` | `upload:video` scope / Master | Async video upload: disk stream staging + transcode task enqueue. |
+| **Tasks** | `GET` | `/tasks/{task_id}` | Bearer Token | Poll status of asynchronous video compression job. |
+| **Files** | `GET` | `/files` | Bearer Token | Paginated file listing with type, status, and visibility filters. |
+| | `GET` | `/files/{id}` | Bearer Token | Fetch metadata record for specific upload (owner-scoped). |
+| | `DELETE` | `/files/{id}` | Bearer Token | Delete upload from storage and database. |
+| | `PATCH` | `/files/{id}/visibility` | Bearer Token | Toggle video visibility (`public` vs `private`). |
+| **Playback** | `GET` | `/files/{id}/download` | Bearer / Public | Video playback with HTTP Range seeking (X-Accel / Presigned 302). |
+| | `POST` | `/files/{id}/share` | Bearer Token | Mint unlisted secret capability share token for private video. |
+| | `DELETE` | `/files/{id}/share` | Bearer Token | Revoke active share token. |
+| | `GET` | `/share/{token}` | Public | Stream playback for private video via share token. |
+| **Posters** | `POST` | `/files/{id}/poster` | Bearer Token | Extract on-demand WebP poster frame from ready video. |
+| **Webhooks** | `POST` | `/files/{id}/redeliver` | Bearer Token | Replay dead-lettered webhook notification. |
+| **QR Codes** | `POST` | `/generate/qrcode` | Bearer Token | Generate plain text or URL QR code PNG. |
+| | `POST` | `/generate/qrcode/wifi` | Bearer Token | Generate Wi-Fi configuration QR code PNG. |
+| | `POST` | `/generate/qrcode/vcard` | Bearer Token | Generate vCard contact QR code PNG. |
+| | `POST` | `/generate/qrcode/mecard` | Bearer Token | Generate MeCard contact QR code PNG. |
+| | `POST` | `/generate/qrcode/geo` | Bearer Token | Generate geographic coordinate QR code PNG. |
+| | `POST` | `/generate/qrcode/epc` | Bearer Token | Generate SEPA EPC banking payment QR code PNG. |
+| **Auth** | `POST` | `/auth/token` | Master Token | Issue scoped HS256 capability JWTs. |
+| **System** | `GET` | `/healthz` | Public | Liveness probe (200 OK). |
+| | `GET` | `/readyz` | Public | Readiness probe (verifies PostgreSQL, Redis, and Storage). |
 
 ---
 
