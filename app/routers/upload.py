@@ -45,17 +45,19 @@ from app.tasks import compress_video_task
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_ALLOWED_VIDEO_CONTENT_TYPES = frozenset({
-    "video/mp4",
-    "video/webm",
-    "video/quicktime",
-    "video/x-matroska",
-    "video/x-msvideo",
-    "video/mpeg",
-    "video/ogg",
-    "video/3gpp",
-    "application/octet-stream",  # keep as fallback — browsers often send this
-})
+_ALLOWED_VIDEO_CONTENT_TYPES = frozenset(
+    {
+        "video/mp4",
+        "video/webm",
+        "video/quicktime",
+        "video/x-matroska",
+        "video/x-msvideo",
+        "video/mpeg",
+        "video/ogg",
+        "video/3gpp",
+        "application/octet-stream",  # keep as fallback — browsers often send this
+    }
+)
 
 _BULK_IMAGE_CONCURRENCY = asyncio.Semaphore(4)
 
