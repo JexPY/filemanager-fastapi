@@ -214,3 +214,34 @@ async def test_share_non_video_token_404(
     )
     await fake_metadata.set_share_token(image.id, OWNER, "img-token")
     assert (await client.get("/share/img-token")).status_code == 404
+
+
+def test_sanitize_content_disposition_filename() -> None:
+    from app.routers.utils import _sanitize_content_disposition_filename
+
+    assert _sanitize_content_disposition_filename('evil"name\r\nHeader: inject.mp4') == "evil_name__Header: inject.mp4"
+    assert _sanitize_content_disposition_filename('test\\file"name.mp4') == "test_file_name.mp4"
+    assert _sanitize_content_disposition_filename("") == "download"
+    assert len(_sanitize_content_disposition_filename("a" * 300)) == 255
+
+
+async def test_download_sanitizes_content_disposition_header(
+    client: httpx.AsyncClient,
+    fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    rec = await fake_metadata.create(
+        owner=OWNER,
+        kind="video",
+        storage_key="videos/v_compressed.mp4",
+        content_type="video/mp4",
+        size_bytes=1,
+        status="ready",
+        original_filename='evil"name\r\nHeader: inject.mp4',
+    )
+    rec = await fake_metadata.set_visibility(rec.id, OWNER, "public")
+    assert rec is not None
+    resp = await client.get(f"/files/{rec.id}/download")
+    assert resp.status_code == 200
+    assert resp.headers["content-disposition"] == 'inline; filename="evil_name__Header: inject.mp4"'

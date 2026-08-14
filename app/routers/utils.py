@@ -107,6 +107,12 @@ def _assert_safe_media_key(storage_key: str) -> None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid path")
 
 
+def _sanitize_content_disposition_filename(filename: str) -> str:
+    """Strip characters that could break or inject into the Content-Disposition header."""
+    cleaned = re.sub(r'[\x00-\x1f\x7f"\\]', "_", filename)
+    return cleaned[:255] if cleaned else "download"
+
+
 def _xaccel_response(
     storage_key: str, filename: str | None = None, media_type: str = "video/mp4"
 ) -> Response:
@@ -120,7 +126,8 @@ def _xaccel_response(
     response = Response(media_type=media_type)
     response.headers["X-Accel-Redirect"] = f"/internal-media/{storage_key}"
     if filename:
-        response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
+        safe_name = _sanitize_content_disposition_filename(filename)
+        response.headers["Content-Disposition"] = f'inline; filename="{safe_name}"'
     return response
 
 
@@ -135,7 +142,11 @@ def _local_file_response(
     path = Path(settings.LOCAL_STORAGE_DIR) / storage_key
     if not path.is_file():
         raise StorageError(f"Object not found: {storage_key!r}")
-    headers = {"Content-Disposition": f'inline; filename="{filename}"'} if filename else None
+    if filename:
+        safe_name = _sanitize_content_disposition_filename(filename)
+        headers = {"Content-Disposition": f'inline; filename="{safe_name}"'}
+    else:
+        headers = None
     return FileResponse(path, media_type=media_type, headers=headers)
 
 
