@@ -70,6 +70,7 @@ async def lifespan(app: FastAPI):
     # Release pooled storage + metadata clients held by the web process.
     await close_metadata_store()
     await close_storage()
+    await health.close_redis()
     if not broker.is_worker_process:
         await broker.shutdown()
 
