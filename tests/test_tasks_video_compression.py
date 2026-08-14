@@ -86,6 +86,37 @@ async def test_successful_compression_uploads_output_marks_ready_and_deletes_raw
     assert raw_key in fake_storage.deleted_keys
 
 
+async def test_compression_task_streams_output_via_upload_from_path(
+    fake_storage: InMemoryStorageBackend,
+    fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_key = "raw/videos/stream_test.mp4"
+    fake_storage.objects[raw_key] = fixture_bytes("tiny.mp4")
+    upload_id = await _seed_processing(fake_metadata, raw_key)
+
+    from_path_called: list[str] = []
+    original_upload_from_path = tasks_module.upload_file_from_path
+
+    async def tracking_upload_from_path(
+        path: str, key: str, content_type: str = "application/octet-stream"
+    ) -> Any:
+        from_path_called.append(path)
+        return await original_upload_from_path(path, key, content_type)
+
+    async def fail_upload_file(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("upload_file (bytes) should not be called by compress_video_task")
+
+    monkeypatch.setattr(tasks_module, "upload_file_from_path", tracking_upload_from_path)
+    monkeypatch.setattr(tasks_module, "upload_file", fail_upload_file)
+
+    result = await compress_video_task(
+        raw_storage_key=raw_key, original_filename="stream_test.mp4", upload_id=upload_id
+    )
+    assert result == {"status": "success", "upload_id": upload_id}
+    assert len(from_path_called) == 1
+
+
 async def test_cropping_flags_truncated(
     fake_storage: InMemoryStorageBackend,
     fake_metadata: InMemoryMetadataStore,

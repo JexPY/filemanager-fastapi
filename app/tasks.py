@@ -24,7 +24,13 @@ from app.services.metadata import (
     UploadRecord,
     get_metadata_store,
 )
-from app.services.storage import StorageError, delete_file, get_storage, upload_file
+from app.services.storage import (
+    StorageError,
+    delete_file,
+    get_storage,
+    upload_file,
+    upload_file_from_path,
+)
 from app.services.webhooks import deliver_webhook
 
 logger = logging.getLogger(__name__)
@@ -89,7 +95,7 @@ async def _probe_video_metadata(input_path: str) -> tuple[float | None, int | No
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await asyncio.wait_for(
-            process.communicate(), timeout=settings.FFMPEG_TIMEOUT_SECONDS
+            process.communicate(), timeout=settings.FFPROBE_TIMEOUT_SECONDS
         )
         if process.returncode != 0:
             return None, None, None
@@ -377,10 +383,7 @@ async def compress_video_task(
         )
         await _run_ffmpeg_compression(ffmpeg_args)
 
-        async with aiofiles.open(output_path, "rb") as f:
-            output_data = await f.read()
-
-        obj = await upload_file(output_data, output_key, content_type)
+        obj = await upload_file_from_path(output_path, output_key, content_type)
 
         # Flip the record from `processing` to `ready`, pointing it at the
         # compressed object. A None result means the owner DELETEd the upload
