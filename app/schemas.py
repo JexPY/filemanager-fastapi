@@ -75,7 +75,6 @@ class VideoUploadAcceptedResponse(BaseModel):
     status: Literal["accepted"] = Field(description="Upload accepted; compression enqueued")
     id: str = Field(description="The upload record id (poll /files/{id} until status='ready')")
     task_id: str = Field(description="Compression task id (poll /tasks/{task_id})")
-    raw_key: str = Field(description="Storage key of the staged raw upload")
 
 
 class VideoUploadDuplicateResponse(BaseModel):

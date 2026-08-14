@@ -37,7 +37,8 @@ async def test_video_upload_key_is_never_traversal(
         files={"file": ("../../../etc/passwd.mp4", fixture_bytes("tiny.mp4"), "video/mp4")},
     )
     assert resp.status_code == 202
-    raw_key = resp.json()["raw_key"]
+    assert len(fake_enqueue) == 1
+    raw_key = fake_enqueue[0]["raw_storage_key"]
     assert raw_key.startswith("raw/videos/")
     # exactly one more "/" -- the fixed prefix -- nothing from the filename leaked in
     assert raw_key.count("/") == 2

@@ -510,7 +510,6 @@ async def upload_video(
             "status": "accepted",
             "id": record.id,
             "task_id": task.task_id,
-            "raw_key": raw_key,
         }
     finally:
         with contextlib.suppress(FileNotFoundError):
