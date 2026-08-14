@@ -58,29 +58,29 @@ async def _receiver(handler: Any) -> AsyncIterator[str]:
 # --- Admission -------------------------------------------------------------
 
 
-def test_validate_rejects_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_validate_rejects_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "WEBHOOK_SIGNING_SECRET", "")
     monkeypatch.setattr(settings, "WEBHOOK_ALLOWED_HOSTS", "")
     with pytest.raises(WebhookValidationError, match="not enabled"):
-        validate_callback_url("https://hooks.example.com/x")
+        await validate_callback_url("https://hooks.example.com/x")
 
 
-def test_validate_requires_https(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_validate_requires_https(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "WEBHOOK_SIGNING_SECRET", "s")
     monkeypatch.setattr(settings, "WEBHOOK_ALLOWED_HOSTS", "hooks.example.com")
     monkeypatch.setattr(settings, "WEBHOOK_ALLOW_INSECURE_HTTP", False)
     with pytest.raises(WebhookValidationError, match="https"):
-        validate_callback_url("http://hooks.example.com/x")
+        await validate_callback_url("http://hooks.example.com/x")
 
 
-def test_validate_rejects_host_not_on_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_validate_rejects_host_not_on_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "WEBHOOK_SIGNING_SECRET", "s")
     monkeypatch.setattr(settings, "WEBHOOK_ALLOWED_HOSTS", "hooks.example.com")
     with pytest.raises(WebhookValidationError, match="not allowed"):
-        validate_callback_url("https://evil.example.net/x")
+        await validate_callback_url("https://evil.example.net/x")
 
 
-def test_validate_blocks_private_ip_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_validate_blocks_private_ip_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     # localhost is on the allow-list but resolves to a loopback address; with the
     # private-IP guard on (the default) that must be refused -- the SSRF case.
     monkeypatch.setattr(settings, "WEBHOOK_SIGNING_SECRET", "s")
@@ -88,11 +88,11 @@ def test_validate_blocks_private_ip_by_default(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(settings, "WEBHOOK_ALLOW_INSECURE_HTTP", True)
     monkeypatch.setattr(settings, "WEBHOOK_ALLOW_PRIVATE_IPS", False)
     with pytest.raises(WebhookValidationError, match="disallowed address"):
-        validate_callback_url("http://localhost/x")
+        await validate_callback_url("http://localhost/x")
 
 
-def test_validate_accepts_allowed_host(webhooks_on: None) -> None:
-    assert validate_callback_url("http://localhost/hook") == "http://localhost/hook"
+async def test_validate_accepts_allowed_host(webhooks_on: None) -> None:
+    assert await validate_callback_url("http://localhost/hook") == "http://localhost/hook"
 
 
 # --- Signed delivery -------------------------------------------------------

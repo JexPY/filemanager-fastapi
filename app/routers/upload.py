@@ -392,7 +392,7 @@ async def upload_video(
     # disallowed URL is a clean 400 with nothing staged and no temp to clean up.
     if callback_url is not None:
         try:
-            callback_url = validate_callback_url(callback_url)
+            callback_url = await validate_callback_url(callback_url)
         except WebhookValidationError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

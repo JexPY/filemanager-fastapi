@@ -60,9 +60,9 @@ class WebhookDeliveryResult:
     last_error: str | None
 
 
-def _reject_if_private(host: str) -> None:
+async def _reject_if_private(host: str) -> None:
     try:
-        infos = socket.getaddrinfo(host, None)
+        infos = await asyncio.to_thread(socket.getaddrinfo, host, None)
     except OSError as exc:
         raise WebhookValidationError("callback_url host could not be resolved") from exc
     for info in infos:
@@ -78,7 +78,7 @@ def _reject_if_private(host: str) -> None:
             raise WebhookValidationError("callback_url host resolves to a disallowed address")
 
 
-def validate_callback_url(url: str) -> str:
+async def validate_callback_url(url: str) -> str:
     """Admit a client-supplied callback URL or raise WebhookValidationError.
 
     Called in the api at upload time so the client gets immediate 400 feedback
@@ -102,7 +102,7 @@ def validate_callback_url(url: str) -> str:
         raise WebhookValidationError("callback_url host is not allowed")
 
     if not settings.WEBHOOK_ALLOW_PRIVATE_IPS:
-        _reject_if_private(host)
+        await _reject_if_private(host)
     return url
 
 
