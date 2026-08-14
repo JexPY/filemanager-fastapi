@@ -83,7 +83,9 @@ async def stream_video(
 
     try:
         return await resolve_playback(
-            record.storage_key, filename=record.original_filename or "video.mp4"
+            record.storage_key,
+            filename=record.original_filename or "video.mp4",
+            media_type=record.content_type or "video/mp4",
         )
     except StorageError as exc:
         logger.exception("Failed to resolve playback")
@@ -115,7 +117,9 @@ async def play_shared_video(share_token: Annotated[str, Path(max_length=128)]):
 
     try:
         return await resolve_playback(
-            record.storage_key, filename=record.original_filename or "video.mp4"
+            record.storage_key,
+            filename=record.original_filename or "video.mp4",
+            media_type=record.content_type or "video/mp4",
         )
     except StorageError as exc:
         logger.exception("Failed to resolve playback via share token")

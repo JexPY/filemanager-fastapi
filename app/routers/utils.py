@@ -107,7 +107,9 @@ def _assert_safe_media_key(storage_key: str) -> None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid path")
 
 
-def _xaccel_response(storage_key: str, filename: str | None = None) -> Response:
+def _xaccel_response(
+    storage_key: str, filename: str | None = None, media_type: str = "video/mp4"
+) -> Response:
     """Yield a local video via nginx's X-Accel-Redirect. The app issues the
     header; nginx serves the bytes directly from the volume, natively supporting
     Range/seek. The `media_data` location block must be internal in nginx.conf.
@@ -115,14 +117,16 @@ def _xaccel_response(storage_key: str, filename: str | None = None) -> Response:
     `filename` sets an `inline` Content-Disposition so the player/browser has a
     sensible name for a "save as" without forcing a download."""
     _assert_safe_media_key(storage_key)
-    response = Response(media_type="video/mp4")
+    response = Response(media_type=media_type)
     response.headers["X-Accel-Redirect"] = f"/internal-media/{storage_key}"
     if filename:
         response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
     return response
 
 
-def _local_file_response(storage_key: str, filename: str | None = None) -> Response:
+def _local_file_response(
+    storage_key: str, filename: str | None = None, media_type: str = "video/mp4"
+) -> Response:
     """Yield a local video via Starlette's FileResponse (which does support Range).
     Used ONLY when LOCAL_MEDIA_SERVE_MODE=direct (i.e. dev without nginx). Prod
     always uses xaccel. `filename` sets an `inline` Content-Disposition, matching
@@ -132,10 +136,12 @@ def _local_file_response(storage_key: str, filename: str | None = None) -> Respo
     if not path.is_file():
         raise StorageError(f"Object not found: {storage_key!r}")
     headers = {"Content-Disposition": f'inline; filename="{filename}"'} if filename else None
-    return FileResponse(path, media_type="video/mp4", headers=headers)
+    return FileResponse(path, media_type=media_type, headers=headers)
 
 
-async def resolve_playback(storage_key: str, filename: str | None = None) -> Response:
+async def resolve_playback(
+    storage_key: str, filename: str | None = None, media_type: str = "video/mp4"
+) -> Response:
     """Resolve a video's byte path, keyed on STORAGE_BACKEND (mirrors
     imgproxy.build_source_url's keying): local -> nginx X-Accel (or FileResponse
     in dev); s3/gcp -> 302 to a freshly-minted signed GET URL sized to a viewing
@@ -149,8 +155,8 @@ async def resolve_playback(storage_key: str, filename: str | None = None) -> Res
     backend_name = settings.STORAGE_BACKEND
     if backend_name == "local":
         if settings.LOCAL_MEDIA_SERVE_MODE == "direct":
-            return _local_file_response(storage_key, filename)
-        return _xaccel_response(storage_key, filename)
+            return _local_file_response(storage_key, filename, media_type=media_type)
+        return _xaccel_response(storage_key, filename, media_type=media_type)
 
     backend = await get_storage()
     signed = await backend.presigned_get_url(storage_key, settings.VIDEO_PLAYBACK_URL_TTL_SECONDS)

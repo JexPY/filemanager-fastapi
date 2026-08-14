@@ -25,12 +25,13 @@ async def _seed_video(
     owner: str = OWNER,
     visibility: str = "private",
     key: str = "videos/v_compressed.mp4",
+    content_type: str = "video/mp4",
 ) -> UploadRecord:
     rec = await store.create(
         owner=owner,
         kind="video",
         storage_key=key,
-        content_type="video/mp4",
+        content_type=content_type,
         size_bytes=1,
         status="ready",
     )
@@ -61,6 +62,24 @@ async def test_local_public_download_is_xaccel_no_token(
     assert resp.headers["X-Accel-Redirect"] == "/internal-media/videos/v_compressed.mp4"
     assert resp.headers["content-type"] == "video/mp4"
     assert resp.content == b""  # app emits no bytes; nginx fills the body
+
+
+async def test_local_webm_download_uses_video_webm_content_type(
+    client: httpx.AsyncClient,
+    fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    rec = await _seed_video(
+        fake_metadata,
+        visibility="public",
+        key="videos/v_compressed.webm",
+        content_type="video/webm",
+    )
+    resp = await client.get(f"/files/{rec.id}/download")
+    assert resp.status_code == 200
+    assert resp.headers["X-Accel-Redirect"] == "/internal-media/videos/v_compressed.webm"
+    assert resp.headers["content-type"] == "video/webm"
 
 
 async def test_local_public_download_stays_xaccel_even_with_public_base(
