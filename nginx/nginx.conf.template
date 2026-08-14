@@ -24,7 +24,7 @@ http {
     sendfile      on;
     tcp_nopush    on;
 
-    # Must be >= MAX_VIDEO_UPLOAD_BYTES (default 500 MiB) or nginx 413s uploads
+    # Must be >= MAX_VIDEO_UPLOAD_BYTES (default 2000 MiB) or nginx 413s uploads
     # before they reach the app's own size check.
     client_max_body_size ${NGINX_MAX_BODY_SIZE};
 

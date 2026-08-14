@@ -119,6 +119,34 @@ async def _probe_video_metadata(input_path: str) -> tuple[float | None, int | No
         return None, None, None
 
 
+def _effective_output_duration(
+    input_duration: float | None,
+    start_seconds: float | None,
+    end_seconds: float | None,
+) -> float | None:
+    """Seconds of source the encode will actually produce *before* the
+    VIDEO_MAX_DURATION_SECONDS cap applies -- the requested trim window
+    intersected with what the input really contains. Pure function, so the
+    truncation verdict is testable without running ffmpeg.
+
+    None means the duration couldn't be probed; the caller then reports
+    truncation as false (unknown) rather than guessing.
+
+    The clamp against the input is the point: a caller that passes a
+    deliberately large `end_seconds` to mean "through to the end" would
+    otherwise look like a multi-minute request and get flagged `truncated` even
+    though the whole (short) clip was encoded intact.
+    """
+    if input_duration is None:
+        return None
+    start = start_seconds or 0.0
+    available = max(0.0, input_duration - start)
+    if end_seconds is None:
+        return available
+    requested = max(0.0, end_seconds - start)
+    return min(requested, available)
+
+
 def _build_ffmpeg_args(
     input_source: str,
     output_path: str,
@@ -126,6 +154,7 @@ def _build_ffmpeg_args(
     optimization: str,
     start_seconds: float | None,
     end_seconds: float | None,
+    max_duration_seconds: float | None = None,
 ) -> list[str]:
     """Build the full ffmpeg argument list for video compression.
     Pure function: no I/O, no state. Testable in isolation."""
@@ -136,6 +165,9 @@ def _build_ffmpeg_args(
         ffmpeg_args.extend(["-to", str(end_seconds)])
 
     ffmpeg_args.extend(["-i", input_source])
+
+    if max_duration_seconds is not None and max_duration_seconds > 0:
+        ffmpeg_args.extend(["-t", str(max_duration_seconds)])
 
     if optimization == "balanced":
         ffmpeg_args.extend(["-vf", "scale='min(1280,iw)':-2"])
@@ -376,10 +408,21 @@ async def compress_video_task(
         input_source = await _resolve_ffmpeg_input(raw_storage_key)
         input_duration, width, height = await _probe_video_metadata(input_source)
 
-        truncated = start_seconds is not None or end_seconds is not None
+        requested_duration = _effective_output_duration(input_duration, start_seconds, end_seconds)
+        truncated = bool(
+            requested_duration is not None
+            and settings.VIDEO_MAX_DURATION_SECONDS
+            and requested_duration > settings.VIDEO_MAX_DURATION_SECONDS
+        )
 
         ffmpeg_args = _build_ffmpeg_args(
-            input_source, output_path, output_format, optimization, start_seconds, end_seconds
+            input_source,
+            output_path,
+            output_format,
+            optimization,
+            start_seconds,
+            end_seconds,
+            max_duration_seconds=settings.VIDEO_MAX_DURATION_SECONDS,
         )
         await _run_ffmpeg_compression(ffmpeg_args)
 
