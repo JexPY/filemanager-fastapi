@@ -51,3 +51,16 @@ async def test_video_upload_poster_seconds_passed_to_task(
     assert resp.status_code == 202
     assert len(fake_enqueue) == 1
     assert fake_enqueue[0]["poster_seconds"] == 1.5
+
+
+async def test_video_upload_rejects_unsupported_content_type(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+) -> None:
+    resp = await client.post(
+        "/upload/video",
+        headers=auth_headers,
+        files={"file": ("fake.txt", b"plain text content", "text/plain")},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Unsupported video format"

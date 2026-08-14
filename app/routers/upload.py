@@ -4,7 +4,7 @@ import hashlib
 import logging
 import os
 import uuid
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import (
     APIRouter,
@@ -44,6 +44,20 @@ from app.tasks import compress_video_task
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_ALLOWED_VIDEO_CONTENT_TYPES = frozenset({
+    "video/mp4",
+    "video/webm",
+    "video/quicktime",
+    "video/x-matroska",
+    "video/x-msvideo",
+    "video/mpeg",
+    "video/ogg",
+    "video/3gpp",
+    "application/octet-stream",  # keep as fallback — browsers often send this
+})
+
+_BULK_IMAGE_CONCURRENCY = asyncio.Semaphore(4)
 
 # Scope-gated auth: a static master token passes unconditionally (full access);
 # a capability JWT must carry the matching upload scope, else 403. Built once at
@@ -298,6 +312,11 @@ _BULK_UPLOAD_OPENAPI_EXTRA = {
 }
 
 
+async def _process_single_image_throttled(*args: Any, **kwargs: Any) -> dict | None:
+    async with _BULK_IMAGE_CONCURRENCY:
+        return await _process_single_image(*args, **kwargs)
+
+
 @router.post(
     "/upload/images",
     tags=["Uploads"],
@@ -346,7 +365,7 @@ async def upload_images(
 
     results = await asyncio.gather(
         *[
-            _process_single_image(
+            _process_single_image_throttled(
                 data,
                 owner,
                 optimization,
@@ -397,6 +416,12 @@ async def upload_video(
         except WebhookValidationError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    content_type = file.content_type or "application/octet-stream"
+    if content_type not in _ALLOWED_VIDEO_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported video format"
+        )
+
     # Stream the upload straight to a temp file (bounded memory: one chunk at a
     # time) and hash it incrementally as it lands, instead of buffering the whole
     # body (up to MAX_VIDEO_UPLOAD_BYTES) in RAM. The temp file is removed in the
@@ -410,7 +435,6 @@ async def upload_video(
         f"{raw_content_hash}:{format}:{optimization}:{start_seconds}:{end_seconds}:{poster_seconds}"
     )
     content_hash = hashlib.sha256(signature.encode()).hexdigest()
-    content_type = file.content_type or "application/octet-stream"
     try:
         # Idempotency (video): on a match against this owner's existing
         # `ready`-or-`processing` video (keyed on the raw input hash just
