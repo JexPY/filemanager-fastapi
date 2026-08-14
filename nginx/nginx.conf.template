@@ -78,7 +78,7 @@ http {
         }
 
         # Rate-limit upload endpoints specifically.
-        location ~ ^/upload/(image|video)$ {
+        location ~ ^/upload/(images?|video)$ {
             limit_req zone=upload_limit burst=5 nodelay;
             limit_req_status 429;
 
