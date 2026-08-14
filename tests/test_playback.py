@@ -219,7 +219,10 @@ async def test_share_non_video_token_404(
 def test_sanitize_content_disposition_filename() -> None:
     from app.routers.utils import _sanitize_content_disposition_filename
 
-    assert _sanitize_content_disposition_filename('evil"name\r\nHeader: inject.mp4') == "evil_name__Header: inject.mp4"
+    assert (
+        _sanitize_content_disposition_filename('evil"name\r\nHeader: inject.mp4')
+        == "evil_name__Header: inject.mp4"
+    )
     assert _sanitize_content_disposition_filename('test\\file"name.mp4') == "test_file_name.mp4"
     assert _sanitize_content_disposition_filename("") == "download"
     assert len(_sanitize_content_disposition_filename("a" * 300)) == 255
