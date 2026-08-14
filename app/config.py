@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     # *wall-clock processing time*.
     FFMPEG_TIMEOUT_SECONDS: int = Field(default=120)
 
+    # Timeout for the ffprobe metadata probe step. Much shorter than FFMPEG_TIMEOUT_SECONDS
+    # since probing is fast; a hung probe is a bad input, not a slow encode.
+    FFPROBE_TIMEOUT_SECONDS: int = Field(default=15)
+
     # TTL (seconds) for the presigned GET URL the worker hands ffmpeg as its
     # input on the s3/gcp backends: the worker reads the object in place (over
     # HTTPS, with range requests) instead of downloading it into RAM first. Must
