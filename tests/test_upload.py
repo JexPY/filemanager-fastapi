@@ -1,5 +1,7 @@
 import httpx
+import pytest
 
+from app.config import settings
 from tests.conftest import fixture_bytes
 from tests.fakes import InMemoryMetadataStore
 
@@ -56,12 +58,17 @@ async def test_bulk_image_upload_empty_batch(
     assert resp.status_code == 422
 
 
-async def test_bulk_image_upload_oversized_batch(
-    client: httpx.AsyncClient, auth_headers: dict[str, str]
+async def test_bulk_image_upload_per_file_limit_exceeded(
+    client: httpx.AsyncClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # We can skip testing 50MB exactly in integration,
-    # but we should test too many files.
-    pass
+    monkeypatch.setattr(settings, "MAX_IMAGE_UPLOAD_BYTES", 50)
+    files = [
+        ("files", ("small.png", b"x" * 20, "image/png")),
+        ("files", ("big.png", b"x" * 60, "image/png")),
+    ]
+    resp = await client.post("/upload/images", headers=auth_headers, files=files)
+    assert resp.status_code == 413
+    assert resp.json()["detail"] == "File exceeds 50 bytes"
 
 
 async def test_bulk_image_upload_too_many_files(

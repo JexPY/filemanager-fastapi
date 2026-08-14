@@ -339,7 +339,8 @@ async def upload_images(
     files_data = []
 
     for file in files:
-        data = await _read_capped(file, request, MAX_TOTAL_BYTES - total_bytes)
+        per_file_cap = min(settings.MAX_IMAGE_UPLOAD_BYTES, MAX_TOTAL_BYTES - total_bytes)
+        data = await _read_capped(file, request, per_file_cap)
         total_bytes += len(data)
         files_data.append(data)
 
