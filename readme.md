@@ -26,7 +26,7 @@ A media-processing microservice built with FastAPI. Upload images and videos, ge
 optimized WebP thumbnails via imgproxy and async H.264/AAC-compressed MP4s. Also generates
 QR codes. Storage is pluggable — local disk, S3/R2/MinIO, or Google Cloud Storage.
 
-> 📖 **Full documentation is coming.** For now, the API self-documents at `/docs` (Swagger) and
+> **Full documentation is coming.** For now, the API self-documents at `/docs` (Swagger) and
 > `/redoc`. A dedicated docs site is planned at
 > [**docs.filemanager-fastapi.dev**](https://docs.filemanager-fastapi.dev) *(coming soon)*.
 
@@ -47,40 +47,40 @@ a production-grade feature set — but the spirit is the same.
 
 ## Architecture & How It Works
 
-Filemanager-FastAPI is built around an **Origin Shield** and **Async Worker** architecture designed for ultra-low latency, zero-copy streaming, and resilient media processing.
+Filemanager-FastAPI is built around an **Origin Shield** and **Async Worker** architecture designed for low latency, zero-copy streaming, and resilient media processing.
 
 ```mermaid
 %%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#1e293b', 'primaryTextColor': '#f8fafc', 'primaryBorderColor': '#3b82f6', 'lineColor': '#60a5fa', 'secondaryColor': '#0f172a', 'tertiaryColor': '#1e1e2e'}}}%%
 flowchart TD
-    subgraph Ingress ["🛡️ Ingress & Edge Layer"]
-        Client(["🌍 Client / App / Browser"])
-        Nginx["🚀 NGINX Entry Proxy (:9000)<br/><i>Rate Limiting • Cache Shield • Range/Seek</i>"]
+    subgraph Ingress ["Ingress & Edge Layer"]
+        Client(["Client / App / Browser"])
+        Nginx["NGINX Entry Proxy (:9000)<br/><i>Rate Limiting • Cache Shield • Range/Seek</i>"]
     end
 
-    subgraph AppPlane ["⚡ API Control Plane (FastAPI)"]
-        API["📡 FastAPI Application (:9001)<br/><i>Auth • Validation • Dedup • Routing</i>"]
-        AuthModule{"🔑 Auth & Scope Guard<br/><i>Static Tokens | HS256 JWTs</i>"}
-        VIPS["⚡ libvips Pipeline<br/><i>Strip EXIF/GPS • WebP Encode</i>"]
-        Segno["📱 Segno Engine<br/><i>QR Codes • Logo Overlays</i>"]
-        DB[(🐘 PostgreSQL 17<br/><i>Metadata & System of Record</i>)]
+    subgraph AppPlane ["API Control Plane (FastAPI)"]
+        API["FastAPI Application (:9001)<br/><i>Auth • Validation • Dedup • Routing</i>"]
+        AuthModule{"Auth & Scope Guard<br/><i>Static Tokens | HS256 JWTs</i>"}
+        VIPS["libvips Pipeline<br/><i>Strip EXIF/GPS • WebP Encode</i>"]
+        Segno["Segno Engine<br/><i>QR Codes • Logo Overlays</i>"]
+        DB[(PostgreSQL 17<br/><i>Metadata & System of Record</i>)]
     end
 
-    subgraph AsyncPlane ["⚙️ Async Worker Plane (TaskIQ)"]
-        Redis[("⚡ Redis Broker & Queue")]
-        Worker["🛠️ TaskIQ Worker<br/><i>FFmpeg Engine + libvips</i>"]
-        PosterTask["🖼️ Poster Frame Extraction"]
-        WebhookTask["🔔 HMAC-Signed Webhook Dispatcher"]
+    subgraph AsyncPlane ["Async Worker Plane (TaskIQ)"]
+        Redis[("Redis Broker & Queue")]
+        Worker["TaskIQ Worker<br/><i>FFmpeg Engine + libvips</i>"]
+        PosterTask["Poster Frame Extraction"]
+        WebhookTask["HMAC-Signed Webhook Dispatcher"]
     end
 
-    subgraph StoragePlane ["💾 Storage & Serving Tier"]
-        Storage[("📦 Storage Backend<br/><i>Local Disk / S3 / GCS</i>")]
-        Imgproxy["🖼️ imgproxy<br/><i>On-Demand Signed Transforms</i>"]
+    subgraph StoragePlane ["Storage & Serving Tier"]
+        Storage[("Storage Backend<br/><i>Local Disk / S3 / GCS</i>")]
+        Imgproxy["imgproxy<br/><i>On-Demand Signed Transforms</i>"]
     end
 
     %% Ingress Connections
     Client -->|HTTP Requests| Nginx
     Nginx -->|Proxy Pass| API
-    Nginx -.->|⚡ X-Accel-Redirect / Native Range| Storage
+    Nginx -.->|X-Accel-Redirect / Native Range| Storage
 
     %% API Internal Flow
     API --> AuthModule
@@ -111,25 +111,25 @@ flowchart TD
 
 ### Core Architecture Highlights
 
-- **🛡️ Origin Shield NGINX Reverse Proxy (`:9000`)**  
+- **Origin Shield NGINX Reverse Proxy (`:9000`)**  
   Terminates external traffic, enforces burst-safe rate limiting on upload routes, isolates `imgproxy` behind cache locks to prevent thundering-herd stampedes, and delivers local video via zero-copy **`X-Accel-Redirect`** (the Python process never touches video playback bytes).
   
-- **⚡ Synchronous Image Engine (libvips)**  
-  Blazing-fast image validation, decompression-bomb protection, EXIF/GPS/ICC metadata stripping, and instant WebP encoding. Serves dynamically resized & cropped thumbnails via HMAC-SHA256 signed `imgproxy` URLs.
+- **Synchronous Image Engine (libvips)**  
+  High-speed image validation, decompression-bomb protection, EXIF/GPS/ICC metadata stripping, and instant WebP encoding. Serves dynamically resized and cropped thumbnails via HMAC-SHA256 signed `imgproxy` URLs.
 
-- **🎬 Async Video Pipeline (TaskIQ + FFmpeg)**  
-  Offloads heavy video encoding (H.264/AAC, WebM VP9/AV1) to dedicated worker processes. Supports automated duration capping, thumbnail poster frame extraction, and real-time task status polling.
+- **Async Video Pipeline (TaskIQ + FFmpeg)**  
+  Offloads video encoding (H.264/AAC, WebM VP9/AV1) to dedicated worker processes. Supports automated duration capping, thumbnail poster frame extraction, and real-time task status polling.
 
-- **📱 Versatile QR Code Generator (Segno + pyvips)**  
-  Stateless, lightning-fast QR generation for plain URLs, vCards, MeCards, Wi-Fi networks, Geo-coordinates, and SEPA EPC bank transfers with high-res logo overlays and byte-capped security.
+- **Versatile QR Code Generator (Segno + pyvips)**  
+  Stateless, fast QR generation for plain URLs, vCards, MeCards, Wi-Fi networks, Geo-coordinates, and SEPA EPC bank transfers with high-res logo overlays and byte-capped security.
 
-- **🐘 PostgreSQL System of Record & Alembic**  
+- **PostgreSQL System of Record & Alembic**  
   Every media asset is tracked with immutable owner-scoping, content-hash deduplication (SHA-256), and playback visibility (`private` vs. `public`).
 
-- **🔒 Capability-Based Security & Dual Auth**  
-  Supports static backend master tokens for internal services and scoped HS256 capability JWTs (`upload:image`, `upload:video`) for secure, direct client uploads without leaking master credentials.
+- **Capability-Based Security & Dual Auth**  
+  Supports static backend master tokens for internal services and scoped HS256 capability JWTs (`upload:image`, `upload:video`) for direct client uploads without leaking master credentials.
 
-- **🔔 Resilient Webhook Delivery with SSRF Guard**  
+- **Resilient Webhook Delivery with SSRF Guard**  
   Pushes HMAC-SHA256 signed event notifications upon video processing completion, complete with strict DNS/IP validation, dead-letter recording, and manual redelivery replay.
 
 ---
