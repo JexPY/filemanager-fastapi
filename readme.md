@@ -26,9 +26,7 @@ A media-processing microservice built with FastAPI. Upload images and videos, ge
 optimized WebP thumbnails via imgproxy and async H.264/AAC-compressed MP4s. Also generates
 QR codes. Storage is pluggable — local disk, S3/R2/MinIO, or Google Cloud Storage.
 
-> **Full documentation is coming.** For now, the API self-documents at `/docs` (Swagger) and
-> `/redoc`. A dedicated docs site is planned at
-> [**docs.filemanager-fastapi.dev**](https://docs.filemanager-fastapi.dev) *(coming soon)*.
+> The API self-documents interactively at `/docs` (Swagger UI) and `/redoc` (ReDoc). Architectural deep dives and deployment guidelines are available in [`docs/PRODUCTION.md`](docs/PRODUCTION.md).
 
 ---
 
