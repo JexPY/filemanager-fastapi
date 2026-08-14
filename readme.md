@@ -43,92 +43,51 @@ a production-grade feature set — but the spirit is the same.
 
 ---
 
-## Architecture & How It Works
-
-Filemanager-FastAPI is built around an **Origin Shield** and **Async Worker** architecture designed for low latency, zero-copy streaming, and resilient media processing.
+## Architecture
 
 ```mermaid
-%%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#1e293b', 'primaryTextColor': '#f8fafc', 'primaryBorderColor': '#3b82f6', 'lineColor': '#60a5fa', 'secondaryColor': '#0f172a', 'tertiaryColor': '#1e1e2e'}}}%%
-flowchart TD
-    subgraph Ingress ["Ingress & Edge Layer"]
-        Client(["Client / App / Browser"])
-        Nginx["NGINX Entry Proxy (:9000)<br/><i>Rate Limiting • Cache Shield • Range/Seek</i>"]
-    end
-
-    subgraph AppPlane ["API Control Plane (FastAPI)"]
-        API["FastAPI Application (:9001)<br/><i>Auth • Validation • Dedup • Routing</i>"]
-        AuthModule{"Auth & Scope Guard<br/><i>Static Tokens | HS256 JWTs</i>"}
-        VIPS["libvips Pipeline<br/><i>Strip EXIF/GPS • WebP Encode</i>"]
-        Segno["Segno Engine<br/><i>QR Codes • Logo Overlays</i>"]
-        DB[(PostgreSQL 17<br/><i>Metadata & System of Record</i>)]
-    end
-
-    subgraph AsyncPlane ["Async Worker Plane (TaskIQ)"]
-        Redis[("Redis Broker & Queue")]
-        Worker["TaskIQ Worker<br/><i>FFmpeg Engine + libvips</i>"]
-        PosterTask["Poster Frame Extraction"]
-        WebhookTask["HMAC-Signed Webhook Dispatcher"]
-    end
-
-    subgraph StoragePlane ["Storage & Serving Tier"]
-        Storage[("Storage Backend<br/><i>Local Disk / S3 / GCS</i>")]
-        Imgproxy["imgproxy<br/><i>On-Demand Signed Transforms</i>"]
-    end
-
-    %% Ingress Connections
-    Client -->|HTTP Requests| Nginx
-    Nginx -->|Proxy Pass| API
-    Nginx -.->|X-Accel-Redirect / Native Range| Storage
-
-    %% API Internal Flow
-    API --> AuthModule
-    AuthModule -->|POST /upload/image| VIPS
-    AuthModule -->|POST /generate/qrcode/*| Segno
-    AuthModule -->|POST /upload/video| API
+flowchart LR
+    Client[Client / App] -->|HTTP Requests| Nginx[NGINX Entry Proxy<br/>:9000]
     
-    VIPS -->|Stream WebP| Storage
-    API -->|Stage Raw Video Key| Storage
-    API -->|Enqueue Task| Redis
-    API <-->|Idempotency & State| DB
-    Segno -->|PNG Response| Client
+    Nginx -->|API Routes| API[FastAPI App<br/>:9001]
+    Nginx -->|Image Transforms| Imgproxy[imgproxy]
+    Nginx -.->|X-Accel Video Stream| Storage[(Storage Backend<br/>Local / S3 / GCS)]
 
-    %% Worker Flow
-    Redis --> Worker
-    Worker -->|Fetch Raw Key| Storage
-    Worker -->|Transcode & Compress| Storage
-    Worker --> PosterTask
-    PosterTask -->|Generate Poster WebP| Storage
-    Worker -->|Update State| DB
-    Worker --> WebhookTask
-    WebhookTask -.->|Signed POST + SSRF Guard| Client
+    API -->|Auth & Metadata| DB[(PostgreSQL 17)]
+    API -->|Sync WebP Process| Storage
+    API -->|Enqueue Video Job| Redis[(Redis Queue)]
 
-    %% Playback & Serving Flow
-    Imgproxy <--> Storage
-    Nginx <-->|Origin Cached Shield| Imgproxy
+    Redis --> Worker[TaskIQ Worker<br/>FFmpeg Engine]
+    Worker -->|Transcode & Poster| Storage
+    Worker -->|Update Status| DB
+    Worker -.->|Signed Webhook| Client
+
+    Imgproxy -->|Read Source| Storage
 ```
 
-### Core Architecture Highlights
+### How It Works
 
-- **Origin Shield NGINX Reverse Proxy (`:9000`)**  
-  Terminates external traffic, enforces burst-safe rate limiting on upload routes, isolates `imgproxy` behind cache locks to prevent thundering-herd stampedes, and delivers local video via zero-copy **`X-Accel-Redirect`** (the Python process never touches video playback bytes).
-  
-- **Synchronous Image Engine (libvips)**  
-  High-speed image validation, decompression-bomb protection, EXIF/GPS/ICC metadata stripping, and instant WebP encoding. Serves dynamically resized and cropped thumbnails via HMAC-SHA256 signed `imgproxy` URLs.
+1. **Ingress Layer (NGINX on `:9000`)**
+   - Single public entry point for all API and media traffic.
+   - Enforces burst-safe rate limiting on upload endpoints.
+   - Streams local video directly via zero-copy `X-Accel-Redirect` without loading bytes through the Python application.
+   - Protects `imgproxy` with cache locks to prevent duplicate image rendering.
 
-- **Async Video Pipeline (TaskIQ + FFmpeg)**  
-  Offloads video encoding (H.264/AAC, WebM VP9/AV1) to dedicated worker processes. Supports automated duration capping, thumbnail poster frame extraction, and real-time task status polling.
+2. **API Control Plane (FastAPI on `:9001`)**
+   - **Authentication**: Supports static master bearer tokens and scoped HS256 capability JWTs (`upload:image`, `upload:video`).
+   - **Image Pipeline**: Validates dimensions, strips EXIF/GPS/ICC metadata, and encodes to WebP in-memory using `libvips`.
+   - **QR Generator**: Generates PNG QR codes with optional logo overlays (Wi-Fi, vCard, MeCard, Geo, EPC, plain text/URL) via `segno` + `pyvips`.
+   - **State Management**: Tracks asset ownership, SHA-256 idempotency hashes, and access visibility (`public` / `private`) in PostgreSQL.
 
-- **Versatile QR Code Generator (Segno + pyvips)**  
-  Stateless, fast QR generation for plain URLs, vCards, MeCards, Wi-Fi networks, Geo-coordinates, and SEPA EPC bank transfers with high-res logo overlays and byte-capped security.
+3. **Async Processing Plane (TaskIQ + FFmpeg)**
+   - Consumes background video transcoding tasks from Redis.
+   - Compresses video to H.264/AAC MP4 with optional duration trimming and optimization presets.
+   - Automatically extracts poster preview frames and saves them as linked image records.
+   - Dispatches HMAC-SHA256 signed event notifications to `callback_url` with SSRF protection.
 
-- **PostgreSQL System of Record & Alembic**  
-  Every media asset is tracked with immutable owner-scoping, content-hash deduplication (SHA-256), and playback visibility (`private` vs. `public`).
-
-- **Capability-Based Security & Dual Auth**  
-  Supports static backend master tokens for internal services and scoped HS256 capability JWTs (`upload:image`, `upload:video`) for direct client uploads without leaking master credentials.
-
-- **Resilient Webhook Delivery with SSRF Guard**  
-  Pushes HMAC-SHA256 signed event notifications upon video processing completion, complete with strict DNS/IP validation, dead-letter recording, and manual redelivery replay.
+4. **Storage & Serving Tier**
+   - Pluggable storage adapters: Local disk, Amazon S3, Cloudflare R2, MinIO, or Google Cloud Storage.
+   - On-demand image resizing, cropping, and formatting via signed `imgproxy` URLs.
 
 ---
 
