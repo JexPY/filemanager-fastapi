@@ -57,6 +57,20 @@ async def test_qrcode_with_logo(client: httpx.AsyncClient, auth_headers: dict[st
     assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
 
 
+async def test_qrcode_with_oversized_logo_returns_413(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    oversized_bytes = b"x" * (settings.MAX_QR_LOGO_BYTES + 10)
+    resp = await client.post(
+        "/generate/qrcode",
+        data={"content": "https://example.com"},
+        files={"logo": ("huge_logo.png", oversized_bytes, "image/png")},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 413
+    assert f"Logo exceeds {settings.MAX_QR_LOGO_BYTES} bytes" in resp.json()["detail"]
+
+
 async def test_qrcode_invalid_scale(
     client: httpx.AsyncClient, auth_headers: dict[str, str]
 ) -> None:

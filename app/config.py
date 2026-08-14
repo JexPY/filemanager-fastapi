@@ -87,6 +87,8 @@ class Settings(BaseSettings):
     # QR codes have a hard capacity limit (~2953 bytes at version 40/level L);
     # this just rejects absurd input before it ever reaches segno.
     MAX_QR_CONTENT_LENGTH: int = Field(default=2000)
+    # File size cap for optional logo overlay uploads (bytes)
+    MAX_QR_LOGO_BYTES: int = Field(default=5 * 1024 * 1024)
 
     # Kills a wedged ffmpeg process after this many seconds. Distinct from
     # VIDEO_MAX_DURATION_SECONDS below, which caps *output duration* -- this caps

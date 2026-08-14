@@ -43,6 +43,20 @@ async def _run_qr_generator(func, *args, **kwargs) -> bytes:
         ) from exc
 
 
+async def _read_logo_capped(
+    logo: UploadFile | None, max_bytes: int = settings.MAX_QR_LOGO_BYTES
+) -> bytes | None:
+    if logo is None:
+        return None
+    data = await logo.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Logo exceeds {max_bytes} bytes",
+        )
+    return data
+
+
 @router.post(
     "/generate/qrcode",
     tags=["QR Codes"],
@@ -65,7 +79,7 @@ async def generate_qrcode(
         description="Optional logo image overlay. Accepted formats: PNG, JPEG, GIF, WebP, HEIC.",
     ),
 ):
-    logo_bytes = await logo.read() if logo is not None else None
+    logo_bytes = await _read_logo_capped(logo)
     png_data = await _run_qr_generator(
         generate_qr_image, content, scale=scale, logo_bytes=logo_bytes
     )
@@ -95,7 +109,7 @@ async def generate_qrcode_vcard(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid email address format"
         )
 
-    logo_bytes = await logo.read() if logo is not None else None
+    logo_bytes = await _read_logo_capped(logo)
     png_data = await _run_qr_generator(
         generate_vcard_qr,
         name=name.strip(),
@@ -131,7 +145,7 @@ async def generate_qrcode_mecard(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid email address format"
         )
 
-    logo_bytes = await logo.read() if logo is not None else None
+    logo_bytes = await _read_logo_capped(logo)
     png_data = await _run_qr_generator(
         generate_mecard_qr,
         name=name.strip(),
@@ -167,7 +181,7 @@ async def generate_qrcode_wifi(
             detail="Invalid security type. Use WPA, WEP, or nopass",
         )
 
-    logo_bytes = await logo.read() if logo is not None else None
+    logo_bytes = await _read_logo_capped(logo)
     png_data = await _run_qr_generator(
         generate_wifi_qr,
         ssid=ssid.strip(),
@@ -197,7 +211,7 @@ async def generate_qrcode_geo(
     scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
     logo: UploadFile | None = File(None, description=_LOGO_DESC),
 ):
-    logo_bytes = await logo.read() if logo is not None else None
+    logo_bytes = await _read_logo_capped(logo)
     png_data = await _run_qr_generator(
         generate_geo_qr,
         lat=lat,
@@ -237,7 +251,7 @@ async def generate_qrcode_epc(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid SEPA IBAN format"
         )
 
-    logo_bytes = await logo.read() if logo is not None else None
+    logo_bytes = await _read_logo_capped(logo)
     png_data = await _run_qr_generator(
         generate_epc_qr,
         name=name.strip(),
