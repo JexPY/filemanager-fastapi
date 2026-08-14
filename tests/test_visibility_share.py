@@ -80,6 +80,10 @@ async def test_patch_is_video_only(
         f"/files/{image.id}", headers=auth_headers, json={"visibility": "public"}
     )
     assert resp.status_code == 400
+    assert resp.json()["detail"] == (
+        "Visibility only applies to videos — images are always"
+        " served through imgproxy with no visibility model"
+    )
 
 
 async def test_patch_is_owner_scoped_404(

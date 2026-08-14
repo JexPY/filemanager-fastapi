@@ -113,7 +113,11 @@ async def set_file_visibility(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
     if record.kind != KIND_VIDEO:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Visibility only applies to videos"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Visibility only applies to videos — images are always"
+                " served through imgproxy with no visibility model"
+            ),
         )
 
     try:
