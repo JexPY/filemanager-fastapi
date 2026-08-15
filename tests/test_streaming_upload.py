@@ -16,7 +16,11 @@ import pytest
 from fastapi import HTTPException, UploadFile
 
 from app.config import settings
-from app.routers.utils import _stream_capped_to_temp
+from app.routers.utils import (
+    HTTP_499_CLIENT_CLOSED_REQUEST,
+    _read_capped,
+    _stream_capped_to_temp,
+)
 from app.services.storage import LocalStorage
 from tests.fakes import InMemoryStorageBackend
 
@@ -24,6 +28,11 @@ from tests.fakes import InMemoryStorageBackend
 class _FakeRequest:
     async def is_disconnected(self) -> bool:
         return False
+
+
+class _DisconnectedRequest:
+    async def is_disconnected(self) -> bool:
+        return True
 
 
 def _upload(data: bytes) -> UploadFile:
@@ -63,6 +72,35 @@ async def test_stream_to_temp_413_and_removes_partial_temp(
     assert excinfo.value.status_code == 413
     # The partially-written temp file must be cleaned up on abort, not leaked.
     assert not os.path.exists(captured["path"])
+
+
+async def test_stream_to_temp_aborts_with_499_and_removes_partial_temp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 499 is not a Starlette constant, so this branch previously raised
+    # AttributeError (a 500) instead of the intended abort status.
+    captured: dict[str, str] = {}
+    real_mkstemp = tempfile.mkstemp
+
+    def spy_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        fd, p = real_mkstemp(*args, **kwargs)
+        captured["path"] = p
+        return fd, p
+
+    monkeypatch.setattr(tempfile, "mkstemp", spy_mkstemp)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await _stream_capped_to_temp(_upload(b"x" * 4096), _DisconnectedRequest(), 50 * 1024 * 1024)
+
+    assert excinfo.value.status_code == HTTP_499_CLIENT_CLOSED_REQUEST == 499
+    assert not os.path.exists(captured["path"])
+
+
+async def test_read_capped_aborts_with_499_on_client_disconnect() -> None:
+    with pytest.raises(HTTPException) as excinfo:
+        await _read_capped(_upload(b"y" * 4096), _DisconnectedRequest(), 50 * 1024 * 1024)
+
+    assert excinfo.value.status_code == HTTP_499_CLIENT_CLOSED_REQUEST == 499
 
 
 async def test_local_upload_from_path_streams_to_target(tmp_path: Path) -> None:

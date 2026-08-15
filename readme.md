@@ -22,11 +22,11 @@
 
 ---
 
-Upload an image and get back a stripped, re-encoded WebP plus signed imgproxy URLs for
-on-demand resizing. Upload a video and get back a task id while a separate worker
-transcodes it, extracts a poster frame, and pushes a signed webhook when it lands.
-Generate QR codes inline. Storage is pluggable: local disk, S3/R2/MinIO, or Google Cloud
-Storage.
+**Upload an image** and get back a stripped, re-encoded WebP plus signed imgproxy URLs for
+on-demand resizing. **Upload a video** and get back a task id while a separate worker
+transcodes it; optionally it extracts a poster frame and pushes a signed webhook when it
+lands. **Generate QR codes** inline. Storage is pluggable: local disk, S3/R2/MinIO, or
+Google Cloud Storage.
 
 Everything runs in Docker. `docker compose up --build` gives you the whole stack.
 
@@ -35,21 +35,17 @@ Everything runs in Docker. `docker compose up --build` gives you the whole stack
 
 ## Contents
 
-- [Quickstart](#quickstart)
-- [Architecture](#architecture)
-- [Request flows](#request-flows)
-- [API reference](#api-reference)
-- [Authentication](#authentication)
-- [Storage backends](#storage-backends)
-- [Webhooks](#webhooks)
-- [Configuration](#configuration)
-- [Development](#development)
-- [Limits and scope](#limits-and-scope)
-- [A note on v1](#a-note-on-v1)
+**Getting started** — [Quickstart](#quickstart) · [Core concepts](#core-concepts) · [Configuration](#configuration) · [Development](#development)
+
+**How it works** — [Architecture](#architecture) · [Request flows](#request-flows) · [Storage backends](#storage-backends)
+
+**Reference** — [API reference](#api-reference) · [Authentication](#authentication) · [Webhooks](#webhooks) · [Limits and scope](#limits-and-scope)
 
 ---
 
 ## Quickstart
+
+### 1. Configure
 
 ```sh
 cp .env-example .env
@@ -58,25 +54,36 @@ cp .env-example .env
 # They must match the imgproxy container's env vars exactly (compose reads the same file).
 openssl rand -hex 32
 openssl rand -hex 32
+```
 
-# Set at least one bearer token, e.g.
-#   FILE_MANAGER_BEARER_TOKENS=mobile:s3cr3t-a,admin:s3cr3t-b
-# (or a bare `secret` — the owner id is then derived as tok_<hash>)
+Then set at least one bearer token:
 
+```ini
+# .env — a bare `secret`, or `label:secret` for a readable audit trail
+FILE_MANAGER_BEARER_TOKENS=mobile:s3cr3t-a,admin:s3cr3t-b
+```
+
+The app refuses to boot on a bad config rather than failing on the first request. A missing
+bucket for the selected backend, an empty token list, a non-hex imgproxy key or salt, and an
+invalid `LOCAL_MEDIA_SERVE_MODE` are all startup errors.
+
+### 2. Run
+
+```sh
 docker compose up --build
 ```
 
-The service comes up behind nginx at **`http://localhost:9000`**. Swagger UI is at
-`http://localhost:9000/docs`. The `migrate` service applies Alembic migrations and exits
-before `api` and `worker` start.
+The service comes up behind nginx at **`http://localhost:9000`**, with Swagger UI at
+`http://localhost:9000/docs`. A one-shot `migrate` service applies the Alembic migrations
+and exits before `api` and `worker` start.
 
-The app refuses to boot on a bad config rather than failing on the first request: a
-missing bucket for the selected backend, an empty token list, or a non-hex imgproxy
-key/salt is a startup error.
+### 3. Call it
 
 ```sh
 TOKEN=your-token-here
 BASE=http://localhost:9000
+
+curl $BASE/readyz     # 200 once redis, storage, and postgres are all reachable
 
 # Image — synchronous. Returns the record id plus signed imgproxy URLs.
 curl -H "Authorization: Bearer $TOKEN" -F "file=@photo.jpg" $BASE/upload/image
@@ -84,7 +91,7 @@ curl -H "Authorization: Bearer $TOKEN" -F "file=@photo.jpg" $BASE/upload/image
 # Video — asynchronous. Returns 202 with a task_id and record id.
 curl -H "Authorization: Bearer $TOKEN" -F "file=@clip.mp4" $BASE/upload/video
 
-# Poll the task, or poll the record for richer state.
+# Poll the task for a thin status, or the record for the full state.
 curl -H "Authorization: Bearer $TOKEN" $BASE/tasks/<task_id>
 curl -H "Authorization: Bearer $TOKEN" $BASE/files/<id>
 
@@ -101,51 +108,89 @@ curl -H "Authorization: Bearer $TOKEN" -F "ssid=MyHomeWiFi" -F "password=secret"
 
 ---
 
+## Core concepts
+
+Four ideas explain most of the API surface.
+
+**Owner.** Every credential resolves to an owner id, and every record belongs to one.
+Listing, fetching, updating, deleting, poster generation, and task polling are all
+owner-scoped, and another owner's record is a **404, never a 403**, so existence never leaks
+across tenants. The two deliberate exceptions are the ones you opt into per record: a
+`public` video's playback URL, and a share link.
+
+**Record.** Each image and video upload writes one row you can fetch at `GET /files/{id}`.
+It is the system of record — status, dimensions, duration, visibility, poster link, and
+webhook delivery state all live there. QR codes are returned inline and never recorded.
+
+**Kind and lifecycle.** An image is written `ready` inside the request. A video is written
+`processing` *before* its task is enqueued, and the worker then flips it to `ready`
+(swapping the raw storage key for the compressed one) or `failed`.
+
+**Idempotency.** Both upload kinds dedupe per owner on a SHA-256 of the *input* bytes
+combined with the processing parameters. Re-posting identical bytes with identical options
+returns the existing record instead of doing the work twice; changing a parameter — a
+different image `optimization`, a different video `format` or trim window — is correctly
+treated as a new upload.
+
+---
+
 ## Architecture
 
 Two process types share one codebase, selected by which command runs. `api` serves every
 HTTP route; `worker` runs FFmpeg. They are coupled only through Redis, Postgres, and the
 storage backend — no shared memory, no in-process state.
 
-nginx is the mandatory entry proxy. It rate-limits uploads, acts as an origin shield in
-front of imgproxy, and — on the `local` backend — serves video bytes itself via
-`X-Accel-Redirect`, keeping the Python process out of the byte path entirely.
+nginx is the entry proxy. It rate-limits uploads, acts as an origin shield in front of
+imgproxy, and — on the `local` backend — serves video bytes itself via `X-Accel-Redirect`,
+keeping the Python process out of the byte path entirely.
 
 ### Container topology
 
 ```mermaid
-flowchart TD
-    Client["Client<br/>web · mobile · backend"]
+flowchart TB
+    Client["<b>Client</b><br/>your backend, app, or browser"]
 
-    Nginx["<b>nginx</b> — entry proxy<br/>host :9000 → :80<br/>upload rate limit · imgproxy cache<br/>X-Accel byte path"]
+    subgraph edgeLayer["Edge"]
+        Nginx["<b>nginx</b> — entry proxy<br/>host :9000 → :80<br/>upload rate limit · imgproxy cache lock<br/>X-Accel byte path"]
+    end
 
-    API["<b>api</b> — uvicorn/FastAPI :80<br/>host :9001 (debug only)<br/>auth · ingest · libvips · QR"]
-    Worker["<b>worker</b> — TaskIQ<br/>ffmpeg · ffprobe · libvips"]
-    Imgproxy["<b>imgproxy</b> :8080<br/>not exposed to the host"]
-    Migrate["<b>migrate</b> — one-shot<br/>alembic upgrade head"]
+    subgraph appLayer["Application"]
+        API["<b>api</b> — uvicorn / FastAPI on :80<br/>host :9001, debugging only<br/>auth · ingest · libvips · QR"]
+        Imgproxy["<b>imgproxy</b> :8080<br/>internal, no host port"]
+        Worker["<b>worker</b> — TaskIQ<br/>ffmpeg · ffprobe · libvips"]
+        Migrate["<b>migrate</b> — one-shot<br/>alembic upgrade head"]
+    end
 
-    Redis[("Redis 7<br/>queue + results")]
-    DB[("PostgreSQL 17<br/>uploads table")]
-    Store[("Storage backend<br/>local volume · S3/R2 · GCS")]
+    subgraph stateLayer["State"]
+        Redis[("<b>redis</b> 7<br/>task queue + results")]
+        DB[("<b>db</b> — PostgreSQL 17<br/>uploads table")]
+        Store[("<b>storage</b><br/>./data/media volume<br/>or S3 / R2 / GCS")]
+    end
 
-    Client -->|"all routes"| Nginx
-    Nginx -->|"proxy_pass"| API
-    Nginx -->|"/imgproxy/* (cache lock)"| Imgproxy
-    Nginx -.->|"local video: sendfile + Range<br/>via internal location"| Store
+    Receiver["Your webhook receiver"]
 
-    API -->|"metadata · dedup · owner scoping"| DB
+    Client ==>|"every route"| Nginx
+    Nginx ==>|"proxy_pass"| API
+    Nginx -->|"/imgproxy/ · cache lock"| Imgproxy
+    Nginx -.->|"local backend only:<br/>sendfile + Range from the<br/>internal location"| Store
+
+    API -->|"records · owner scoping · dedup"| DB
     API -->|"store WebP · stage raw video"| Store
-    API -->|"enqueue task (storage key only)"| Redis
-
-    Redis --> Worker
-    Worker -->|"read raw · write transcoded + poster"| Store
-    Worker -->|"mark ready/failed · link poster"| DB
-    Worker -.->|"HMAC-signed webhook"| Receiver["Webhook receiver"]
-
+    API <-->|"enqueue task, storage key only<br/>read task result"| Redis
     Imgproxy -->|"read source image"| Store
-    Migrate -->|"schema"| DB
-    Migrate -.->|"api and worker wait on completion"| API
+
+    Redis <-->|"consume compression<br/>enqueue webhook delivery"| Worker
+    Worker -->|"read raw · write transcode + poster"| Store
+    Worker -->|"mark ready/failed · link poster"| DB
+    Worker -.->|"HMAC-signed POST"| Receiver
+
+    Migrate ==>|"schema"| DB
 ```
+
+Both `api` and `worker` wait on `migrate` completing (`service_completed_successfully`) and
+on `db`/`redis` being healthy, so the `uploads` table always exists before either touches
+it. Three more compose services are opt-in and left off the diagram: `minio`
+(`--profile s3-dev`), `db-backup` (`--profile backup`), and `test` (`--profile test`).
 
 Notes on the topology as it is actually wired:
 
@@ -156,12 +201,14 @@ Notes on the topology as it is actually wired:
   `X-Accel-Redirect`, so local video playback does not work if you hit `:9001` directly.
 - **`/internal-media/` in nginx is marked `internal;`.** It can only be entered via an
   upstream `X-Accel-Redirect`, never by a direct client request. That is what keeps the
-  download route's visibility and ownership checks from being bypassable.
-- **Uploads are rate-limited at the edge**, at 2 req/s per IP with a burst of 5, on
-  `/upload/image`, `/upload/images`, and `/upload/video`; over the burst is a 429. Read,
-  list, and health routes are unrestricted.
-- **Only the storage key travels through Redis**, never the bytes. The worker fetches
-  the object itself.
+  download route's visibility and ownership checks from being bypassable. The media volume
+  is mounted read-only into both nginx and imgproxy.
+- **Uploads are rate-limited at the edge**, at 2 req/s per IP with a burst of 5, matching
+  `^/upload/(images?|video)$`; over the burst is a 429. Read, list, health, and
+  `/upload/presign` are unrestricted.
+- **Only the storage key travels through Redis**, never the bytes — for the compression
+  task and for the webhook-delivery task alike. The worker fetches the object itself, and
+  reads it *in place* (a local path, or a presigned URL streamed over HTTPS).
 
 ---
 
@@ -170,8 +217,9 @@ Notes on the topology as it is actually wired:
 ### Image ingestion and thumbnail delivery
 
 Images are handled synchronously. The input bytes are hashed for per-owner idempotency,
-then decoded, stripped of all metadata (EXIF, GPS, ICC, XMP), and re-encoded to WebP with
-libvips. Clients get signed imgproxy URLs and let imgproxy do the resizing.
+then decoded, stripped of all metadata (EXIF, GPS, ICC, XMP), downscaled if they exceed the
+profile's dimension cap, and re-encoded to WebP with libvips. Clients get signed imgproxy
+URLs and let imgproxy do the resizing from there.
 
 ```mermaid
 sequenceDiagram
@@ -191,7 +239,8 @@ sequenceDiagram
     alt Already uploaded by this owner
         DB-->>API: existing ready record
     else New content
-        API->>API: validate, strip metadata, encode WebP (libvips)
+        API->>API: sniff format, pixel-bomb guard
+        API->>API: strip metadata, downscale, encode WebP (libvips)
         API->>Store: PUT images/<uuid>.webp
         API->>DB: INSERT row (kind=image, status=ready)
     end
@@ -227,10 +276,10 @@ sequenceDiagram
     Client->>API: POST /upload/video (+ callback_url, format, trim, visibility)
     API->>API: validate callback_url (SSRF guard, allow-list)
     API->>API: stream to temp file, rolling SHA-256
-    API->>DB: dedup lookup (ready or processing video)
+    API->>DB: dedup lookup (hash + encode options, ready or processing)
 
     alt Duplicate
-        API-->>Client: 200 ready / 202 processing — attach to existing job
+        API-->>Client: 200 ready / 202 processing — attach to the existing job
     else New content
         API->>Store: PUT raw/videos/<uuid>.<ext>
         API->>DB: INSERT row (status=processing)
@@ -242,7 +291,7 @@ sequenceDiagram
     Worker->>Store: resolve input in place (local path or presigned URL)
     Worker->>Worker: ffprobe metadata, then ffmpeg transcode
     Worker->>Store: PUT videos/<uuid>_compressed.<ext>
-    Worker->>DB: mark_ready — swap storage_key, set duration/size
+    Worker->>DB: mark_ready — swap storage_key, set duration/size/dimensions
 
     opt poster_seconds supplied
         Worker->>Store: extract frame, encode WebP, PUT posters/<uuid>.webp
@@ -250,15 +299,16 @@ sequenceDiagram
     end
 
     opt callback_url set
-        Worker->>Redis: enqueue deliver_webhook_task (separate slot)
+        Worker->>Redis: enqueue deliver_webhook_task (its own worker slot)
     end
 
     Worker->>Store: DELETE raw upload (success or failure)
 ```
 
 If the owner deletes the upload mid-transcode, `mark_ready` finds no row and the worker
-discards the object it just wrote rather than orphaning it. On any failure the row is
-marked `failed` and the error re-raised, so `GET /tasks/{id}` reports it too.
+discards the object it just wrote rather than orphaning it. On any failure the row is marked
+`failed`, a `video.failed` webhook is enqueued, and the error is re-raised so
+`GET /tasks/{id}` reports it too.
 
 ### Playback
 
@@ -280,8 +330,8 @@ sequenceDiagram
 
     alt private and not the owner
         API-->>Client: 404 (never 403 — existence does not leak)
-    else public on S3/GCS with a CDN base URL
-        API-->>Client: 302 to the stable public URL (cacheable)
+    else public on S3/GCS with a public base URL set
+        API-->>Client: 302 to the stable public URL (cacheable behind a CDN)
     else local backend
         API-->>Nginx: 200 with X-Accel-Redirect: /internal-media/<key>
         Nginx->>Store: sendfile from the read-only media volume
@@ -301,25 +351,40 @@ from every record view, so it cannot leak through listings, webhooks, or their l
 
 ## API reference
 
-Every `/files` route is owner-scoped: another owner's record is a **404, never a 403**, so
-existence never leaks across tenants.
+Every route that takes a `{id}` resolves it **scoped to your own records** — another
+owner's id is a `404`, never a `403`. The two exceptions are deliberate and per record:
+`GET /files/{id}/download` on a video you marked `public`, and `GET /share/{token}`.
 
 ### Uploads
 
 | Method | Endpoint | Auth | Notes |
 |---|---|---|---|
 | `POST` | `/upload/image` | `upload:image` | Synchronous. Strips metadata, encodes WebP, returns signed imgproxy URLs. Idempotent per owner. |
-| `POST` | `/upload/images` | `upload:image` | Bulk, max 10 files / 50 MB total, 4 concurrent. Failed items are skipped, not fatal. |
+| `POST` | `/upload/images` | `upload:image` | Bulk, max 10 files / 50 MB total, 4 processed concurrently. Failed items are skipped, not fatal — check `count`. |
 | `POST` | `/upload/video` | `upload:video` | Streams to disk, stages, enqueues transcode. `202`, or `200`/`202` on a duplicate. |
 | `POST` | `/upload/presign` | master token only | Mints a short-lived capability JWT and a ready-to-use upload URL. `503` if `JWT_SECRET_KEY` is unset. |
 
-`POST /upload/image` form fields: `file`, `optimization` (`size`\|`balanced`\|`quality`,
-default `balanced`), `imgproxy_width`, `imgproxy_height`, `imgproxy_fit`
-(`auto`\|`fit`\|`fill`\|`fill-down`\|`force`), `imgproxy_format`
-(`webp`\|`png`\|`jpg`\|`jpeg`\|`avif`\|`gif`). Supplying any custom transform adds an
-`imgproxy_custom_url` to the response.
+**Image form fields.** `file`, `optimization`, `imgproxy_width`, `imgproxy_height`,
+`imgproxy_fit` (`auto`\|`fit`\|`fill`\|`fill-down`\|`force`), `imgproxy_format`
+(`webp`\|`png`\|`jpg`\|`jpeg`\|`avif`\|`gif`). Supplying any custom transform parameter adds
+an `imgproxy_custom_url` to the response alongside the always-present
+`imgproxy_thumbnail_url` and `imgproxy_optimized_url`.
 
-`POST /upload/video` form fields:
+Accepted image inputs are **PNG, JPEG, GIF, WebP, and HEIC**, detected by magic bytes before
+libvips touches the buffer. **SVG is deliberately rejected** — libvips here is built with
+librsvg, so accepting markup would be an XXE / entity-expansion / SSRF vector.
+
+`optimization` controls both WebP quality and a maximum stored dimension. Images larger than
+the cap are downscaled at upload time; imgproxy resizes down from whatever is stored, never
+up:
+
+| Profile | WebP quality | Max dimension |
+|---|---|---|
+| `size` | 65 | 1280 px |
+| `balanced` (default) | 85 | 1920 px |
+| `quality` | 95 | 3840 px |
+
+**Video form fields:**
 
 | Field | Values | Meaning |
 |---|---|---|
@@ -328,16 +393,62 @@ default `balanced`), `imgproxy_width`, `imgproxy_height`, `imgproxy_fit`
 | `start_seconds` / `end_seconds` | float | Trim the source before encoding. |
 | `poster_seconds` | float | Extract a poster frame automatically at this timestamp. |
 | `visibility` | `public` (default), `private` | Playback access model for the record. |
-| `callback_url` | https URL | Webhook target. Validated at upload time; rejected with `400` if webhooks are off or the host is not allow-listed. |
+| `callback_url` | https URL | Webhook target. Validated at upload time; `400` if webhooks are off or the host is not allow-listed. |
 
-Codecs per format: `mp4` uses libx264 + AAC with `+faststart`; `webm_vp9` uses libvpx-vp9
-+ Opus; `webm_av1` uses SVT-AV1 + Opus.
+> **`visibility` defaults to `public`.** A public video's `/files/{id}/download` URL is
+> fetchable by anyone who has the id, with no token. Pass `visibility=private` at upload, or
+> `PATCH /files/{id}` afterwards, for owner-only playback.
 
-> **Output is capped at 60 seconds by default.** `VIDEO_MAX_DURATION_SECONDS` is an
-> ffmpeg `-t` limit on the encode, so a longer upload is accepted and transcoded but comes
-> back trimmed. This is not silent: the record reports `duration_seconds` (the source's
-> real length) and `truncated: true`. Raise or disable it (`0` removes the cap) if you are
-> handling full-length media.
+Accepted video content types: `video/mp4`, `video/webm`, `video/quicktime`,
+`video/x-matroska`, `video/x-msvideo`, `video/mpeg`, `video/ogg`, `video/3gpp`, plus
+`application/octet-stream` as a fallback for browsers that send nothing better. Anything
+else is a `400` before a single byte is staged.
+
+Codecs per format: `mp4` uses libx264 + AAC with `+faststart`; `webm_vp9` uses libvpx-vp9 +
+Opus; `webm_av1` uses SVT-AV1 + Opus.
+
+> **Output is capped at 60 seconds by default.** `VIDEO_MAX_DURATION_SECONDS` is an ffmpeg
+> `-t` limit on the encode, so a longer upload is accepted and transcoded but comes back
+> trimmed. This is not silent: the record reports `duration_seconds` (the source's real
+> length) and `truncated: true`. Raise or disable it (`0` removes the cap) if you are
+> handling full-length media, and widen `FFMPEG_TIMEOUT_SECONDS` to match.
+
+### The record
+
+`GET /files/{id}` returns the full record. `url`, `thumbnail_url`, and `poster_url` appear
+only once `status` is `ready`; `share_token` is never included.
+
+```json
+{
+  "id": "0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95",
+  "kind": "video",
+  "status": "ready",
+  "content_type": "video/mp4",
+  "size_bytes": 4185302,
+  "width": 1280,
+  "height": 720,
+  "task_id": "b2e1d4c8-...",
+  "original_filename": "clip.mov",
+  "duration_seconds": 92.4,
+  "truncated": true,
+  "callback_url": "https://hooks.example.com/media",
+  "poster_upload_id": "7a3d9e18c4b24f5aa1e0d7c6b93f2481",
+  "webhook_status": "delivered",
+  "webhook_attempts": 1,
+  "webhook_last_error": null,
+  "webhook_updated_at": "2026-08-15T09:12:44+00:00",
+  "visibility": "public",
+  "url": "https://media.example.com/files/0f1c2b7a.../download",
+  "poster_url": "https://media.example.com/imgproxy/<sig>/rs:auto/<src>",
+  "created_at": "2026-08-15T09:11:02+00:00",
+  "updated_at": "2026-08-15T09:12:40+00:00"
+}
+```
+
+For an image record, `url` and `thumbnail_url` are signed imgproxy URLs instead of a
+download route. `GET /files` wraps a page of these as
+`{"files": [...], "total_count": N, "limit": L, "offset": O}` — `total_count` is the owner's
+full match count, so a client can size its pager without walking every page.
 
 ### Files, playback, and sharing
 
@@ -345,31 +456,77 @@ Codecs per format: `mp4` uses libx264 + AAC with `+faststart`; `webm_vp9` uses l
 |---|---|---|---|
 | `GET` | `/files` | bearer | Newest first. Query: `limit` (1–200, default 50), `offset`, `kind` (`image`\|`video`). |
 | `GET` | `/files/{id}` | bearer | Full record. Poll this for `status`, `poster_upload_id`, and webhook state. |
-| `PATCH` | `/files/{id}` | bearer | Body `{"visibility": "public"}` or `{"visibility": "private"}`. Videos only — `400` on an image. |
-| `DELETE` | `/files/{id}` | bearer | Deletes the object first, then the row. Cascades to the video's poster. |
-| `GET` | `/files/{id}/download` | bearer or public | Stable playback URL, Range on every backend. Videos only. |
-| `POST` | `/files/{id}/share` | bearer | Mints or rotates the share token. The only response that returns it. |
-| `DELETE` | `/files/{id}/share` | bearer | Revokes it. Idempotent. |
-| `GET` | `/share/{token}` | none | Streams the video; the token is the grant. Unknown or revoked is a 404. |
-| `POST` | `/files/{id}/poster` | bearer | On-demand poster from a *ready* video. `at_seconds` optional, default ~10% in. `200` if one already exists, `202` if enqueued. |
-| `POST` | `/files/{id}/redeliver` | bearer | Replays a dead-lettered webhook with the same idempotency id. |
+| `PATCH` | `/files/{id}` | bearer | JSON body `{"visibility": "public"}` or `{"visibility": "private"}`. Videos only — `400` on an image. |
+| `DELETE` | `/files/{id}` | bearer | Deletes the object first, then the row. Cascades to the video's poster. `204`. |
+| `GET` | `/files/{id}/download` | bearer, or none if `public` | Stable playback URL, Range on every backend. Videos only. |
+| `POST` | `/files/{id}/share` | bearer | Mints or rotates the share token; the only response that returns it. Videos only. |
+| `DELETE` | `/files/{id}/share` | bearer | Revokes it. Idempotent, `204`. |
+| `GET` | `/share/{token}` | none | Serves the video; the token is the grant. Unknown or revoked is a `404`. |
+| `POST` | `/files/{id}/poster` | bearer | On-demand poster from a *ready* video. `202` when enqueued, `200` with the poster record if one already exists, `409` if the video is not ready. |
+| `POST` | `/files/{id}/redeliver` | bearer | Replays a webhook with the same idempotency id. `400` if webhooks are off or the record has no `callback_url`, `409` while still processing. |
+
+`POST /files/{id}/poster` takes an optional `at_seconds` **form field** (multipart, not
+JSON); the default is roughly 10% into the clip, chosen so the frame is not a black lead-in.
+The `202` response carries a `poll` URL — poll `GET /files/{id}` until `poster_upload_id` is
+set, then fetch that id for the image record.
+
+Deleting is explicit and irreversible, and the object is removed before the row — so a
+transient storage failure leaves the record intact and retryable rather than stranding an
+object with no record.
 
 ### Tasks, QR codes, and system
 
 | Method | Endpoint | Auth | Notes |
 |---|---|---|---|
-| `GET` | `/tasks/{task_id}` | bearer | `pending` \| `completed` \| `failed`. Owner-scoped via the record, so an unknown id is a 404. |
+| `GET` | `/tasks/{task_id}` | bearer | `pending` \| `completed` \| `failed`, for a **video compression** task id. Owner-scoped via the record, so an unknown id is a `404`. |
 | `POST` | `/generate/qrcode` | bearer | Plain text or URL. |
 | `POST` | `/generate/qrcode/wifi` | bearer | `ssid`, `password`, `security` (`WPA`\|`WEP`\|`nopass`), `hidden`. |
 | `POST` | `/generate/qrcode/vcard` | bearer | vCard 3.0 contact card. |
 | `POST` | `/generate/qrcode/mecard` | bearer | Compact MeCard contact. |
 | `POST` | `/generate/qrcode/geo` | bearer | Latitude / longitude. |
-| `POST` | `/generate/qrcode/epc` | bearer | SEPA EPC payment. |
+| `POST` | `/generate/qrcode/epc` | bearer | SEPA EPC payment (IBAN format validated). |
 | `GET` | `/healthz` | none | Liveness. Always 200 if the process is serving. |
-| `GET` | `/readyz` | none | Readiness. 200 only if Redis, storage, and Postgres are all reachable; 503 otherwise. |
+| `GET` | `/readyz` | none | Readiness. 200 only if Redis, storage, and Postgres are all reachable; 503 otherwise, with a per-dependency breakdown. |
 
-All QR routes return a PNG inline, accept an optional `logo` overlay and a `scale` (1–20),
-and store nothing — there is no record to fetch afterwards.
+`/tasks/{task_id}` resolves the id through the `uploads` row it was recorded on, which is
+only done for video compression. The `task_id` returned by `POST /files/{id}/poster` and
+`POST /files/{id}/redeliver` is an internal handle for logs and correlation — polling it
+here returns `404`. Track those through `GET /files/{id}` (`poster_upload_id`,
+`webhook_status`) instead.
+
+The task result itself is deliberately thin — `{"status": "success", "upload_id": "..."}`.
+Duration, truncation, dimensions, poster link, and webhook state live on the record, not the
+task, so read `GET /files/{id}` for anything substantive.
+
+All QR routes return a PNG inline, accept an optional `logo` overlay (PNG, JPEG, GIF, WebP,
+or HEIC — not SVG) and a `scale` (1–20), and store nothing. There is no record to fetch
+afterwards.
+
+### Status codes
+
+Error bodies are always sanitized: the real exception is logged server-side and never echoed
+to the client.
+
+| Code | When |
+|---|---|
+| `400` | Unsupported or corrupt input, a video-only route called on an image, a rejected `callback_url`, a malformed QR field. |
+| `401` | Missing, invalid, or expired credential. No hint as to which. |
+| `403` | A capability JWT lacking the required upload scope, or a JWT presented to `/upload/presign`. |
+| `404` | Unknown id, another owner's record, a private video without the owner's token, an unknown or revoked share token, a non-compression task id. |
+| `409` | Poster requested for a video that is not `ready`; redelivery while still processing. |
+| `413` | Upload over `MAX_IMAGE_UPLOAD_BYTES` / `MAX_VIDEO_UPLOAD_BYTES` / `MAX_QR_LOGO_BYTES`, or over nginx's `client_max_body_size` before that. |
+| `422` | Malformed query, body, or form field (FastAPI validation) — including QR content over `MAX_QR_CONTENT_LENGTH`. |
+| `429` | nginx upload rate limit exceeded. |
+| `499` | Client disconnected mid-upload. Nothing is staged, no record is written, and the partial temp file is discarded. |
+| `502` | Storage or metadata backend unavailable. Fail-closed and visible. |
+| `503` | `/upload/presign` without `JWT_SECRET_KEY`; `/readyz` with a dependency down. |
+
+`499` is nginx's non-standard "client closed request" code, kept here so an abandoned upload
+stays distinguishable from a real client or server error in logs and metrics.
+
+Every response carries an `X-Request-ID` (echoed from the request if you send one, else
+generated). Logs are structured JSON — including uvicorn's access lines — and carry the same
+id, so one request's lines can be grepped together across the api.
 
 ---
 
@@ -377,24 +534,27 @@ and store nothing — there is no record to fetch afterwards.
 
 Two credential shapes resolve to the same owner identity.
 
-**Static master tokens** — the entries in `FILE_MANAGER_BEARER_TOKENS`, compared in
-constant time. Unrestricted: they bypass every scope check. Each entry is either a bare
-`secret` (owner derived as `tok_<hash>`, so the secret is never stored in records) or
-`label:secret` (owner = `label`, for a readable audit trail). The client always sends just
-the secret.
+**Static master tokens** — the entries in `FILE_MANAGER_BEARER_TOKENS`, compared in constant
+time. Unrestricted: they bypass every scope check. Each entry is either a bare `secret`
+(owner derived as `tok_<hash>`, so the secret is never stored in records) or `label:secret`
+(owner = `label`, for a readable audit trail). The client always sends just the secret.
 
-**Capability JWTs** — short-lived HS256 tokens signed with `JWT_SECRET_KEY`, carrying
-`sub` (owner), `exp` (strictly enforced), and `scopes`. Scopes gate **only the three
-upload verbs**; for every other owner-scoped route a JWT behaves exactly like a static
-token for its `sub`. A bad, expired, or mis-signed token is a flat `401` with no
-explanation of why.
+> Treat a master token as a backend-to-backend secret. Whoever holds one has full read,
+> write, and delete access to everything under that token's owner. See
+> [`docs/PRODUCTION.md`](docs/PRODUCTION.md) for the intended integration pattern.
+
+**Capability JWTs** — short-lived HS256 tokens signed with `JWT_SECRET_KEY`, carrying `sub`
+(owner), `exp` (strictly enforced), and `scopes`. Scopes gate **only the three upload
+routes**; for every other owner-scoped route a JWT behaves exactly like a static token for
+its `sub`. A bad, expired, or mis-signed token is a flat `401` with no explanation of why.
 
 JWT auth is off unless `JWT_SECRET_KEY` is set. Leave it blank and only static tokens are
 accepted — the original behavior — and `/upload/presign` returns `503`.
 
-Either shape may ride the `Authorization: Bearer` header **or** a `?token=` query
-parameter, with identical validation. The query form exists for clients that cannot set
-headers — a plain `<form>` POST, or a `<video src>` pointing at a private download URL.
+Either shape may ride the `Authorization: Bearer` header **or** a `?token=` query parameter,
+with identical validation. The query form exists for clients that cannot set headers — a
+plain `<form>` POST, or a `<video src>` pointing at a private download URL.
+(`/upload/presign` is the one exception: it reads the header only.)
 
 ### Direct browser uploads
 
@@ -411,12 +571,15 @@ curl -X POST -H "Authorization: Bearer $MASTER_TOKEN" \
 #      "token": "<jwt>", "expires_at": 1760000000, "scope": "upload:image" }
 ```
 
+`expires_in_seconds` accepts 1–86400 and defaults to 300. The returned `url` is absolute
+only when `PUBLIC_BASE_URL` is set; otherwise it is a relative path for the client to prefix.
+
 ---
 
 ## Storage backends
 
-Selected with `STORAGE_BACKEND`. The choice changes both how imgproxy reaches source
-images and how video bytes are delivered.
+Selected with `STORAGE_BACKEND`. The choice changes both how imgproxy reaches source images
+and how video bytes are delivered.
 
 | | `local` | `s3` (S3 / R2 / MinIO) | `gcp` |
 |---|---|---|---|
@@ -424,16 +587,17 @@ images and how video bytes are delivered.
 | imgproxy source | `local://` on a shared read-only mount | presigned or public URL | presigned or public URL |
 | Video byte path | nginx `X-Accel-Redirect` (sendfile + Range) | 302 to a presigned GET | 302 to a V4 signed URL |
 | Public video URL | not applicable — always served through nginx | 302 to `S3_PUBLIC_BASE_URL` when set | 302 to `GCS_PUBLIC_BASE_URL` when set |
+| Worker ffmpeg input | the file's path, read in place | presigned URL, streamed over HTTPS | presigned URL, streamed over HTTPS |
 | Verified | end to end | end to end against MinIO | unit-tested with a mocked client only |
 
 The three `*_PUBLIC_BASE_URL` settings are independent on purpose, so switching backends
 cannot silently reuse a URL configured for a different one. Putting a CDN in front is a
-deploy concern with no code change: point the relevant `*_PUBLIC_BASE_URL` at the CDN
-domain.
+deploy concern with no code change: point the relevant `*_PUBLIC_BASE_URL` at the CDN domain.
 
 Storage keys are `images/<uuid>.webp`, `raw/videos/<uuid>.<ext>`,
-`videos/<uuid>_compressed.<ext>`, and `posters/<uuid>.webp`. Client-supplied filenames are
-sanitized to `[a-z0-9]{,8}` before they can reach a key.
+`videos/<uuid>_compressed.<ext>`, and `posters/<uuid>.webp`. A client-supplied filename never
+reaches a key unsanitized — only its extension survives, lowercased and reduced to at most 8
+characters of `[a-z0-9]`.
 
 Run against MinIO locally:
 
@@ -447,6 +611,9 @@ docker compose --profile s3-dev up -d minio minio-init
 #   AWS_SECRET_ACCESS_KEY=minioadmin
 ```
 
+`http://minio:9000` is the in-network address the api and worker use. From your host, MinIO's
+S3 API is on `localhost:9002` and its console on `localhost:9003`.
+
 ---
 
 ## Webhooks
@@ -459,29 +626,67 @@ set**; with them unset, any `callback_url` is rejected with a `400`.
 
 The URL is admitted at upload time, before anything is staged: https-only unless
 `WEBHOOK_ALLOW_INSECURE_HTTP`, the host must be on the explicit allow-list, and unless
-`WEBHOOK_ALLOW_PRIVATE_IPS` it must not resolve to a private, loopback, or link-local
-address. The allow-list is the authoritative egress control; the IP check is defence in
-depth.
+`WEBHOOK_ALLOW_PRIVATE_IPS` it must not resolve to a private, loopback, link-local,
+reserved, multicast, or unspecified address. The allow-list is the authoritative egress
+control; the IP check is defence in depth.
 
 Delivery runs on its own task, so a slow receiver ties up a delivery slot rather than a
-transcoding slot. Headers on each attempt:
+transcoding slot.
+
+### Payload
+
+The body is compact JSON with sorted keys — sign and verify the **raw bytes**, not a
+re-serialization. `data` is the same record shape `GET /files/{id}` returns.
+
+```json
+{
+  "id": "0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95",
+  "event": "video.completed",
+  "created_at": "2026-08-15T09:12:44.512331+00:00",
+  "data": { "...": "the full record" }
+}
+```
+
+### Headers
 
 | Header | Value |
 |---|---|
-| `X-Webhook-Signature` | HMAC-SHA256 over `timestamp.body`, keyed with `WEBHOOK_SIGNING_SECRET` |
-| `X-Webhook-Id` | The upload id — stable across retries, so receivers can dedupe |
+| `X-Webhook-Id` | The upload id — stable across retries and redeliveries, so receivers can dedupe |
+| `X-Webhook-Event` | `video.completed` or `video.failed` |
+| `X-Webhook-Timestamp` | Unix seconds; part of the signed material, so you need it to verify |
+| `X-Webhook-Signature` | `sha256=<hex>` — HMAC-SHA256 over `<timestamp>.<raw body>`, keyed with `WEBHOOK_SIGNING_SECRET` |
+| `User-Agent` | `filemanager-fastapi-webhooks/1` |
 
-Failed deliveries retry with exponential backoff up to `WEBHOOK_MAX_ATTEMPTS`. An
-exhausted delivery is a durable dead-letter record on the row
-(`webhook_status`, `webhook_attempts`, `webhook_last_error`), not just a log line — replay
-it with `POST /files/{id}/redeliver`.
+```python
+import hashlib
+import hmac
+
+
+def verify(raw_body: bytes, timestamp: str, signature: str, secret: str) -> bool:
+    digest = hmac.new(
+        secret.encode(), f"{timestamp}.".encode() + raw_body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(f"sha256={digest}", signature)
+```
+
+Signing over `timestamp.body` means a captured body cannot be replayed under a fresh
+timestamp. Reject stale timestamps on your side to close the replay window.
+
+### Failure handling
+
+Failed deliveries retry with exponential backoff — `WEBHOOK_RETRY_BACKOFF_SECONDS * 2^(n-1)`,
+capped at 30 s per wait — up to `WEBHOOK_MAX_ATTEMPTS`. An exhausted delivery is a durable
+dead-letter record on the row (`webhook_status`, `webhook_attempts`, `webhook_last_error`),
+not just a log line — replay it with `POST /files/{id}/redeliver`, which re-sends the current
+terminal event under the same `X-Webhook-Id`.
 
 ---
 
 ## Configuration
 
-Full annotated list in [`.env-example`](.env-example). The settings you are most likely to
-touch:
+[`.env-example`](.env-example) is the annotated starting point. The tables below are the
+full reference; anything not listed in `.env-example` still works as an environment
+variable, it just isn't pre-seeded there.
 
 ### Core
 
@@ -489,15 +694,30 @@ touch:
 |---|---|---|
 | `FILE_MANAGER_BEARER_TOKENS` | — | Comma-separated `secret` or `label:secret`. **Required**; empty fails startup. |
 | `STORAGE_BACKEND` | `local` | `local` \| `s3` \| `gcp`. |
-| `DATABASE_URL` | — | Postgres DSN for the metadata store. |
+| `DATABASE_URL` | — | Postgres DSN for the metadata store. Set by compose for the bundled `db`. |
 | `REDIS_URL` | `redis://redis:6379/0` | TaskIQ broker and result backend. |
-| `PUBLIC_BASE_URL` | — | This service's external origin. Makes share/download URLs absolute. |
+| `PUBLIC_BASE_URL` | — | This service's external origin. Makes share/download/presign URLs absolute; blank returns relative paths. |
+
+### Storage
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LOCAL_STORAGE_DIR` | `/data/media` | Root of the `local` backend's volume, shared read-only with nginx and imgproxy. |
+| `LOCAL_PUBLIC_BASE_URL` | — | Base URL prepended to local object keys. Not used for video playback (that always goes through nginx). |
+| `S3_BUCKET` | — | **Required** when `STORAGE_BACKEND=s3`. |
+| `S3_ENDPOINT_URL` | — | Custom endpoint for R2 / MinIO; blank for real AWS. |
+| `S3_PUBLIC_BASE_URL` | — | CDN or custom domain in front of the bucket. Enables the stable 302 for `public` videos. |
+| `AWS_REGION` | — | Region for real AWS S3. |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | Blank falls back to boto's default credential chain (IAM roles, env). |
+| `GCS_BUCKET` | — | **Required** when `STORAGE_BACKEND=gcp`. |
+| `GCS_PUBLIC_BASE_URL` | — | CDN or custom domain in front of the bucket. |
+| `GCP_PROJECT` / `GCP_SERVICE_ACCOUNT_FILE` | — | Service-account credentials; the key file is also what signs V4 playback URLs locally. |
 
 ### imgproxy and nginx
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `IMGPROXY_KEY` / `IMGPROXY_SALT` | — | Hex-encoded, must differ, must match the imgproxy container exactly. **Required.** |
+| `IMGPROXY_KEY` / `IMGPROXY_SALT` | — | Hex-encoded, should differ, must match the imgproxy container exactly. **Required.** |
 | `IMGPROXY_BASE_URL` | — | Where imgproxy is reachable. Point at nginx, e.g. `http://localhost:9000/imgproxy`. |
 | `ENABLE_IMGPROXY_CACHE` | `true` | Toggles the nginx origin-shield cache. |
 | `NGINX_MAX_BODY_SIZE` | `2000m` | Edge body cap. Keep at or above `MAX_VIDEO_UPLOAD_BYTES` or nginx 413s before the app's own check. |
@@ -508,7 +728,7 @@ touch:
 |---|---|---|
 | `MAX_IMAGE_UPLOAD_BYTES` | 25 MiB | Per-image cap. |
 | `MAX_VIDEO_UPLOAD_BYTES` | 2000 MiB | Per-video cap, enforced while streaming to disk. |
-| `MAX_IMAGE_PIXELS` | 50,000,000 | Decompression-bomb guard, checked before the full-resolution encode. |
+| `MAX_IMAGE_PIXELS` | 50,000,000 | Decompression-bomb guard, checked from the header before any full-resolution decode. |
 | `MAX_QR_CONTENT_LENGTH` | 2000 | Rejects oversized QR payloads before they reach segno. |
 | `MAX_QR_LOGO_BYTES` | 5 MiB | Logo overlay cap. |
 
@@ -535,7 +755,7 @@ touch:
 | `WEBHOOK_ALLOW_PRIVATE_IPS` | `false` | Permit callbacks resolving to private or loopback addresses. |
 | `WEBHOOK_TIMEOUT_SECONDS` | `10` | Per-attempt HTTP timeout. |
 | `WEBHOOK_MAX_ATTEMPTS` | `4` | Attempts before dead-lettering. |
-| `WEBHOOK_RETRY_BACKOFF_SECONDS` | `1.0` | Exponential backoff base. |
+| `WEBHOOK_RETRY_BACKOFF_SECONDS` | `1.0` | Exponential backoff base, capped at 30 s per wait. |
 
 ---
 
@@ -546,7 +766,7 @@ imports in your editor are expected noise, not a problem to fix.
 
 ```sh
 docker compose up --build          # full stack
-docker compose up worker           # worker only
+docker compose up worker           # worker only (starts its redis/db/migrate deps too)
 ```
 
 > **Always pass `--build` to the `test` service.** Its image bakes the source in at build
@@ -565,8 +785,12 @@ docker compose run --rm --build test pytest -m "not pg_integration"
 
 Note `ruff format --check` rather than a bare `ruff format`: the container has its own
 baked-in copy of the source, so a rewrite there is discarded with the container and never
-reaches your working tree. Use `--check` to find the offending files, then fix them in
-your editor.
+reaches your working tree. Use `--check` to find the offending files, then fix them in your
+editor.
+
+The same four commands run in CI on every push and pull request to `master`
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), against the identical compose
+service — plus CodeQL, Snyk, Trivy, Pysa, and SonarCloud workflows alongside it.
 
 ### Migrations
 
@@ -592,8 +816,8 @@ docker compose --profile backup run --rm db-backup     # pg_dump, pruning dumps 
 into any bare `docker compose` command from this directory, and it unconditionally replaces
 the `api` and `worker` commands with single-process reload variants plus a live-mount of
 `./app`. A production-facing change to `Dockerfile.api`'s `CMD` is real in the built image
-but invisible under a default local `up`. To verify one, inspect the running container or
-run `docker compose -f docker-compose.yml up` to exclude the override.
+but invisible under a default local `up`. To verify one, inspect the running container or run
+`docker compose -f docker-compose.yml up` to exclude the override.
 
 ---
 
@@ -601,29 +825,44 @@ run `docker compose -f docker-compose.yml up` to exclude the override.
 
 Deliberate boundaries, stated plainly rather than discovered later:
 
-- **Not a general file host.** No cross-owner listing, no search, no public index.
-  Deletion is explicit and irreversible.
+- **Not a general file host.** No cross-owner listing, no search, no public index. Deletion
+  is explicit and irreversible.
 - **Progressive playback only.** HTTP Range works everywhere; HLS and adaptive bitrate are
   out of scope.
-- **Video output is trimmed to `VIDEO_MAX_DURATION_SECONDS` (60s by default).** The service
+- **Video output is trimmed to `VIDEO_MAX_DURATION_SECONDS` (60 s by default).** The service
   is built around short-form media; long-form needs that cap raised or disabled, and the
   `FFMPEG_TIMEOUT_SECONDS` budget widened to match.
+- **Images are downscaled and stripped on upload.** All metadata (EXIF, GPS, ICC profile,
+  XMP) is dropped on every re-encode, and anything above the profile's dimension cap is
+  resized. Neither is configurable per request beyond choosing `optimization`.
 - **Image uploads are fully buffered in memory** by design, bounded by
   `MAX_IMAGE_UPLOAD_BYTES`. Video upload and worker processing stream to and from disk with
   bounded memory on every backend.
-- **All metadata is stripped from images** — EXIF, GPS, ICC profile, XMP — on every
-  re-encode. This is not configurable per request.
-- **Scopes are coarse.** `upload:image` and `upload:video` are the entire taxonomy, and
-  they gate only the upload verbs. There are no read-only, read-write, or admin roles.
+- **Image imgproxy URLs are not equally durable across responses.** On s3/gcp the URLs in the
+  `POST /upload/image` response embed a *presigned* source URL that expires after an hour,
+  while the `url` / `thumbnail_url` on `GET /files/{id}` embed the plain object URL. Prefer
+  the record's URLs for anything you persist, and make sure imgproxy can actually reach that
+  object URL (a public bucket or a CDN in front of it).
+- **Dedup is best-effort.** Two genuinely simultaneous identical uploads can both slip
+  through; there is no unique constraint behind it. The same is true of two simultaneous
+  poster requests, where the loser becomes a harmless standalone image row.
+- **Scopes are coarse.** `upload:image` and `upload:video` are the entire taxonomy, and they
+  gate only the upload routes. There are no read-only, read-write, or admin roles.
+- **Only compression tasks are pollable.** Poster generation and webhook delivery run as
+  their own tasks but are observed through the record, not `GET /tasks/{id}`.
 - **Webhook replay is manual.** Dead-lettered deliveries are durable and replayable, but
-  nothing re-attempts them on a schedule.
+  nothing re-attempts them on a schedule, and the delivery task waits out its full retry
+  budget inline on a worker slot.
 - **Signed playback URLs expire.** A player caches the resolved URL, so a seek after
-  `VIDEO_PLAYBACK_URL_TTL_SECONDS` can hit an expired signature. CDN signed cookies would
-  be the bulletproof fix; sizing the TTL is the current mitigation.
-- **No presigned direct-to-storage uploads.** Every byte still proxies through `api`.
-- **No retries or circuit breakers** around Redis, S3/GCS, imgproxy, or Postgres. Failures
-  are fail-closed and visible (a generic `502`), which is correct but is not a resilience
-  layer.
+  `VIDEO_PLAYBACK_URL_TTL_SECONDS` can hit an expired signature. CDN signed cookies would be
+  the bulletproof fix; sizing the TTL is the current mitigation.
+- **No presigned direct-to-storage uploads.** `/upload/presign` moves the *auth* off your
+  backend, but every byte still proxies through `api`.
+- **No per-owner quotas.** nginx rate-limits uploads per IP and bulk image processing is
+  bounded at 4 concurrent, but there are no persistent tenant storage quotas or global worker
+  concurrency caps.
+- **No retries or circuit breakers** around Redis, S3/GCS, imgproxy, or Postgres. Failures are
+  fail-closed and visible (a generic `502`), which is correct but is not a resilience layer.
 - **TLS is not shipped.** nginx terminates plain HTTP. Add a TLS terminator or an upstream
   load balancer / ingress for production.
 
@@ -631,14 +870,14 @@ Deliberate boundaries, stated plainly rather than discovered later:
 
 ## A note on v1
 
-This started as a handwritten side project — no LLM assistance, just curiosity and a need
-for a file-management microservice that did what I wanted. That original version lives on
-the [`before_llm`](https://github.com/JexPY/filemanager-fastapi/tree/before_llm) branch as
-a snapshot of where it began: Pillow-SIMD, libcloud, a rougher but honest codebase. Worth
-a look if you are curious about the evolution.
+This started as a handwritten side project — no LLM assistance, just curiosity and a need for
+a file-management microservice that did what I wanted. That original version lives on the
+[`before_llm`](https://github.com/JexPY/filemanager-fastapi/tree/before_llm) branch as a
+snapshot of where it began: Pillow-SIMD, libcloud, a rougher but honest codebase. Worth a
+look if you are curious about the evolution.
 
-The current version is a full rewrite with a hardened architecture and async-first
-internals, but the spirit is the same.
+The current version is a full rewrite with a hardened architecture and async-first internals,
+but the spirit is the same.
 
 ---
 

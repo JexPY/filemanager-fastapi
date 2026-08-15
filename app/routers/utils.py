@@ -13,6 +13,14 @@ from app.config import settings
 from app.services.imgproxy import build_source_url, generate_signed_url
 from app.services.storage import StorageError, get_storage
 
+# 499 is nginx's non-standard "client closed request" code, which is what the
+# edge proxy in front of this app already logs for an abandoned upload. Starlette
+# only defines IANA-registered codes, so `status.HTTP_499_CLIENT_CLOSED_REQUEST`
+# does not exist -- referencing it raised AttributeError (a 500) on exactly the
+# path meant to return 499. Define it here instead of guessing a nearby standard
+# code, so the abort stays distinguishable from a real client or server error.
+HTTP_499_CLIENT_CLOSED_REQUEST = 499
+
 
 async def _read_capped(file: UploadFile, request: Request, max_bytes: int) -> bytes:
     """Read an upload into memory, aborting safely if it exceeds max_bytes. Used
@@ -22,7 +30,7 @@ async def _read_capped(file: UploadFile, request: Request, max_bytes: int) -> by
     while chunk := await file.read(1024 * 1024):  # 1MB chunks
         if await request.is_disconnected():
             raise HTTPException(
-                status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST, detail="Client disconnected"
+                status_code=HTTP_499_CLIENT_CLOSED_REQUEST, detail="Client disconnected"
             )
         content.extend(chunk)
         if len(content) > max_bytes:
@@ -54,7 +62,7 @@ async def _stream_capped_to_temp(
             while chunk := await file.read(1024 * 1024):  # 1MB chunks
                 if await request.is_disconnected():
                     raise HTTPException(
-                        status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
+                        status_code=HTTP_499_CLIENT_CLOSED_REQUEST,
                         detail="Client disconnected",
                     )
                 size += len(chunk)
