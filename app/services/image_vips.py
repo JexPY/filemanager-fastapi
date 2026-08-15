@@ -1,6 +1,7 @@
 import pyvips
 
 from app.config import settings
+from app.services.renditions import RENDITION_SPECS
 
 # Allow-list of accepted input formats, checked via magic bytes before pyvips
 # ever touches the buffer. Deliberately excludes SVG: Dockerfile.api compiles
@@ -59,14 +60,21 @@ def validate_and_strip_image(
             f"Image dimensions {width}x{height} exceed the {settings.MAX_IMAGE_PIXELS}-pixel limit"
         )
 
-    # Materialize the 300x300 thumbnail rendition in the same libvips pass.
+    # Materialize thumbnail rendition from spec in the same libvips pass.
     # crop=pyvips.Interesting.CENTRE produces a center-cropped 300x300 fill thumbnail,
     # matching imgproxy's rs:fill:300:300.
-    thumb_image = image.thumbnail_image(300, height=300, crop=pyvips.Interesting.CENTRE)
-    thumb_buffer = thumb_image.write_to_buffer(
-        ".webp", Q=80, strip=True, effort=6, smart_subsample=True
+    thumb_spec = RENDITION_SPECS["thumbnail"]
+    thumb_image = image.thumbnail_image(
+        thumb_spec.width, height=thumb_spec.height, crop=pyvips.Interesting.CENTRE
     )
-    renditions = {"thumbnail": thumb_buffer}
+    thumb_buffer = thumb_image.write_to_buffer(
+        f".{thumb_spec.format}",
+        Q=thumb_spec.quality,
+        strip=True,
+        effort=6,
+        smart_subsample=True,
+    )
+    renditions = {thumb_spec.name: thumb_buffer}
 
     # Determine quality and max dimension based on optimization profile
     if optimization == "size":

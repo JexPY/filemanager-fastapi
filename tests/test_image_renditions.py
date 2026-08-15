@@ -340,12 +340,36 @@ async def test_upload_and_record_thumbnail_urls_are_byte_identical(
     )
 
 
-def test_derive_rendition_key_preserves_extension() -> None:
-    """R5: derive_rendition_key must preserve the parent key extension."""
-    from app.services.renditions import derive_rendition_key
+def test_derive_rendition_key_format_independent_of_parent() -> None:
+    """Rendition format is determined by the rendition spec (.webp), not the parent extension."""
+    from app.services.renditions import (
+        RENDITION_SPECS,
+        derive_rendition_key,
+        get_rendition_spec,
+    )
 
-    assert derive_rendition_key("images/test.png", "thumbnail") == "images/test_t300.png"
+    # Spec registry assertions
+    assert "thumbnail" in RENDITION_SPECS
+    spec = get_rendition_spec("thumbnail")
+    assert spec is not None
+    assert RENDITION_SPECS["thumbnail"] == spec
+    assert spec.name == "thumbnail"
+    assert spec.suffix == "t300"
+    assert spec.format == "webp"
+    assert spec.width == 300
+    assert spec.height == 300
+    assert get_rendition_spec("thumb") == spec
+    assert get_rendition_spec("t300") == spec
+    assert get_rendition_spec("unknown") is None
+
+    # Key derivation always emits .webp regardless of parent extension
+    assert derive_rendition_key("images/test.png", "thumbnail") == "images/test_t300.webp"
     assert derive_rendition_key("images/test.webp", "thumbnail") == "images/test_t300.webp"
+    assert (
+        derive_rendition_key("videos/x_compressed.mp4", "thumbnail")
+        == "videos/x_compressed_t300.webp"
+    )
+    assert derive_rendition_key("files/document.pdf", "thumbnail") == "files/document_t300.webp"
     assert derive_rendition_key("test.webp", "thumbnail") == "test_t300.webp"
     assert derive_rendition_key("images/noext", "thumbnail") == "images/noext_t300.webp"
     assert derive_rendition_key("images/test.webp", "thumb") == "images/test_t300.webp"

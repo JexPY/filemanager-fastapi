@@ -2,7 +2,37 @@
 
 from __future__ import annotations
 
-ALLOWED_RENDITION_NAMES = frozenset({"thumbnail", "thumb", "t300"})
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class RenditionSpec:
+    """Specification for a materialized rendition.
+
+    Format and dimensions are intrinsic properties of the rendition,
+    independent of the parent object's type or extension.
+    """
+
+    name: str
+    suffix: str
+    width: int
+    height: int
+    format: str = "webp"
+    mime_type: str = "image/webp"
+    quality: int = 80
+
+
+RENDITION_SPECS: dict[str, RenditionSpec] = {
+    "thumbnail": RenditionSpec(
+        name="thumbnail",
+        suffix="t300",
+        width=300,
+        height=300,
+        format="webp",
+        mime_type="image/webp",
+        quality=80,
+    ),
+}
 
 _RENDITION_ALIASES: dict[str, str] = {
     "thumbnail": "thumbnail",
@@ -10,11 +40,7 @@ _RENDITION_ALIASES: dict[str, str] = {
     "t300": "thumbnail",
 }
 
-_RENDITION_SUFFIXES: dict[str, str] = {
-    "thumbnail": "t300",
-    "thumb": "t300",
-    "t300": "t300",
-}
+ALLOWED_RENDITION_NAMES = frozenset(_RENDITION_ALIASES.keys())
 
 
 def normalize_rendition_name(name: str | None) -> str | None:
@@ -28,21 +54,28 @@ def normalize_rendition_name(name: str | None) -> str | None:
     return _RENDITION_ALIASES.get(cleaned)
 
 
+def get_rendition_spec(name: str | None) -> RenditionSpec | None:
+    """Get the RenditionSpec for a rendition name or alias, or None if unknown."""
+    canonical = normalize_rendition_name(name)
+    return RENDITION_SPECS.get(canonical) if canonical else None
+
+
 def derive_rendition_key(parent_storage_key: str, rend_name: str) -> str:
     """Derive a rendition storage key from a parent storage key.
 
     E.g. 'images/uuid.webp', 'thumbnail' -> 'images/uuid_t300.webp'.
-    Preserves parent key extension or defaults to 'webp'.
+    'videos/uuid_compressed.mp4', 'thumbnail' -> 'videos/uuid_compressed_t300.webp'.
+
+    The rendition's output format is a property of the rendition itself
+    (defined in RENDITION_SPECS), not of the parent key.
     """
+    spec = get_rendition_spec(rend_name)
+    suffix = spec.suffix if spec else rend_name
+    ext = spec.format if spec else "webp"
+
     prefix, _, filename = parent_storage_key.rpartition("/")
-    if "." in filename:
-        stem, ext = filename.rsplit(".", 1)
-        ext_part = f".{ext}"
-    else:
-        stem = filename
-        ext_part = ".webp"
-    suffix = _RENDITION_SUFFIXES.get(rend_name, rend_name)
-    file_part = f"{stem}_{suffix}{ext_part}"
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    file_part = f"{stem}_{suffix}.{ext}"
     return f"{prefix}/{file_part}" if prefix else file_part
 
 
