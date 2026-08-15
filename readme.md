@@ -1,10 +1,6 @@
 <br>
 <p align="center">
-  <a href="#">
-    <img src="https://media2.giphy.com/media/3gWIUenLXoEgPk0BwB/source.gif" alt="Logo" width="80" height="80">
-  </a>
-
-  <h3 align="center">Filemanager-FastAPI</h3>
+  <h1 align="center">Filemanager-FastAPI</h1>
 
   <p align="center">
     A high-performance media-processing microservice: images, video, generic files, and QR codes.
@@ -12,8 +8,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/JexPY/filemanager-fastapi/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JexPY/filemanager-fastapi/ci.yml?branch=master&label=CI" alt="CI"></a>
-  <a href="https://github.com/JexPY/filemanager-fastapi/actions/workflows/codeql.yml"><img src="https://img.shields.io/github/actions/workflow/status/JexPY/filemanager-fastapi/codeql.yml?branch=master&label=CodeQL" alt="CodeQL"></a>
+  <a href="https://github.com/JexPY/filemanager-fastapi/actions/workflows/ci.yml"><img src="https://github.com/JexPY/filemanager-fastapi/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/JexPY/filemanager-fastapi/actions/workflows/codeql.yml"><img src="https://github.com/JexPY/filemanager-fastapi/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
   <a href="https://sonarcloud.io/summary/new_code?id=JexPY_filemanager-fastapi"><img src="https://sonarcloud.io/api/project_badges/measure?project=JexPY_filemanager-fastapi&metric=alert_status" alt="Quality Gate Status"></a>
   <a href="https://sonarcloud.io/summary/new_code?id=JexPY_filemanager-fastapi"><img src="https://sonarcloud.io/api/project_badges/measure?project=JexPY_filemanager-fastapi&metric=security_rating" alt="Security Rating"></a>
   <a href="https://snyk.io/test/github/JexPY/filemanager-fastapi"><img src="https://snyk.io/test/github/JexPY/filemanager-fastapi/badge.svg" alt="Known Vulnerabilities"></a>
@@ -264,6 +260,22 @@ flowchart TB
     %% Startup Migration
     Migrate ==>|"Alembic Schema Head"| DB
 ```
+
+#### Services Breakdown
+
+| Service | Image / Build | Ports | Profile / Lifecycle | Role & Responsibilities |
+|---|---|---|---|---|
+| `nginx` | `nginx:1.27-alpine` | `9000:80` | Core (Always running) | Entry reverse proxy, origin shield caching for imgproxy, upload rate limiter (2 r/s, burst 5), and zero-copy byte streamer via `internal;` X-Accel locations. |
+| `api` | `Dockerfile.api` | `9001:80` (debug) | Core (Always running) | FastAPI HTTP server. Handles auth, input validation, synchronous image/file ingest, QR generation, storage staging, and database transactions. |
+| `worker` | `Dockerfile.worker` | *None* | Core (Always running) | TaskIQ worker. Consumes transcoding tasks from Redis, executes FFmpeg / FFprobe pipelines, extracts poster stills, and dispatches HMAC-signed webhooks. |
+| `migrate` | `Dockerfile.api` | *None* | One-Shot (Startup gate) | Runs `alembic upgrade head` to apply schema migrations before `api` and `worker` start accepting jobs. |
+| `db` | `postgres:17-alpine` | `5432` (internal) | Core (Always running) | System of record for the `uploads` table, storing metadata, visibility states, rendition paths, and webhook delivery statuses. |
+| `redis` | `redis:7-alpine` | `6379` (internal) | Core (Always running) | TaskIQ distributed task broker and task result backend. Only storage keys and task metadata travel through Redis. |
+| `imgproxy` | `darthsim/imgproxy:v4.0.12` | `8080` (internal) | Core (Always running) | Dynamic, on-demand image transformations (resizing, cropping, format conversion). Protected behind NGINX origin shield cache. |
+| `garage` | `dxflrs/garage:v2.3.0` | `9002:3900`, `9003:3903` | `s3-dev` | Lightweight S3-compatible object storage fixture for local integration testing. |
+| `garage-init` | `alpine:3.22` | *None* | `s3-dev` (One-shot) | Readiness gate container verifying Garage cluster health before running S3 tests. |
+| `db-backup` | `postgres:17-alpine` | *None* | `backup` (On-demand) | Automated pg_dump backup utility that dumps the PostgreSQL schema/data and prunes backups older than 7 days. |
+| `test` | `Dockerfile.test` | *None* | `test` (On-demand) | Containerized test runner executing pytest, ruff lint, ruff format check, and mypy type validation. |
 
 #### Key Architecture Properties:
 - **Single Public Port:** Only NGINX (`:9000`) is intended for client traffic. Port `:9001` on the API is for debugging only and cannot serve local media (which requires NGINX `X-Accel-Redirect`).
