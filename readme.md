@@ -77,6 +77,10 @@ The service comes up behind nginx at **`http://localhost:9000`**, with Swagger U
 `http://localhost:9000/docs`. A one-shot `migrate` service applies the Alembic migrations
 and exits before `api` and `worker` start.
 
+> If you switch `STORAGE_BACKEND` to `s3`/`gcp`, also set the matching `*_PUBLIC_BASE_URL`
+> and `IMGPROXY_ALLOWED_SOURCES`. Without a public base URL imgproxy has no address it can
+> fetch an image source from, and the app logs a warning at startup saying so.
+
 ### 3. Call it
 
 ```sh
@@ -209,10 +213,11 @@ Notes on the topology as it is actually wired:
   origin. `IMGPROXY_BASE_URL` should therefore point at nginx, not at imgproxy.
 - **The api's host port 9001 is for debugging only.** Only nginx interprets
   `X-Accel-Redirect`, so local video playback does not work if you hit `:9001` directly.
-- **`/internal-media/` in nginx is marked `internal;`.** It can only be entered via an
-  upstream `X-Accel-Redirect`, never by a direct client request. That is what keeps the
-  download route's visibility and ownership checks from being bypassable. The media volume
-  is mounted read-only into both nginx and imgproxy.
+- **Two nginx locations are marked `internal;`** — `/internal-media/` (the `local` media
+  volume, mounted read-only into both nginx and imgproxy) and `/internal-object/` (a proxy to
+  the object store for private media). Both can only be entered via an upstream
+  `X-Accel-Redirect`, never by a direct client request. That is what keeps the download
+  route's visibility and ownership checks from being bypassable, on every backend.
 - **Uploads are rate-limited at the edge**, at 2 req/s per IP with a burst of 5, matching
   `^/upload/(images?|video)$`; over the burst is a 429. Read, list, health, and
   `/upload/presign` are unrestricted.
@@ -630,7 +635,8 @@ and how video bytes are delivered.
 |---|---|---|---|
 | Objects live in | `LOCAL_STORAGE_DIR` volume | `S3_BUCKET` | `GCS_BUCKET` |
 | imgproxy source | `local://` on a shared read-only mount | presigned or public URL | presigned or public URL |
-| Video byte path | nginx `X-Accel-Redirect` (sendfile + Range) | 302 to a presigned GET | 302 to a V4 signed URL |
+| Public byte path | nginx `X-Accel-Redirect` (sendfile + Range) | 302 to the public/CDN URL | 302 to the public/CDN URL |
+| Private byte path | nginx `X-Accel-Redirect` | nginx proxies a signed URL the client never sees | same |
 | Public video URL | not applicable — always served through nginx | 302 to `S3_PUBLIC_BASE_URL` when set | 302 to `GCS_PUBLIC_BASE_URL` when set |
 | Worker ffmpeg input | the file's path, read in place | presigned URL, streamed over HTTPS | presigned URL, streamed over HTTPS |
 | Verified | end to end | end to end against Garage | unit-tested with a mocked client only |
@@ -775,6 +781,7 @@ variable, it just isn't pre-seeded there.
 |---|---|---|
 | `IMGPROXY_KEY` / `IMGPROXY_SALT` | — | Hex-encoded, should differ, must match the imgproxy container exactly. **Required.** |
 | `IMGPROXY_BASE_URL` | — | Where imgproxy is reachable. Point at nginx, e.g. `http://localhost:9000/imgproxy`. |
+| `IMGPROXY_ALLOWED_SOURCES` | `local://` | Egress allow-list for imgproxy. On `s3`/`gcp` set it to your public/CDN prefix. |
 | `ENABLE_IMGPROXY_CACHE` | `true` | Toggles the nginx origin-shield cache. |
 | `NGINX_MAX_BODY_SIZE` | `2000m` | Edge body cap. Keep at or above `MAX_VIDEO_UPLOAD_BYTES` or nginx 413s before the app's own check. |
 
@@ -798,6 +805,7 @@ variable, it just isn't pre-seeded there.
 | `FFMPEG_INPUT_URL_TTL_SECONDS` | 3600 | TTL of the presigned URL the worker hands ffmpeg as input on s3/gcp. Must exceed the ffmpeg timeout. |
 | `VIDEO_PLAYBACK_URL_TTL_SECONDS` | 21600 | TTL of the signed playback URL. Size it to a viewing session. |
 | `LOCAL_MEDIA_SERVE_MODE` | `xaccel` | `xaccel` for production (nginx serves bytes) or `direct` for a no-nginx dev setup. |
+| `PRIVATE_MEDIA_SERVE_MODE` | `stream` | How private media is served on `s3`/`gcp`. `stream` proxies the bytes through nginx so no signed URL ever reaches the client; `redirect` 302s to a signed URL instead, keeping bandwidth off this host at the cost of a leakable, expiring URL. |
 
 ### Optional features
 
@@ -911,9 +919,11 @@ Deliberate boundaries, stated plainly rather than discovered later:
 - **Webhook replay is manual.** Dead-lettered deliveries are durable and replayable, but
   nothing re-attempts them on a schedule, and the delivery task waits out its full retry
   budget inline on a worker slot.
-- **Signed playback URLs expire.** A player caches the resolved URL, so a seek after
-  `VIDEO_PLAYBACK_URL_TTL_SECONDS` can hit an expired signature. CDN signed cookies would be
-  the bulletproof fix; sizing the TTL is the current mitigation.
+- **`PRIVATE_MEDIA_SERVE_MODE=redirect` reintroduces an expiring URL.** In the default
+  `stream` mode there is no client-visible signed URL at all, so nothing expires mid-seek and
+  nothing is leakable. Opting into `redirect` trades that back for keeping bandwidth off the
+  host: the URL becomes a bearer token for its TTL, and a seek after
+  `VIDEO_PLAYBACK_URL_TTL_SECONDS` can hit an expired signature.
 - **No presigned direct-to-storage uploads.** `/upload/presign` moves the *auth* off your
   backend, but every byte still proxies through `api`.
 - **No per-owner quotas.** nginx rate-limits uploads per IP and bulk image processing is

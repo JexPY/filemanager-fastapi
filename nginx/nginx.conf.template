@@ -63,6 +63,43 @@ http {
             alias /data/media/;
         }
 
+        # X-Accel-Redirect target for PRIVATE media on the object-store backends
+        # (s3/gcp). Same load-bearing `internal;` property as above: reachable
+        # only from an upstream response, never by a client.
+        #
+        # The app signs a short-lived object URL, keeps it server-side, and puts
+        # it in an `X-Object-Target` response header; nginx reads it back here and
+        # proxies the bytes. The client therefore never receives a signed URL at
+        # all -- no leakage window, no TTL to size, no expired-signature failure
+        # mid-seek -- and ownership is re-checked on every request rather than
+        # once at redirect time.
+        location /internal-object/ {
+            internal;
+
+            # proxy_pass with a variable is resolved at request time, which
+            # requires an explicit resolver. 127.0.0.11 is Docker's embedded DNS.
+            resolver 127.0.0.11 ipv6=off valid=30s;
+            set $object_target $upstream_http_x_object_target;
+
+            # The client's credentials must not travel to the object store: an
+            # Authorization header collides with the presigned SigV4 query
+            # signature and the request is rejected.
+            proxy_set_header Authorization "";
+            proxy_set_header Cookie "";
+            # Range has to reach the store for seeking to work at all.
+            proxy_set_header Range $http_range;
+            proxy_set_header If-Range $http_if_range;
+            # Required for TLS upstreams addressed by hostname (R2, S3, GCS).
+            proxy_ssl_server_name on;
+            # Stream rather than accumulate: a large private video must not be
+            # buffered to disk here before the client sees a byte.
+            proxy_buffering off;
+            # Never cache private bytes in the shared origin-shield cache.
+            proxy_cache off;
+
+            proxy_pass $object_target;
+        }
+
         # imgproxy reverse proxy with optional cache lock (origin shield)
         location /imgproxy/ {
             proxy_pass http://imgproxy/;
@@ -101,6 +138,13 @@ http {
             proxy_set_header   X-Real-IP         $remote_addr;
             proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
             proxy_set_header   X-Forwarded-Proto $scheme;
+            # The signed upstream URL for private media rides this header from
+            # the app to the /internal-object/ location above. It must never
+            # reach the client -- that would defeat the entire point of
+            # streaming instead of redirecting. Hiding it does not affect
+            # $upstream_http_x_object_target, which is read from the upstream
+            # response before this applies.
+            proxy_hide_header  X-Object-Target;
             # If/when streaming uploads land, add `proxy_request_buffering off;`
             # on the upload route so nginx doesn't buffer the whole body (sibling
             # pass -- noted for the interplay, not enabled here).

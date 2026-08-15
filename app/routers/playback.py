@@ -20,6 +20,17 @@ router = APIRouter()
 _NOT_FOUND_DETAIL = "Not found"
 
 
+def _fallback_filename(storage_key: str) -> str:
+    """A sensible download name when the record has no original filename.
+
+    The storage key's basename always carries the *correct* extension for what
+    is actually stored (`<uuid>.webp`, `<uuid>_compressed.mp4`). The previous
+    literal "video.mp4" default was harmless while this route was video-only;
+    once it went kind-agnostic it started labelling every image as an mp4.
+    """
+    return storage_key.rsplit("/", 1)[-1]
+
+
 @router.get(
     "/files/{file_id}/download",
     tags=["Sharing & Playback"],
@@ -85,8 +96,9 @@ async def stream_video(
     try:
         return await resolve_playback(
             record.storage_key,
-            filename=record.original_filename or "video.mp4",
-            media_type=record.content_type or "video/mp4",
+            filename=record.original_filename or _fallback_filename(record.storage_key),
+            media_type=record.content_type or "application/octet-stream",
+            private=record.visibility != VISIBILITY_PUBLIC,
         )
     except StorageError as exc:
         logger.exception("Failed to resolve playback")
@@ -121,8 +133,12 @@ async def play_shared_video(share_token: Annotated[str, Path(max_length=128)]):
     try:
         return await resolve_playback(
             record.storage_key,
-            filename=record.original_filename or "video.mp4",
-            media_type=record.content_type or "video/mp4",
+            filename=record.original_filename or _fallback_filename(record.storage_key),
+            media_type=record.content_type or "application/octet-stream",
+            # A share link is a secret capability, so treat it like private
+            # media: stream it rather than handing the holder a signed URL they
+            # could pass on independently of the (revocable) share token.
+            private=True,
         )
     except StorageError as exc:
         logger.exception("Failed to resolve playback via share token")

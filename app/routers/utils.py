@@ -121,6 +121,40 @@ def _xaccel_response(
     return response
 
 
+def _object_xaccel_response(target_url: str, media_type: str = "video/mp4") -> Response:
+    """Stream a private object-store object through nginx, so the signed URL
+    never reaches the client.
+
+    The app returns an empty body carrying `X-Accel-Redirect: /internal-object/`
+    plus the freshly-signed upstream URL in `X-Object-Target`; nginx reads that
+    back out of the upstream response inside an `internal;` location the client
+    cannot address, and proxies the bytes (Range included).
+
+    That closes the hole a 302 leaves open. A redirect hands the client a URL
+    that is a bearer token for its whole TTL -- leakable through history, a
+    Referer header, or a log -- and one that a player caches, so a seek after it
+    expires fails. Here there is no client-visible URL at all: ownership is
+    re-checked on every single request, and there is no TTL to size.
+
+    The counterpart security property is nginx's `internal;` on that location,
+    exactly as with `/internal-media/`.
+    """
+    # The value is interpolated into nginx's proxy_pass. It is built here from a
+    # storage backend, never from client input, but assert the shape anyway --
+    # this is the one place a bad value would become an SSRF primitive.
+    if not target_url.startswith(("https://", "http://")):
+        raise StorageError("Refusing to proxy a non-HTTP(S) upstream URL")
+    response = Response(media_type=media_type)
+    response.headers["X-Accel-Redirect"] = "/internal-object/"
+    response.headers["X-Object-Target"] = target_url
+    # Deliberately no Content-Disposition here. The signed upstream URL already
+    # carries one as a response-header override, and nginx passes the upstream's
+    # headers through -- setting it on both sides emitted the header twice
+    # (caught by end-to-end verification, not by the unit tests, which only see
+    # this response and never nginx's merge of the two).
+    return response
+
+
 def _local_file_response(
     storage_key: str, filename: str | None = None, media_type: str = "video/mp4"
 ) -> Response:
@@ -141,7 +175,11 @@ def _local_file_response(
 
 
 async def resolve_playback(
-    storage_key: str, filename: str | None = None, media_type: str = "video/mp4"
+    storage_key: str,
+    filename: str | None = None,
+    media_type: str = "video/mp4",
+    *,
+    private: bool = False,
 ) -> Response:
     """Resolve a video's byte path, keyed on STORAGE_BACKEND (mirrors
     imgproxy.build_source_url's keying): local -> nginx X-Accel (or FileResponse
@@ -174,6 +212,11 @@ async def resolve_playback(
     )
     if not signed:
         raise StorageError(f"Backend {backend_name!r} cannot sign a playback URL")
+    # Private media streams through nginx by default, so the signed URL stays
+    # server-side. Public media keeps redirecting -- the URL is not a secret, and
+    # a redirect keeps the bytes (and the bandwidth) off this host entirely.
+    if private and settings.PRIVATE_MEDIA_SERVE_MODE == "stream":
+        return _object_xaccel_response(signed, media_type=media_type)
     return RedirectResponse(url=signed, status_code=status.HTTP_302_FOUND)
 
 

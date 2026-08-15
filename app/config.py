@@ -120,6 +120,21 @@ class Settings(BaseSettings):
     # which also honours Range for on-disk files).
     LOCAL_MEDIA_SERVE_MODE: str = Field(default="xaccel")
 
+    # How PRIVATE media is served on the object-store backends (s3/gcp). `local`
+    # is unaffected -- it always streams through nginx's internal location.
+    #
+    #   stream   -> nginx proxies the bytes from an internal location the client
+    #               cannot address. No signed URL ever reaches the client, so
+    #               there is no leakage window, no TTL to size, and no expiry to
+    #               break a seek. Costs bandwidth through this host.
+    #   redirect -> 302 to a short-lived signed URL (the pre-existing behaviour).
+    #               Keeps bytes off this host, but the URL is a bearer token for
+    #               its lifetime and a seek after it expires fails.
+    #
+    # `stream` is the default because it is the only hole-free option; `redirect`
+    # exists for high-volume private media where the bandwidth actually matters.
+    PRIVATE_MEDIA_SERVE_MODE: str = Field(default="stream")
+
     # Caps compressed *output* duration (ffmpeg `-t`). An input longer than this
     # is truncated; the worker ffprobes the input and reports `truncated`/
     # `duration_seconds` in the task result and on the uploads row, so the caller
@@ -169,6 +184,14 @@ class Settings(BaseSettings):
         normalized = v.strip().lower()
         if normalized not in {"xaccel", "direct"}:
             raise ValueError(f"LOCAL_MEDIA_SERVE_MODE must be 'xaccel' or 'direct', got {v!r}")
+        return normalized
+
+    @field_validator("PRIVATE_MEDIA_SERVE_MODE")
+    @classmethod
+    def _validate_private_media_serve_mode(cls, v: str) -> str:
+        normalized = v.strip().lower()
+        if normalized not in {"stream", "redirect"}:
+            raise ValueError(f"PRIVATE_MEDIA_SERVE_MODE must be 'stream' or 'redirect', got {v!r}")
         return normalized
 
     @model_validator(mode="after")
@@ -232,6 +255,27 @@ class Settings(BaseSettings):
         return frozenset(
             h.strip().lower() for h in self.WEBHOOK_ALLOWED_HOSTS.split(",") if h.strip()
         )
+
+    @property
+    def public_images_unservable(self) -> bool:
+        """True when imgproxy has no fetchable address for a *public* record.
+
+        imgproxy resolves an image's source by URL, so on the object stores it
+        needs a public bucket or CDN domain (`*_PUBLIC_BASE_URL`). Without one it
+        falls back to the raw endpoint URL, which a private bucket answers with a
+        403 -- a broken thumbnail, after the upload already succeeded.
+
+        Deliberately a startup *warning* rather than a hard failure, unlike the
+        other checks here. A deployment that only ever stores `private` media is
+        perfectly valid without a public base URL, and requiring one would make
+        the documented Garage s3-dev flow unbootable -- Garage has no anonymous
+        access at all, so no public base URL can exist for it.
+        """
+        if self.STORAGE_BACKEND == "s3":
+            return not self.S3_PUBLIC_BASE_URL
+        if self.STORAGE_BACKEND == "gcp":
+            return not self.GCS_PUBLIC_BASE_URL
+        return False
 
     @property
     def webhooks_enabled(self) -> bool:

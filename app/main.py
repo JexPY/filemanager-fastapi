@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from taskiq_fastapi import populate_dependency_context
 
 from app.broker import broker
+from app.config import settings
 from app.middleware import RequestIDLogFilter, RequestIDMiddleware
 from app.routers import (
     auth,
@@ -55,8 +56,21 @@ for _uvicorn_logger in ("uvicorn", "uvicorn.access", "uvicorn.error"):
     _l.propagate = False
 
 
+logger = logging.getLogger(__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Not fatal (see Settings.public_images_unservable), but silent breakage is
+    # worse than a loud line at boot: every public image URL would 403 at
+    # imgproxy long after the upload reported success.
+    if settings.public_images_unservable:
+        logger.warning(
+            "STORAGE_BACKEND=%s has no *_PUBLIC_BASE_URL: imgproxy cannot fetch image "
+            "sources, so thumbnail_url/direct_url on public records will not resolve. "
+            "Set one unless this deployment stores private media only.",
+            settings.STORAGE_BACKEND,
+        )
     # Initialize TaskIQ context for dependencies
     if not broker.is_worker_process:
         await broker.startup()

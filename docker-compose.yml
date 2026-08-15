@@ -165,6 +165,15 @@ services:
       # without this (and the matching volume mount below), imgproxy has no
       # way to reach locally-stored objects at all.
       - IMGPROXY_LOCAL_FILESYSTEM_ROOT=/data/media
+      # Egress allow-list. imgproxy fetches whatever source URL is embedded in a
+      # signed path, and it sits on this Docker network next to Postgres and
+      # Redis (and, on a cloud host, the metadata endpoint). The signature stops
+      # outsiders from minting URLs, so this only matters if IMGPROXY_KEY/SALT
+      # leak -- but then it is the difference between a leaked key and a fetch
+      # primitive inside your network. The default matches STORAGE_BACKEND=local;
+      # on s3/gcp set this to your public/CDN prefix, e.g.
+      # IMGPROXY_ALLOWED_SOURCES=https://cdn.example.com/
+      - IMGPROXY_ALLOWED_SOURCES=${IMGPROXY_ALLOWED_SOURCES:-local://}
     volumes:
       - ./data/media:/data/media:ro
 

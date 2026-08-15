@@ -220,17 +220,69 @@ async def test_public_with_public_base_302s_to_stable_url(
 # --- s3 backend: 302 to a freshly-minted presigned URL ------------------------
 
 
-async def test_s3_private_download_302s_to_presigned(
+async def test_s3_private_streams_through_nginx_without_exposing_a_signed_url(
     client: httpx.AsyncClient,
     auth_headers: dict[str, str],
     fake_metadata: InMemoryMetadataStore,
     fake_storage: InMemoryStorageBackend,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Private media on an object store must not 302 the client to a signed URL.
+
+    A redirect hands over a URL that is a bearer token for its whole TTL --
+    leakable via history, Referer, or logs -- and that a player caches, so a seek
+    after expiry fails. Streaming keeps the signed URL server-side: the client
+    only ever sees the app route, so auth is re-checked every request.
+    """
     monkeypatch.setattr(settings, "STORAGE_BACKEND", "s3")
     fake_storage._presign_capable = True
     rec = await _seed_video(fake_metadata, visibility="private")
+
     resp = await client.get(f"/files/{rec.id}/download", headers=auth_headers)
+
+    assert resp.status_code == 200
+    assert resp.headers["X-Accel-Redirect"] == "/internal-object/"
+    # The signed URL rides a header nginx consumes and hides; it is never a
+    # Location the client can follow or keep.
+    assert "location" not in resp.headers
+    assert "X-Amz-Signature=fake" in resp.headers["X-Object-Target"]
+    assert resp.content == b""  # nginx fills the body
+
+
+async def test_s3_public_still_redirects(
+    client: httpx.AsyncClient,
+    fake_metadata: InMemoryMetadataStore,
+    fake_storage: InMemoryStorageBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Public media keeps redirecting: the URL is not a secret, and a redirect
+    keeps the bytes -- and the bandwidth -- off this host entirely."""
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "s3")
+    fake_storage._presign_capable = True
+    rec = await _seed_video(fake_metadata, visibility="public")
+
+    resp = await client.get(f"/files/{rec.id}/download")
+
+    assert resp.status_code == 302
+    assert "X-Accel-Redirect" not in resp.headers
+
+
+async def test_private_redirect_mode_opts_back_out_of_streaming(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+    fake_storage: InMemoryStorageBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The escape hatch for high-volume private media, where proxying the bytes
+    through this host costs more than the leakage window is worth."""
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "s3")
+    monkeypatch.setattr(settings, "PRIVATE_MEDIA_SERVE_MODE", "redirect")
+    fake_storage._presign_capable = True
+    rec = await _seed_video(fake_metadata, visibility="private")
+
+    resp = await client.get(f"/files/{rec.id}/download", headers=auth_headers)
+
     assert resp.status_code == 302
     assert "X-Amz-Signature=fake" in resp.headers["location"]
 
@@ -262,10 +314,13 @@ async def test_s3_presigned_url_carries_record_content_type_and_filename(
 
     resp = await client.get(f"/files/{rec.id}/download", headers=auth_headers)
 
-    assert resp.status_code == 302
-    location = unquote(resp.headers["location"])
-    assert "response-content-type=video/webm" in location
-    assert 'response-content-disposition=inline; filename="' in location
+    # Private streams, so the signed URL is on the internal header rather than a
+    # Location -- the overrides must survive into that path too, since it is now
+    # the default one.
+    assert resp.status_code == 200
+    signed = unquote(resp.headers["X-Object-Target"])
+    assert "response-content-type=video/webm" in signed
+    assert 'response-content-disposition=inline; filename="' in signed
 
 
 # --- share token: serves regardless of visibility, revocable ------------------
