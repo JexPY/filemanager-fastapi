@@ -46,11 +46,16 @@ class ImageUploadResponse(BaseModel):
         description="Stored size in megabytes, rounded to 2dp (null for a 0-byte object)",
     )
     dimensions: ImageDimensions
-    imgproxy_thumbnail_url: str = Field(description="Signed imgproxy URL: a 300x300 fill thumbnail")
+    imgproxy_thumbnail_url: str | None = Field(
+        default=None,
+        description="Signed imgproxy URL: a 300x300 fill thumbnail. **Public uploads only** — "
+        "an imgproxy URL carries no ownership check and never expires, so a `private` upload "
+        "omits it and is readable solely through GET /files/{id}/download?rendition=thumb.",
+    )
     imgproxy_custom_url: str | None = Field(
         default=None,
         description="Signed imgproxy URL for the requested custom width/height/fit/format; "
-        "present only when custom transform parameters were supplied",
+        "present only when custom transform parameters were supplied on a public upload",
     )
 
 

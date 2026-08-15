@@ -374,3 +374,43 @@ def test_derive_rendition_key_format_independent_of_parent() -> None:
     assert derive_rendition_key("images/noext", "thumbnail") == "images/noext_t300.webp"
     assert derive_rendition_key("images/test.webp", "thumb") == "images/test_t300.webp"
     assert derive_rendition_key("images/test.webp", "t300") == "images/test_t300.webp"
+
+
+async def test_private_image_upload_withholds_imgproxy_urls(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+) -> None:
+    """POST /upload/image must apply the same visibility rule as GET /files/{id}.
+
+    An imgproxy URL carries no ownership check and never expires, and it
+    resolves -- imgproxy reads the shared volume (or a public bucket) directly.
+    Returning one for a `private` upload handed the owner a permanent
+    unauthenticated way to read media they had just marked private, and made the
+    two views of the same record disagree.
+    """
+    private = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+        data={"visibility": "private"},
+    )
+    assert private.status_code == 200
+    body = private.json()
+    assert "imgproxy_thumbnail_url" not in body
+    assert "imgproxy_custom_url" not in body
+    assert body["id"]
+
+    # The record view agrees, and the app route is still the way in.
+    record = (await client.get(f"/files/{body['id']}", headers=auth_headers)).json()
+    assert "thumbnail_url" not in record
+    assert record["url"].endswith(f"/files/{body['id']}/download")
+
+    # A public upload is unaffected.
+    public = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+        data={"visibility": "public"},
+    )
+    assert "imgproxy_thumbnail_url" in public.json()

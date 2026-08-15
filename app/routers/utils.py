@@ -256,12 +256,22 @@ def _image_response(
     custom_height: int | None = None,
     custom_fit: str = "auto",
     custom_format: str | None = None,
+    visibility: str = "public",
 ) -> dict:
     """Shape the POST /upload/image response.
 
     Takes the storage *key*, not a pre-resolved source URL, so it derives its
     imgproxy URLs through the same `signed_image_url` helper as
     `UploadRecord.to_public`.
+
+    It also mirrors that method's visibility rule: imgproxy URLs are emitted for
+    `public` uploads only. An imgproxy URL carries no ownership check and never
+    expires, so returning one for a `private` upload handed the owner a
+    permanent unauthenticated way to read media they had just marked private --
+    and it resolves, since imgproxy reads the shared volume (or a public bucket)
+    directly. `GET /files/{id}` already withheld it; this endpoint did not, so
+    the two views of the same record disagreed. A private upload is readable
+    through `GET /files/{id}/download?rendition=thumb`.
     """
     response = {
         "status": "success",
@@ -269,8 +279,11 @@ def _image_response(
         "size_bytes": size_bytes,
         "size_mb": round(size_bytes / (1024 * 1024), 2) if size_bytes else None,
         "dimensions": {"width": width, "height": height},
-        "imgproxy_thumbnail_url": derive_thumbnail_url(storage_key, renditions),
     }
+    if visibility != "public":
+        return response
+
+    response["imgproxy_thumbnail_url"] = derive_thumbnail_url(storage_key, renditions)
 
     if custom_width or custom_height or custom_format or custom_fit != "auto":
         cw = custom_width or 0

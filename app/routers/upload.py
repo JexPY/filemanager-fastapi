@@ -130,6 +130,7 @@ async def _process_single_image(
                 custom_height=imgproxy_height,
                 custom_fit=imgproxy_fit,
                 custom_format=imgproxy_format,
+                visibility=existing.visibility,
             )
 
         # Client-side failures (bad/unsupported image) => 400, generic detail.
@@ -266,6 +267,7 @@ async def _store_and_record_image(
             custom_height=imgproxy_height,
             custom_fit=imgproxy_fit,
             custom_format=imgproxy_format,
+            visibility=record.visibility,
         )
 
     except HTTPException:
