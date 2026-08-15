@@ -381,6 +381,7 @@ owner's id is a `404`, never a `403`. The exceptions are deliberate and per reco
 | `POST` | `/upload/image` | `upload:image` | Synchronous. Strips metadata, encodes WebP, returns signed imgproxy URLs. Idempotent per owner. |
 | `POST` | `/upload/images` | `upload:image` | Bulk, max 10 files / 50 MB total, 4 processed concurrently. Failed items are skipped, not fatal — check `count`. |
 | `POST` | `/upload/video` | `upload:video` | Streams to disk, stages, enqueues transcode. `202`, or `200`/`202` on a duplicate. |
+| `POST` | `/upload/file` | `upload:file` | Generic ingest — PDF, audio, archives. Allow-listed content types, verified against magic bytes. No processing pipeline; the record is `ready` immediately. |
 | `POST` | `/upload/presign` | master token only | Mints a short-lived capability JWT and a ready-to-use upload URL. `503` if `JWT_SECRET_KEY` is unset. |
 
 **Image form fields.** `file`, `optimization`, `imgproxy_width`, `imgproxy_height`,
@@ -807,6 +808,7 @@ variable, it just isn't pre-seeded there.
 |---|---|---|
 | `MAX_IMAGE_UPLOAD_BYTES` | 25 MiB | Per-image cap. |
 | `MAX_VIDEO_UPLOAD_BYTES` | 2000 MiB | Per-video cap, enforced while streaming to disk. |
+| `MAX_FILE_UPLOAD_BYTES` | 100 MiB | Per-file cap for `/upload/file`, enforced while streaming to disk. |
 | `MAX_IMAGE_PIXELS` | 50,000,000 | Decompression-bomb guard, checked from the header before any full-resolution decode. |
 | `MAX_QR_CONTENT_LENGTH` | 2000 | Rejects oversized QR payloads before they reach segno. |
 | `MAX_QR_LOGO_BYTES` | 5 MiB | Logo overlay cap. |
