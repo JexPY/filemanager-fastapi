@@ -10,7 +10,7 @@ jobs:
   lint-type-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # docker-compose.yml's env_file: .env directives (and the imgproxy
       # service's required ${IMGPROXY_KEY:?...} interpolation, which Compose
