@@ -149,7 +149,16 @@ def _object_xaccel_response(
     # The value is interpolated into nginx's proxy_pass. It is built here from a
     # storage backend, never from client input, but assert the shape anyway --
     # this is the one place a bad value would become an SSRF primitive.
-    if not target_url.startswith(("https://", "http://")):
+    #
+    # This is a scheme *allow-list*, not a URL being fetched over http. Static
+    # analysis flags the "http://" literal as insecure use of HTTP; accepting it
+    # is deliberate and cannot be dropped: S3-compatible object stores on a
+    # private network are addressed over plain HTTP (the Garage fixture is
+    # http://garage:3900, as is any in-cluster MinIO/R2 gateway), and this hop is
+    # nginx -> object store inside the Docker network, never over the internet.
+    # Restricting it to https would break every such deployment while securing
+    # nothing that is exposed.
+    if not target_url.startswith(("https://", "http://")):  # NOSONAR -- scheme allow-list
         raise StorageError("Refusing to proxy a non-HTTP(S) upstream URL")
     response = Response(media_type=media_type)
     response.headers["X-Accel-Redirect"] = "/internal-object/"

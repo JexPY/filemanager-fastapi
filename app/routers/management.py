@@ -220,13 +220,21 @@ async def set_file_visibility(
         # Only now that the row points at the new key. Logged at error level
         # rather than swallowed: while the stale object survives, so does the
         # cached public URL this rotation exists to kill.
+        #
+        # These log the record's *stored* id, never the raw `file_id` path
+        # parameter. They are the same value, but `record.id` comes from the
+        # database column (a server-generated uuid4 hex) rather than from the
+        # request, so nothing user-controlled reaches the log at all. The JSON
+        # log formatter already escapes control characters, so forging a log
+        # line was not possible either way -- but that protection lives in the
+        # formatter, and a call site should not depend on it.
         try:
             await delete_file(record.storage_key)
         except StorageError:
             logger.error(
                 "Rotated %s to a private key but could not delete the old object %s; "
                 "its public URL stays fetchable until that object is removed",
-                file_id,
+                record.id,
                 record.storage_key,
             )
         if record.renditions:
@@ -236,7 +244,7 @@ async def set_file_visibility(
                 except StorageError:
                     logger.error(
                         "Rotated %s to a private key but could not delete old rendition %s",
-                        file_id,
+                        record.id,
                         old_rend_key,
                     )
 
