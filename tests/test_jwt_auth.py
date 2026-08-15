@@ -18,6 +18,7 @@ import pytest
 from app.config import settings
 from app.routers.auth import (
     SCOPE_READ_FILE,
+    SCOPE_UPLOAD_FILE,
     SCOPE_UPLOAD_IMAGE,
     SCOPE_UPLOAD_VIDEO,
     Principal,
@@ -253,6 +254,18 @@ async def test_presign_video_uses_public_base_url_and_video_scope(
     body = resp.json()
     assert body["scope"] == SCOPE_UPLOAD_VIDEO
     assert body["url"].startswith("https://media.example.com/upload/video?token=")
+
+
+async def test_presign_file_uses_file_scope(client: httpx.AsyncClient, jwt_env: None) -> None:
+    resp = await client.post(
+        "/upload/presign",
+        headers={"Authorization": f"Bearer {STATIC}"},
+        json={"kind": "file", "owner_id": "tenant-f"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope"] == SCOPE_UPLOAD_FILE
+    assert body["url"].startswith("/upload/file?token=")
 
 
 async def test_presign_rejects_a_jwt_caller(client: httpx.AsyncClient, jwt_env: None) -> None:

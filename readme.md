@@ -95,6 +95,9 @@ curl -H "Authorization: Bearer $TOKEN" -F "file=@photo.jpg" $BASE/upload/image
 # Video — asynchronous. Returns 202 with a task_id and record id.
 curl -H "Authorization: Bearer $TOKEN" -F "file=@clip.mp4" $BASE/upload/video
 
+# Generic file (PDF, audio, document) — synchronous, stored immediately at status='ready'.
+curl -H "Authorization: Bearer $TOKEN" -F "file=@document.pdf" $BASE/upload/file
+
 # Poll the task for a thin status, or the record for the full state.
 curl -H "Authorization: Bearer $TOKEN" $BASE/tasks/<task_id>
 curl -H "Authorization: Bearer $TOKEN" $BASE/files/<id>
@@ -384,7 +387,8 @@ owner's id is a `404`, never a `403`. The exceptions are deliberate and per reco
 `imgproxy_fit` (`auto`\|`fit`\|`fill`\|`fill-down`\|`force`), `imgproxy_format`
 (`webp`\|`png`\|`jpg`\|`jpeg`\|`avif`\|`gif`). Supplying any custom transform parameter adds
 an `imgproxy_custom_url` to the response alongside the always-present
-`imgproxy_thumbnail_url` and `imgproxy_optimized_url`.
+`imgproxy_thumbnail_url`. Materialized 300×300 thumbnail renditions are generated in the same
+libvips pass and persisted under derived keys (`images/<uuid>_t300.webp`).
 
 Accepted image inputs are **PNG, JPEG, GIF, WebP, and HEIC**, detected by magic bytes before
 libvips touches the buffer. **SVG is deliberately rejected** — libvips here is built with
@@ -446,7 +450,7 @@ unexpiring URL with no ownership check:
 | Field | What it is | When present |
 |---|---|---|
 | `direct_url` | The object's public/CDN URL — no redirect hop, no imgproxy | public, on `s3`/`gcp` with a `*_PUBLIC_BASE_URL` |
-| `thumbnail_url` | Signed imgproxy URL, 300×300 fill | public images |
+| `thumbnail_url` | Direct CDN/object URL of the materialized 300×300 thumbnail (or signed imgproxy URL) | public images |
 | `poster_url` | Signed imgproxy URL for a video's poster | public records with a poster |
 
 ```json
@@ -505,15 +509,17 @@ Deleting is explicit and irreversible, and the object is removed before the row 
 transient storage failure leaves the record intact and retryable rather than stranding an
 object with no record.
 
-**Turning a record private rotates its storage key.** The object is copied to a fresh UUID
-key, the row is re-pointed, and the old object is deleted. That is what actually invalidates
-access rather than merely withdrawing it: while the record was public its URL may have been
-cached by a CDN and embedded in already-rendered HTML, neither of which can be recalled.
-Rotating kills all of them at once — the object URL changes, and since an imgproxy URL signs
-its source, every rendition URL changes with it. A video's poster is cascaded the same way,
-since it is a separate record with its own public URLs. The copy is server-side on `s3`/`gcp`
-(and `shutil` on `local`), so the bytes never move through this process. Going *public* does
-not rotate — there is nothing cached to invalidate.
+**Turning a record private rotates its storage key.** The object and any materialized
+renditions are copied to fresh UUID keys, the row is re-pointed, and the old objects are deleted.
+That is what actually invalidates access rather than merely withdrawing it: while the record was
+public its URL may have been cached by a CDN and embedded in already-rendered HTML, neither of
+which can be recalled. Rotating kills all of them at once — the object URLs change, and since an
+imgproxy URL signs its source, every rendition URL changes with it. A video's poster is cascaded
+the same way, since it is a separate record with its own public URLs. The copy is server-side on
+`s3`/`gcp` (and `shutil` on `local`), so the bytes never move through this process. Going *public*
+does not rotate — there is nothing cached to invalidate. Materialized renditions for private or
+shared media can be addressed via `/files/{id}/download?rendition=thumb` (with owner auth or a bound
+`read:file` token) and `/share/{token}?rendition=thumb`.
 
 ### Tasks, QR codes, and system
 
@@ -897,21 +903,14 @@ but invisible under a default local `up`. To verify one, inspect the running con
 
 ## Limits and scope
 
-> **Coming: arbitrary file kinds (PDF, audio, and anything else).** Ingest is still
-> image-and-video only — `POST /upload/image` and `POST /upload/video` are the only doors in.
-> Everything *after* ingest is already kind-agnostic, though: storage keys, the access ladder,
-> `GET /files/{id}/download`, visibility, share links, `read:file` grants, listing, and
-> deletion contain no reference to `kind` at all. So the remaining work is a generic
-> `POST /upload/file` that stores bytes with a validated content type and no processing
-> pipeline — not a second serving path. Optional per-kind derivations (a PDF's first-page
-> preview, say) would land as ordinary linked image records, exactly as video posters do now.
-
 Deliberate boundaries, stated plainly rather than discovered later:
 
 - **Not a general file host.** No cross-owner listing, no search, no public index. Deletion
   is explicit and irreversible.
-- **Ingest is image and video only** — see the note above; the serving side is already
-  kind-agnostic.
+- **Generic file ingest (`POST /upload/file`)** admits an allow-list of safe formats (PDF, audio, documents, and archives)
+  with strict magic-byte verification and parameter stripping, storing them immediately as `ready` rows without a processing
+  pipeline. Optional per-kind derivations (e.g. first-page PDF preview) would land as linked image
+  records, matching how video posters work.
 - **Progressive playback only.** HTTP Range works everywhere; HLS and adaptive bitrate are
   out of scope.
 - **Video output is trimmed to `VIDEO_MAX_DURATION_SECONDS` (60 s by default).** The service

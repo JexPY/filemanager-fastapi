@@ -43,6 +43,7 @@ class MetadataStore(ABC):
         original_filename: str | None = None,
         callback_url: str | None = None,
         visibility: str = "private",
+        renditions: dict[str, str] | None = None,
     ) -> UploadRecord: ...
 
     @abstractmethod
@@ -132,7 +133,12 @@ class MetadataStore(ABC):
 
     @abstractmethod
     async def set_visibility(
-        self, upload_id: str, owner: str, visibility: str, storage_key: str | None = None
+        self,
+        upload_id: str,
+        owner: str,
+        visibility: str,
+        storage_key: str | None = None,
+        renditions: dict[str, str] | None = None,
     ) -> UploadRecord | None:
         """Owner-scoped visibility change (VISIBILITY_PRIVATE/PUBLIC). None means
         no such row for this owner (unknown id or another owner's -> 404 upstream).

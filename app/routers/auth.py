@@ -47,11 +47,12 @@ router = APIRouter()
 # Capability scopes a JWT may carry.
 SCOPE_UPLOAD_IMAGE = "upload:image"
 SCOPE_UPLOAD_VIDEO = "upload:video"
+SCOPE_UPLOAD_FILE = "upload:file"
 # A per-file read grant: the credential a consuming service mints for an end user
 # after running its own permission check, so that user can fetch exactly one
 # private record. Deliberately NOT owner-equivalent -- see `grants_owner_access`.
 SCOPE_READ_FILE = "read:file"
-_UPLOAD_SCOPES = frozenset({SCOPE_UPLOAD_IMAGE, SCOPE_UPLOAD_VIDEO})
+_UPLOAD_SCOPES = frozenset({SCOPE_UPLOAD_IMAGE, SCOPE_UPLOAD_VIDEO, SCOPE_UPLOAD_FILE})
 # A JWT is only a principal at all if it grants one of these.
 _PRINCIPAL_SCOPES = _UPLOAD_SCOPES | {SCOPE_READ_FILE}
 
@@ -291,7 +292,7 @@ class PresignedUploadRequest(BaseModel):
     (and thus the owner recorded on the resulting upload); ``kind`` selects both
     the target endpoint and the single scope granted."""
 
-    kind: Literal["image", "video"] = Field(examples=["image"])
+    kind: Literal["image", "video", "file"] = Field(examples=["image"])
     owner_id: str = Field(min_length=1, max_length=128, examples=["tenant-42"])
     expires_in_seconds: int = Field(default=300, ge=1, le=86400, examples=[300])
 
@@ -329,7 +330,12 @@ def create_presigned_upload(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Presigned uploads are disabled (JWT_SECRET_KEY is not set)",
         )
-    scope = SCOPE_UPLOAD_IMAGE if body.kind == "image" else SCOPE_UPLOAD_VIDEO
+    if body.kind == "image":
+        scope = SCOPE_UPLOAD_IMAGE
+    elif body.kind == "video":
+        scope = SCOPE_UPLOAD_VIDEO
+    else:
+        scope = SCOPE_UPLOAD_FILE
     issued_at = int(time.time())
     expires_at = issued_at + body.expires_in_seconds
     token = jwt.encode(

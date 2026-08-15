@@ -19,6 +19,7 @@ STATUS_FAILED = "failed"
 
 KIND_IMAGE = "image"
 KIND_VIDEO = "video"
+KIND_FILE = "file"
 
 # Playback visibility of a record. `private` is owner-only (authenticated
 # /files/{id}/download); `public` is anyone-with-the-link (no token).
@@ -70,6 +71,7 @@ class UploadRecord:
     created_at: datetime
     updated_at: datetime
     poster_storage_key: str | None = None
+    renditions: dict[str, str] | None = None
 
     def to_public(self, poster_storage_key: str | None = None) -> dict[str, Any]:
         """Owner-safe JSON view for API responses (no cross-tenant fields)."""
@@ -122,9 +124,9 @@ class UploadRecord:
                     data["direct_url"] = public_object_url(self.storage_key)
 
                 if self.kind == KIND_IMAGE:
-                    data["thumbnail_url"] = _build_imgproxy_url(
-                        self.storage_key, processing_options="rs:fill:300:300:0/g:no"
-                    )
+                    from app.services.renditions import derive_thumbnail_url
+
+                    data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, self.renditions)
 
                 if self.poster_upload_id:
                     pkey = poster_storage_key or self.poster_storage_key or self.poster_upload_id

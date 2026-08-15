@@ -36,11 +36,10 @@ def sniff_format(data: bytes) -> str | None:
 
 def validate_and_strip_image(
     file_data: bytes, optimization: str = "balanced"
-) -> tuple[bytes, str, int, int]:
-    """
-    Load image using pyvips, strip metadata (EXIF), and return the optimized bytes
-    along with the detected format and dimensions.
-    """
+) -> tuple[bytes, str, int, int, dict[str, bytes]]:
+    """Load image using pyvips, strip metadata (EXIF), generate materialized
+    renditions (thumbnail) in the same pass, and return the optimized bytes
+    along with detected format, dimensions, and renditions buffers."""
     if sniff_format(file_data) is None:
         raise ImageValidationError("Unsupported or unrecognized image format")
 
@@ -59,6 +58,15 @@ def validate_and_strip_image(
         raise ImageValidationError(
             f"Image dimensions {width}x{height} exceed the {settings.MAX_IMAGE_PIXELS}-pixel limit"
         )
+
+    # Materialize the 300x300 thumbnail rendition in the same libvips pass.
+    # crop=pyvips.Interesting.CENTRE produces a center-cropped 300x300 fill thumbnail,
+    # matching imgproxy's rs:fill:300:300.
+    thumb_image = image.thumbnail_image(300, height=300, crop=pyvips.Interesting.CENTRE)
+    thumb_buffer = thumb_image.write_to_buffer(
+        ".webp", Q=80, strip=True, effort=6, smart_subsample=True
+    )
+    renditions = {"thumbnail": thumb_buffer}
 
     # Determine quality and max dimension based on optimization profile
     if optimization == "size":
@@ -84,4 +92,4 @@ def validate_and_strip_image(
     optimized_buffer = image.write_to_buffer(
         ".webp", Q=q_value, strip=True, effort=6, smart_subsample=True
     )
-    return optimized_buffer, "image/webp", width, height
+    return optimized_buffer, "image/webp", width, height, renditions

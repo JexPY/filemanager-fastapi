@@ -25,7 +25,7 @@ import httpx
 import pytest
 
 from app.config import settings
-from app.services.storage import S3Storage
+from app.services.storage import S3Storage, StorageError
 
 pytestmark = pytest.mark.s3_integration
 
@@ -195,3 +195,33 @@ async def test_delete_is_idempotent_on_a_missing_key(s3: S3Storage, key: str) ->
     # already gone.
     await s3.delete(key)
     await s3.delete(f"itest/never-existed-{uuid.uuid4()}.bin")
+
+
+async def test_copy_file_and_rendition_rotation(s3: S3Storage) -> None:
+    main_key = f"images/{uuid.uuid4().hex}.webp"
+    thumb_key = f"{main_key[:-5]}_t300.webp"
+    rot_main_key = f"images/{uuid.uuid4().hex}.webp"
+    rot_thumb_key = f"{rot_main_key[:-5]}_t300.webp"
+
+    await s3.upload(b"real-image-payload", main_key, "image/webp")
+    await s3.upload(b"real-thumb-payload", thumb_key, "image/webp")
+
+    try:
+        # Rotate both via S3 copy
+        await s3.copy(main_key, rot_main_key)
+        await s3.copy(thumb_key, rot_thumb_key)
+
+        assert await s3.download(rot_main_key) == b"real-image-payload"
+        assert await s3.download(rot_thumb_key) == b"real-thumb-payload"
+
+        # Delete old objects
+        await s3.delete(main_key)
+        await s3.delete(thumb_key)
+
+        with pytest.raises(StorageError):
+            await s3.download(main_key)
+        with pytest.raises(StorageError):
+            await s3.download(thumb_key)
+    finally:
+        for k in (main_key, thumb_key, rot_main_key, rot_thumb_key):
+            await s3.delete(k)

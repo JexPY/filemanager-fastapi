@@ -6,6 +6,7 @@ import os
 import uuid
 from typing import Annotated, Any, Literal
 
+import aiofiles
 from fastapi import (
     APIRouter,
     Depends,
@@ -27,9 +28,16 @@ from app.routers.utils import (
     _sha256_hex,
     _stream_capped_to_temp,
 )
-from app.schemas import BulkImageUploadResponse, ImageUploadResponse, VideoUploadResponse
+from app.schemas import (
+    BulkImageUploadResponse,
+    FileUploadResponse,
+    ImageUploadResponse,
+    VideoUploadResponse,
+)
+from app.services.file_validation import FileValidationError, validate_file_content
 from app.services.image_vips import ImageValidationError, validate_and_strip_image
 from app.services.metadata import (
+    KIND_FILE,
     KIND_IMAGE,
     KIND_VIDEO,
     STATUS_PROCESSING,
@@ -37,9 +45,11 @@ from app.services.metadata import (
     MetadataError,
     get_metadata_store,
 )
+from app.services.renditions import derive_rendition_key
 from app.services.storage import StorageError, delete_file, upload_file, upload_file_from_path
 from app.services.webhooks import WebhookValidationError, validate_callback_url
 from app.tasks import compress_video_task
+from app.urls import public_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -65,6 +75,7 @@ _BULK_IMAGE_CONCURRENCY = asyncio.Semaphore(4)
 # import so each route reuses one stable dependency callable.
 require_image_upload = require_scopes("upload:image")
 require_video_upload = require_scopes("upload:video")
+require_file_upload = require_scopes("upload:file")
 
 
 async def _process_single_image(
@@ -115,6 +126,7 @@ async def _process_single_image(
                 existing.height,
                 existing.size_bytes,
                 existing.storage_key,
+                renditions=existing.renditions,
                 custom_width=imgproxy_width,
                 custom_height=imgproxy_height,
                 custom_fit=imgproxy_fit,
@@ -123,9 +135,13 @@ async def _process_single_image(
 
         # Client-side failures (bad/unsupported image) => 400, generic detail.
         try:
-            optimized_buffer, content_type, width, height = await asyncio.to_thread(
-                validate_and_strip_image, file_data, optimization
-            )
+            (
+                optimized_buffer,
+                content_type,
+                width,
+                height,
+                renditions_buffers,
+            ) = await asyncio.to_thread(validate_and_strip_image, file_data, optimization)
         except ImageValidationError as exc:
             logger.warning("Image validation rejected upload: %s", exc)
             if not raise_on_error:
@@ -140,11 +156,13 @@ async def _process_single_image(
         return await _store_and_record_image(
             store,
             owner,
+            unique_id,
             object_name,
             optimized_buffer,
             content_type,
             width,
             height,
+            renditions_buffers,
             content_hash,
             imgproxy_width,
             imgproxy_height,
@@ -166,11 +184,13 @@ async def _process_single_image(
 async def _store_and_record_image(
     store,
     owner: str,
+    unique_id: str,
     object_name: str,
     optimized_buffer: bytes,
     content_type: str,
     width: int,
     height: int,
+    renditions_buffers: dict[str, bytes],
     content_hash: str,
     imgproxy_width: int | None,
     imgproxy_height: int | None,
@@ -180,50 +200,88 @@ async def _store_and_record_image(
     visibility: str = "public",
     raise_on_error: bool,
 ) -> dict | None:
-    if raise_on_error:
-        try:
-            obj = await upload_file(optimized_buffer, object_name, content_type)
-        except StorageError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
-            ) from exc
-    else:
-        obj = await upload_file(optimized_buffer, object_name, content_type)
-
+    uploaded_keys: list[str] = []
     try:
-        record = await store.create(
-            owner=owner,
-            kind=KIND_IMAGE,
-            storage_key=obj.key,
-            content_type=content_type,
-            size_bytes=obj.size,
-            status=STATUS_READY,
-            width=width,
-            height=height,
-            content_hash=content_hash,
-            visibility=visibility,
-        )
-    except MetadataError as exc:
-        logger.exception("Failed to record image upload")
-        with contextlib.suppress(StorageError):
-            await delete_file(obj.key)
-        if not raise_on_error:
-            return None
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
-        ) from exc
+        if raise_on_error:
+            try:
+                obj = await upload_file(optimized_buffer, object_name, content_type)
+            except StorageError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Storage backend unavailable",
+                ) from exc
+        else:
+            obj = await upload_file(optimized_buffer, object_name, content_type)
+        uploaded_keys.append(obj.key)
 
-    return _image_response(
-        record.id,
-        record.width,
-        record.height,
-        record.size_bytes,
-        obj.key,
-        custom_width=imgproxy_width,
-        custom_height=imgproxy_height,
-        custom_fit=imgproxy_fit,
-        custom_format=imgproxy_format,
-    )
+        # Upload materialized renditions (same pass as main image)
+        renditions_dict: dict[str, str] = {}
+        for rend_name, rend_bytes in renditions_buffers.items():
+            rend_key = derive_rendition_key(object_name, rend_name)
+            if raise_on_error:
+                try:
+                    r_obj = await upload_file(rend_bytes, rend_key, "image/webp")
+                except StorageError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail="Storage backend unavailable",
+                    ) from exc
+            else:
+                r_obj = await upload_file(rend_bytes, rend_key, "image/webp")
+            uploaded_keys.append(r_obj.key)
+            renditions_dict[rend_name] = r_obj.key
+
+        try:
+            record = await store.create(
+                owner=owner,
+                kind=KIND_IMAGE,
+                storage_key=obj.key,
+                content_type=content_type,
+                size_bytes=obj.size,
+                status=STATUS_READY,
+                width=width,
+                height=height,
+                content_hash=content_hash,
+                visibility=visibility,
+                renditions=renditions_dict,
+            )
+        except MetadataError as exc:
+            logger.exception("Failed to record image upload")
+            for k in uploaded_keys:
+                with contextlib.suppress(StorageError):
+                    await delete_file(k)
+            if not raise_on_error:
+                return None
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
+            ) from exc
+
+        return _image_response(
+            record.id,
+            record.width,
+            record.height,
+            record.size_bytes,
+            obj.key,
+            renditions=renditions_dict,
+            custom_width=imgproxy_width,
+            custom_height=imgproxy_height,
+            custom_fit=imgproxy_fit,
+            custom_format=imgproxy_format,
+        )
+
+    except HTTPException:
+        for k in uploaded_keys:
+            with contextlib.suppress(StorageError):
+                await delete_file(k)
+        raise
+    except Exception:
+        for k in uploaded_keys:
+            with contextlib.suppress(StorageError):
+                await delete_file(k)
+        if raise_on_error:
+            raise
+        logger.exception("Failed to store and record image")
+        return None
 
 
 @router.post(
@@ -550,6 +608,118 @@ async def upload_video(
             "status": "accepted",
             "id": record.id,
             "task_id": task.task_id,
+        }
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(temp_path)
+
+
+@router.post(
+    "/upload/file",
+    tags=["Uploads"],
+    summary="Upload generic file",
+    response_model=FileUploadResponse,
+    response_model_exclude_unset=True,
+)
+async def upload_generic_file(
+    request: Request,
+    file: UploadFile = File(...),
+    visibility: Literal["public", "private"] = Form("public"),
+    owner: str = Depends(require_file_upload),
+):
+    # Stream upload straight to temp file (bounded memory: one chunk at a time)
+    # and compute its rolling sha256.
+    temp_path, size, raw_content_hash = await _stream_capped_to_temp(
+        file, request, settings.MAX_FILE_UPLOAD_BYTES
+    )
+    try:
+        # Read header sample to validate format / magic bytes
+        async with aiofiles.open(temp_path, "rb") as f:
+            header_sample = await f.read(8192)
+
+        try:
+            content_type = validate_file_content(
+                header_sample,
+                declared_content_type=file.content_type,
+                filename=file.filename,
+            )
+        except FileValidationError as exc:
+            logger.warning("File validation rejected upload: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
+        # The deduplication hash includes visibility so identical bytes uploaded
+        # with different visibilities are treated as distinct records.
+        signature = f"{raw_content_hash}:{visibility}"
+        content_hash = hashlib.sha256(signature.encode()).hexdigest()
+
+        store = await get_metadata_store()
+        try:
+            existing = await store.find_ready_by_hash(owner, content_hash)
+        except MetadataError as exc:
+            logger.warning("File idempotency lookup failed (processing normally): %s", exc)
+            existing = None
+
+        if existing is not None:
+            return {
+                "status": "success",
+                "id": existing.id,
+                "kind": existing.kind,
+                "content_type": existing.content_type,
+                "size_bytes": existing.size_bytes,
+                "size_mb": (
+                    round(existing.size_bytes / (1024 * 1024), 2) if existing.size_bytes else None
+                ),
+                "original_filename": existing.original_filename,
+                "visibility": existing.visibility,
+                "url": public_url(f"/files/{existing.id}/download"),
+            }
+
+        original_filename = file.filename or "file.bin"
+        ext = _sanitize_extension(original_filename)
+        storage_key = f"files/{uuid.uuid4().hex}.{ext}"
+
+        try:
+            obj = await upload_file_from_path(temp_path, storage_key, content_type)
+        except StorageError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Storage backend unavailable",
+            ) from exc
+
+        try:
+            record = await store.create(
+                owner=owner,
+                kind=KIND_FILE,
+                storage_key=obj.key,
+                content_type=content_type,
+                size_bytes=obj.size,
+                status=STATUS_READY,
+                content_hash=content_hash,
+                original_filename=original_filename,
+                visibility=visibility,
+            )
+        except MetadataError as exc:
+            logger.exception("Failed to record file upload")
+            with contextlib.suppress(StorageError):
+                await delete_file(storage_key)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Upload could not be completed",
+            ) from exc
+
+        return {
+            "status": "success",
+            "id": record.id,
+            "kind": record.kind,
+            "content_type": record.content_type,
+            "size_bytes": record.size_bytes,
+            "size_mb": (round(record.size_bytes / (1024 * 1024), 2) if record.size_bytes else None),
+            "original_filename": record.original_filename,
+            "visibility": record.visibility,
+            "url": public_url(f"/files/{record.id}/download"),
         }
     finally:
         with contextlib.suppress(FileNotFoundError):

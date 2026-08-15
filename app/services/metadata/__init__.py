@@ -35,6 +35,7 @@ from app.config import settings
 from .postgres import PostgresMetadataStore
 from .store import MetadataError, MetadataStore
 from .types import (
+    KIND_FILE,
     KIND_IMAGE,
     KIND_VIDEO,
     STATUS_FAILED,
@@ -49,6 +50,7 @@ from .types import (
 )
 
 __all__ = [
+    "KIND_FILE",
     "KIND_IMAGE",
     "KIND_VIDEO",
     "STATUS_FAILED",

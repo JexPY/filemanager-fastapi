@@ -24,6 +24,9 @@ http {
     sendfile      on;
     tcp_nopush    on;
 
+    # Prevent MIME-confusion attacks and content sniffing
+    add_header X-Content-Type-Options "nosniff" always;
+
     # Must be >= MAX_VIDEO_UPLOAD_BYTES (default 2000 MiB) or nginx 413s uploads
     # before they reach the app's own size check.
     client_max_body_size ${NGINX_MAX_BODY_SIZE};
@@ -115,7 +118,7 @@ http {
         }
 
         # Rate-limit upload endpoints specifically.
-        location ~ ^/upload/(images?|video)$ {
+        location ~ ^/upload/(images?|video|file)$ {
             limit_req zone=upload_limit burst=5 nodelay;
             limit_req_status 429;
 

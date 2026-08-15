@@ -6,15 +6,19 @@ from tests.conftest import fixture_bytes
 
 
 def test_accepts_valid_png() -> None:
-    data, content_type, width, height = validate_and_strip_image(fixture_bytes("tiny.png"))
+    data, content_type, width, height, renditions = validate_and_strip_image(
+        fixture_bytes("tiny.png")
+    )
     assert content_type == "image/webp"
     assert width == 8
     assert height == 8
     assert data[:4] == b"RIFF"  # webp container signature
+    assert "thumbnail" in renditions
+    assert renditions["thumbnail"][:4] == b"RIFF"
 
 
 def test_accepts_valid_jpeg() -> None:
-    _, content_type, _, _ = validate_and_strip_image(fixture_bytes("tiny.jpg"))
+    _, content_type, _, _, _ = validate_and_strip_image(fixture_bytes("tiny.jpg"))
     assert content_type == "image/webp"
 
 

@@ -10,7 +10,9 @@ from fastapi import HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse, Response
 
 from app.config import settings
+from app.services.file_validation import get_content_disposition_type
 from app.services.imgproxy import signed_image_url
+from app.services.renditions import derive_thumbnail_url
 from app.services.storage import StorageError, get_storage
 
 # 499 is nginx's non-standard "client closed request" code, which is what the
@@ -104,24 +106,29 @@ def _sanitize_content_disposition_filename(filename: str) -> str:
 
 
 def _xaccel_response(
-    storage_key: str, filename: str | None = None, media_type: str = "video/mp4"
+    storage_key: str,
+    filename: str | None = None,
+    media_type: str = "application/octet-stream",
 ) -> Response:
-    """Yield a local video via nginx's X-Accel-Redirect. The app issues the
+    """Yield a local file via nginx's X-Accel-Redirect. The app issues the
     header; nginx serves the bytes directly from the volume, natively supporting
     Range/seek. The `media_data` location block must be internal in nginx.conf.
     Path traversal is blocked locally before touching the nginx boundary.
-    `filename` sets an `inline` Content-Disposition so the player/browser has a
-    sensible name for a "save as" without forcing a download."""
+    `filename` sets an appropriate Content-Disposition so the player/browser can
+    view displayable files inline or download binary files."""
     _assert_safe_media_key(storage_key)
     response = Response(media_type=media_type)
     response.headers["X-Accel-Redirect"] = f"/internal-media/{storage_key}"
     if filename:
         safe_name = _sanitize_content_disposition_filename(filename)
-        response.headers["Content-Disposition"] = f'inline; filename="{safe_name}"'
+        disp_type = get_content_disposition_type(media_type)
+        response.headers["Content-Disposition"] = f'{disp_type}; filename="{safe_name}"'
     return response
 
 
-def _object_xaccel_response(target_url: str, media_type: str = "video/mp4") -> Response:
+def _object_xaccel_response(
+    target_url: str, media_type: str = "application/octet-stream"
+) -> Response:
     """Stream a private object-store object through nginx, so the signed URL
     never reaches the client.
 
@@ -156,11 +163,13 @@ def _object_xaccel_response(target_url: str, media_type: str = "video/mp4") -> R
 
 
 def _local_file_response(
-    storage_key: str, filename: str | None = None, media_type: str = "video/mp4"
+    storage_key: str,
+    filename: str | None = None,
+    media_type: str = "application/octet-stream",
 ) -> Response:
-    """Yield a local video via Starlette's FileResponse (which does support Range).
+    """Yield a local file via Starlette's FileResponse (which does support Range).
     Used ONLY when LOCAL_MEDIA_SERVE_MODE=direct (i.e. dev without nginx). Prod
-    always uses xaccel. `filename` sets an `inline` Content-Disposition, matching
+    always uses xaccel. `filename` sets an appropriate Content-Disposition, matching
     the X-Accel path."""
     _assert_safe_media_key(storage_key)
     path = Path(settings.LOCAL_STORAGE_DIR) / storage_key
@@ -168,7 +177,8 @@ def _local_file_response(
         raise StorageError(f"Object not found: {storage_key!r}")
     if filename:
         safe_name = _sanitize_content_disposition_filename(filename)
-        headers = {"Content-Disposition": f'inline; filename="{safe_name}"'}
+        disp_type = get_content_disposition_type(media_type)
+        headers = {"Content-Disposition": f'{disp_type}; filename="{safe_name}"'}
     else:
         headers = None
     return FileResponse(path, media_type=media_type, headers=headers)
@@ -177,11 +187,11 @@ def _local_file_response(
 async def resolve_playback(
     storage_key: str,
     filename: str | None = None,
-    media_type: str = "video/mp4",
+    media_type: str = "application/octet-stream",
     *,
     private: bool = False,
 ) -> Response:
-    """Resolve a video's byte path, keyed on STORAGE_BACKEND (mirrors
+    """Resolve a file's byte path, keyed on STORAGE_BACKEND (mirrors
     imgproxy.build_source_url's keying): local -> nginx X-Accel (or FileResponse
     in dev); s3/gcp -> 302 to a freshly-minted signed GET URL sized to a viewing
     session. Range works in every path and the app stays out of the byte path
@@ -203,7 +213,9 @@ async def resolve_playback(
     backend = await get_storage()
     disposition = None
     if filename:
-        disposition = f'inline; filename="{_sanitize_content_disposition_filename(filename)}"'
+        safe_name = _sanitize_content_disposition_filename(filename)
+        disp_type = get_content_disposition_type(media_type)
+        disposition = f'{disp_type}; filename="{safe_name}"'
     signed = await backend.presigned_get_url(
         storage_key,
         settings.VIDEO_PLAYBACK_URL_TTL_SECONDS,
@@ -230,6 +242,7 @@ def _image_response(
     height: int | None,
     size_bytes: int | None,
     storage_key: str,
+    renditions: dict[str, str] | None = None,
     custom_width: int | None = None,
     custom_height: int | None = None,
     custom_fit: str = "auto",
@@ -239,11 +252,7 @@ def _image_response(
 
     Takes the storage *key*, not a pre-resolved source URL, so it derives its
     imgproxy URLs through the same `signed_image_url` helper as
-    `UploadRecord.to_public`. It previously resolved its own source via
-    `presigned_get_url`, which meant the upload response and `GET /files/{id}`
-    handed out different imgproxy URLs for the same image -- two CDN cache keys,
-    and on s3/gcp the upload response's pair silently expired after an hour
-    despite looking permanent.
+    `UploadRecord.to_public`.
     """
     response = {
         "status": "success",
@@ -251,12 +260,7 @@ def _image_response(
         "size_bytes": size_bytes,
         "size_mb": round(size_bytes / (1024 * 1024), 2) if size_bytes else None,
         "dimensions": {"width": width, "height": height},
-        "imgproxy_thumbnail_url": signed_image_url(
-            storage_key, processing_options="rs:fill:300:300", format="webp"
-        ),
-        "imgproxy_optimized_url": signed_image_url(
-            storage_key, processing_options="rs:auto", format="webp"
-        ),
+        "imgproxy_thumbnail_url": derive_thumbnail_url(storage_key, renditions),
     }
 
     if custom_width or custom_height or custom_format or custom_fit != "auto":

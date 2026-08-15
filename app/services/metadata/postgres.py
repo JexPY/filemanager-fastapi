@@ -14,8 +14,9 @@ locking fragility the storage-singleton pattern was built to avoid.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
-from typing import cast
+from typing import Any, cast
 
 import asyncpg
 
@@ -28,7 +29,7 @@ _COLUMNS = (
     "id, owner, kind, storage_key, content_type, size_bytes, width, height, "
     "content_hash, status, task_id, original_filename, duration_seconds, truncated, "
     "callback_url, poster_upload_id, webhook_status, webhook_attempts, webhook_last_error, "
-    "webhook_updated_at, visibility, share_token, created_at, updated_at"
+    "webhook_updated_at, visibility, share_token, renditions, created_at, updated_at"
 )
 
 _JOIN_COLUMNS = (
@@ -36,12 +37,27 @@ _JOIN_COLUMNS = (
     "u.content_hash, u.status, u.task_id, u.original_filename, u.duration_seconds, u.truncated, "
     "u.callback_url, u.poster_upload_id, u.webhook_status, u.webhook_attempts, "
     "u.webhook_last_error, u.webhook_updated_at, u.visibility, u.share_token, "
-    "u.created_at, u.updated_at, p.storage_key AS poster_storage_key"
+    "u.renditions, u.created_at, u.updated_at, p.storage_key AS poster_storage_key"
 )
+
+
+def _parse_renditions(raw: Any) -> dict[str, str] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            val = json.loads(raw)
+            return val if isinstance(val, dict) else None
+        except json.JSONDecodeError, TypeError, ValueError:
+            return None
+    return None
 
 
 def _row_to_record(row: asyncpg.Record) -> UploadRecord:
     poster_storage_key = row["poster_storage_key"] if "poster_storage_key" in row else None
+    renditions = _parse_renditions(row["renditions"]) if "renditions" in row else None
     return UploadRecord(
         id=row["id"],
         owner=row["owner"],
@@ -68,6 +84,7 @@ def _row_to_record(row: asyncpg.Record) -> UploadRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         poster_storage_key=poster_storage_key,
+        renditions=renditions,
     )
 
 
@@ -162,13 +179,15 @@ class PostgresMetadataStore(MetadataStore):
         original_filename: str | None = None,
         callback_url: str | None = None,
         visibility: str = "private",
+        renditions: dict[str, str] | None = None,
     ) -> UploadRecord:
         upload_id = uuid.uuid4().hex
+        renditions_json = json.dumps(renditions) if renditions is not None else None
         row = await self._fetchrow(
             f"INSERT INTO uploads (id, owner, kind, storage_key, content_type, size_bytes, "
             f"width, height, content_hash, status, task_id, original_filename, "
-            f"callback_url, visibility) "
-            f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) "
+            f"callback_url, visibility, renditions) "
+            f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb) "
             f"RETURNING {_COLUMNS}",
             upload_id,
             owner,
@@ -184,6 +203,7 @@ class PostgresMetadataStore(MetadataStore):
             original_filename,
             callback_url,
             visibility,
+            renditions_json,
             error_msg=f"Failed to record upload {storage_key!r}",
         )
         assert row is not None  # INSERT ... RETURNING always yields a row
@@ -362,20 +382,28 @@ class PostgresMetadataStore(MetadataStore):
         return _row_to_record(row) if row is not None else None
 
     async def set_visibility(
-        self, upload_id: str, owner: str, visibility: str, storage_key: str | None = None
+        self,
+        upload_id: str,
+        owner: str,
+        visibility: str,
+        storage_key: str | None = None,
+        renditions: dict[str, str] | None = None,
     ) -> UploadRecord | None:
         # Both columns move in ONE statement on purpose: a key rotation that
         # landed without its visibility flip (or vice versa) would leave the row
         # pointing at an object that no longer exists, or advertise a public URL
         # for a record that is now private.
+        renditions_json = json.dumps(renditions) if renditions is not None else None
         row = await self._fetchrow(
             f"UPDATE uploads SET visibility = $3, "
-            f"storage_key = COALESCE($4, storage_key), updated_at = now() "
+            f"storage_key = COALESCE($4, storage_key), "
+            f"renditions = COALESCE($5::jsonb, renditions), updated_at = now() "
             f"WHERE id = $1 AND owner = $2 RETURNING {_COLUMNS}",
             upload_id,
             owner,
             visibility,
             storage_key,
+            renditions_json,
             error_msg=f"Failed to set visibility on upload {upload_id!r}",
         )
         return _row_to_record(row) if row is not None else None

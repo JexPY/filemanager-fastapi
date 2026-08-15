@@ -24,7 +24,7 @@ async def test_valid_image_upload_succeeds(
     assert body["id"]  # a metadata record id the client can list/get/delete by
     assert body["dimensions"] == {"width": 8, "height": 8}
     assert "imgproxy_thumbnail_url" in body
-    assert "imgproxy_optimized_url" in body
+    assert "imgproxy_optimized_url" not in body
 
 
 def _decode_imgproxy_source(imgproxy_url: str) -> str:

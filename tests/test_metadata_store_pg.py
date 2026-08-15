@@ -378,3 +378,36 @@ async def test_multiple_null_share_tokens_allowed(pg_store: PostgresMetadataStor
             status=STATUS_READY,
         )
     assert len(await pg_store.list("alice")) == 3
+
+
+async def test_renditions_jsonb_roundtrip(pg_store: PostgresMetadataStore) -> None:
+    rec = await pg_store.create(
+        owner="alice",
+        kind=KIND_IMAGE,
+        storage_key="images/main.webp",
+        content_type="image/webp",
+        size_bytes=100,
+        status=STATUS_READY,
+        renditions={"thumbnail": "images/main_t300.webp"},
+    )
+    assert rec.renditions == {"thumbnail": "images/main_t300.webp"}
+
+    fetched = await pg_store.get(rec.id, "alice")
+    assert fetched is not None
+    assert fetched.renditions == {"thumbnail": "images/main_t300.webp"}
+
+    # Update visibility and rotated renditions
+    updated = await pg_store.set_visibility(
+        rec.id,
+        "alice",
+        "private",
+        storage_key="images/rot.webp",
+        renditions={"thumbnail": "images/rot_t300.webp"},
+    )
+    assert updated is not None
+    assert updated.storage_key == "images/rot.webp"
+    assert updated.renditions == {"thumbnail": "images/rot_t300.webp"}
+
+    refetched = await pg_store.get(rec.id, "alice")
+    assert refetched is not None
+    assert refetched.renditions == {"thumbnail": "images/rot_t300.webp"}

@@ -47,9 +47,6 @@ class ImageUploadResponse(BaseModel):
     )
     dimensions: ImageDimensions
     imgproxy_thumbnail_url: str = Field(description="Signed imgproxy URL: a 300x300 fill thumbnail")
-    imgproxy_optimized_url: str = Field(
-        description="Signed imgproxy URL: the image auto-optimized at full size"
-    )
     imgproxy_custom_url: str | None = Field(
         default=None,
         description="Signed imgproxy URL for the requested custom width/height/fit/format; "
@@ -96,6 +93,31 @@ VideoUploadResponse = VideoUploadAcceptedResponse | VideoUploadDuplicateResponse
 
 
 # ---------------------------------------------------------------------------
+# Generic file upload
+# ---------------------------------------------------------------------------
+
+
+class FileUploadResponse(BaseModel):
+    """Returned by ``POST /upload/file``."""
+
+    status: str = Field(description="Always 'success' for a completed file upload")
+    id: str = Field(description="The upload record id (use with /files/{id})")
+    kind: str = Field(description="Always 'file' for generic file uploads")
+    content_type: str = Field(description="MIME type of the uploaded file")
+    size_bytes: int | None = Field(default=None, description="Stored object size in bytes")
+    size_mb: float | None = Field(
+        default=None,
+        description="Stored size in megabytes, rounded to 2dp (null for a 0-byte object)",
+    )
+    original_filename: str | None = Field(default=None, description="Original upload filename")
+    visibility: str = Field(description="'private' | 'public'")
+    url: str | None = Field(
+        default=None,
+        description="The canonical download URL: GET /files/{id}/download",
+    )
+
+
+# ---------------------------------------------------------------------------
 # File records (mirror UploadRecord.to_public())
 # ---------------------------------------------------------------------------
 
@@ -108,7 +130,7 @@ class FileRecord(BaseModel):
     """
 
     id: str
-    kind: str = Field(description="'image' or 'video'")
+    kind: str = Field(description="'image' | 'video' | 'file'")
     status: str = Field(description="'processing' | 'ready' | 'failed'")
     content_type: str
     size_bytes: int
@@ -148,7 +170,11 @@ class FileRecord(BaseModel):
     )
     thumbnail_url: str | None = Field(
         default=None,
-        description="Signed imgproxy URL: a 300x300 fill thumbnail. Public images only.",
+        description=(
+            "Public URL for a 300x300 fill thumbnail. On object stores with a public base URL "
+            "configured, this is a direct CDN/object read of the materialized rendition; "
+            "otherwise signed imgproxy URL. Public images only."
+        ),
     )
     poster_url: str | None = Field(
         default=None,

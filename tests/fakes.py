@@ -140,6 +140,7 @@ class InMemoryMetadataStore(MetadataStore):
         original_filename: str | None = None,
         callback_url: str | None = None,
         visibility: str = "private",
+        renditions: dict[str, str] | None = None,
     ) -> UploadRecord:
         self._counter += 1
         upload_id = f"rec-{self._counter:08d}"
@@ -169,6 +170,7 @@ class InMemoryMetadataStore(MetadataStore):
             share_token=None,
             created_at=now,
             updated_at=now,
+            renditions=renditions,
         )
         self.records[upload_id] = record
         self._order.append(upload_id)
@@ -318,7 +320,12 @@ class InMemoryMetadataStore(MetadataStore):
         return updated
 
     async def set_visibility(
-        self, upload_id: str, owner: str, visibility: str, storage_key: str | None = None
+        self,
+        upload_id: str,
+        owner: str,
+        visibility: str,
+        storage_key: str | None = None,
+        renditions: dict[str, str] | None = None,
     ) -> UploadRecord | None:
         record = self.records.get(upload_id)
         if record is None or record.owner != owner:
@@ -327,6 +334,7 @@ class InMemoryMetadataStore(MetadataStore):
             record,
             visibility=visibility,
             storage_key=storage_key or record.storage_key,
+            renditions=renditions if renditions is not None else record.renditions,
             updated_at=datetime.now(UTC),
         )
         self.records[upload_id] = updated

@@ -1,7 +1,7 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 
@@ -10,8 +10,10 @@ from app.routers.utils import resolve_playback
 from app.services.metadata import (
     VISIBILITY_PUBLIC,
     MetadataError,
+    UploadRecord,
     get_metadata_store,
 )
+from app.services.renditions import normalize_rendition_name
 from app.services.storage import StorageError, get_storage, has_public_base_url
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,37 @@ def _fallback_filename(storage_key: str) -> str:
     return storage_key.rsplit("/", 1)[-1]
 
 
+def _resolve_rendition_target(record: UploadRecord, rendition: str | None) -> tuple[str, str, str]:
+    """Given a record and optional rendition query, returns (storage_key, filename, content_type).
+
+    Raises 400 on unsupported rendition names, and 404 when the requested
+    rendition is not present on the record.
+    """
+    if rendition is None:
+        return (
+            record.storage_key,
+            record.original_filename or _fallback_filename(record.storage_key),
+            record.content_type or "application/octet-stream",
+        )
+    canonical_name = normalize_rendition_name(rendition)
+    if canonical_name is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown or unsupported rendition {rendition!r}",
+        )
+    rend_key = record.renditions.get(canonical_name) if record.renditions else None
+    if not rend_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Rendition not found",
+        )
+    return (
+        rend_key,
+        _fallback_filename(rend_key),
+        "image/webp",
+    )
+
+
 @router.get(
     "/files/{file_id}/download",
     tags=["Sharing & Playback"],
@@ -41,6 +74,12 @@ async def stream_video(
     file_id: Annotated[str, Path(max_length=64)],
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)] = None,
+    rendition: Annotated[
+        str | None,
+        Query(
+            description="Optional materialized rendition name (e.g. 'thumb', 'thumbnail', 't300')"
+        ),
+    ] = None,
 ):
     """The permanent, backend-agnostic URL -- the one clients embed.
 
@@ -73,6 +112,8 @@ async def stream_video(
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
 
+    target_key, target_filename, target_content_type = _resolve_rendition_target(record, rendition)
+
     if record.visibility == VISIBILITY_PUBLIC:
         # Object stores (s3/gcp) with a public/CDN base -> a stable, embeddable
         # 302 to public_url(key). NOT local: its media volume is served only via
@@ -82,7 +123,7 @@ async def stream_video(
         if has_public_base_url():
             backend = await get_storage()
             return RedirectResponse(
-                url=backend.public_url(record.storage_key), status_code=status.HTTP_302_FOUND
+                url=backend.public_url(target_key), status_code=status.HTTP_302_FOUND
             )
     else:
         # Private: the owner, or a read capability bound to this exact record.
@@ -95,9 +136,9 @@ async def stream_video(
 
     try:
         return await resolve_playback(
-            record.storage_key,
-            filename=record.original_filename or _fallback_filename(record.storage_key),
-            media_type=record.content_type or "application/octet-stream",
+            target_key,
+            filename=target_filename,
+            media_type=target_content_type,
             private=record.visibility != VISIBILITY_PUBLIC,
         )
     except StorageError as exc:
@@ -113,7 +154,15 @@ async def stream_video(
     summary="Stream via share link",
     response_class=RedirectResponse,
 )
-async def play_shared_video(share_token: Annotated[str, Path(max_length=128)]):
+async def play_shared_video(
+    share_token: Annotated[str, Path(max_length=128)],
+    rendition: Annotated[
+        str | None,
+        Query(
+            description="Optional materialized rendition name (e.g. 'thumb', 'thumbnail', 't300')"
+        ),
+    ] = None,
+):
     """Serve any shared record via an unlisted share token, regardless of kind or
     visibility. Does NOT require a bearer token -- the share token *is* the
     capability, and it is also the locator, so there is no id to owner-scope.
@@ -130,11 +179,13 @@ async def play_shared_video(share_token: Annotated[str, Path(max_length=128)]):
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
 
+    target_key, target_filename, target_content_type = _resolve_rendition_target(record, rendition)
+
     try:
         return await resolve_playback(
-            record.storage_key,
-            filename=record.original_filename or _fallback_filename(record.storage_key),
-            media_type=record.content_type or "application/octet-stream",
+            target_key,
+            filename=target_filename,
+            media_type=target_content_type,
             # A share link is a secret capability, so treat it like private
             # media: stream it rather than handing the holder a signed URL they
             # could pass on independently of the (revocable) share token.

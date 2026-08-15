@@ -327,7 +327,7 @@ async def _extract_and_store_poster(
             frame_bytes = await f.read()
 
         # Reuse the exact image validate/strip path (CPU-bound -> threadpool).
-        webp_bytes, content_type, width, height = await asyncio.to_thread(
+        webp_bytes, content_type, width, height, _ = await asyncio.to_thread(
             validate_and_strip_image, frame_bytes
         )
         poster_key = f"posters/{unique_id}.webp"

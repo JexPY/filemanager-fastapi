@@ -400,3 +400,47 @@ async def test_download_sanitizes_content_disposition_header(
     resp = await client.get(f"/files/{rec.id}/download")
     assert resp.status_code == 200
     assert resp.headers["content-disposition"] == 'inline; filename="evil_name__Header: inject.mp4"'
+
+
+async def test_download_generic_pdf_inline_disposition(
+    client: httpx.AsyncClient,
+    fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    rec = await fake_metadata.create(
+        owner=OWNER,
+        kind="file",
+        storage_key="files/doc.pdf",
+        content_type="application/pdf",
+        size_bytes=100,
+        status="ready",
+        original_filename="manual.pdf",
+        visibility="public",
+    )
+    resp = await client.get(f"/files/{rec.id}/download")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/pdf"
+    assert resp.headers["content-disposition"] == 'inline; filename="manual.pdf"'
+
+
+async def test_download_generic_zip_attachment_disposition(
+    client: httpx.AsyncClient,
+    fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    rec = await fake_metadata.create(
+        owner=OWNER,
+        kind="file",
+        storage_key="files/data.zip",
+        content_type="application/zip",
+        size_bytes=100,
+        status="ready",
+        original_filename="bundle.zip",
+        visibility="public",
+    )
+    resp = await client.get(f"/files/{rec.id}/download")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+    assert resp.headers["content-disposition"] == 'attachment; filename="bundle.zip"'
