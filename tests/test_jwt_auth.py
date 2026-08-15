@@ -127,7 +127,8 @@ def test_static_token_resolves_to_unrestricted_principal(jwt_env: None) -> None:
     assert p is not None
     assert p.owner == "master"
     assert p.scopes is None  # a static master token has no scope restriction
-    assert p.has_scope("upload:video") and p.has_scope("anything")
+    assert p.has_scope("upload:video")
+    assert p.has_scope("anything")
 
 
 def test_valid_jwt_resolves_owner_and_scopes(jwt_env: None) -> None:

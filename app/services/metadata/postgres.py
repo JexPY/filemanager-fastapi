@@ -49,8 +49,9 @@ def _parse_renditions(raw: Any) -> dict[str, str] | None:
     if isinstance(raw, str):
         try:
             val = json.loads(raw)
-            return val if isinstance(val, dict) else None
-        except json.JSONDecodeError, TypeError, ValueError:
+            if isinstance(val, dict):
+                return val
+        except ValueError, TypeError:
             return None
     return None
 
@@ -177,10 +178,11 @@ class PostgresMetadataStore(MetadataStore):
         content_hash: str | None = None,
         task_id: str | None = None,
         original_filename: str | None = None,
-        callback_url: str | None = None,
         visibility: str = "private",
-        renditions: dict[str, str] | None = None,
+        **kwargs: object,
     ) -> UploadRecord:
+        callback_url = kwargs.get("callback_url")
+        renditions = kwargs.get("renditions")
         upload_id = uuid.uuid4().hex
         renditions_json = json.dumps(renditions) if renditions is not None else None
         row = await self._fetchrow(

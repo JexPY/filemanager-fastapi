@@ -57,10 +57,12 @@ async def test_full_crud_roundtrip(pg_store: PostgresMetadataStore) -> None:
         height=480,
         content_hash="abc123",
     )
-    assert rec.id and rec.created_at is not None
+    assert rec.id
+    assert rec.created_at is not None
 
     fetched = await pg_store.get(rec.id, "alice")
-    assert fetched is not None and fetched.storage_key == "images/a.webp"
+    assert fetched is not None
+    assert fetched.storage_key == "images/a.webp"
     assert fetched.content_hash == "abc123"
     assert (fetched.width, fetched.height) == (640, 480)
 
@@ -132,7 +134,8 @@ async def test_find_ready_by_hash(pg_store: PostgresMetadataStore) -> None:
         content_hash="hash-1",
     )
     found = await pg_store.find_ready_by_hash("alice", "hash-1")
-    assert found is not None and found.id == rec.id
+    assert found is not None
+    assert found.id == rec.id
     assert await pg_store.find_ready_by_hash("bob", "hash-1") is None
     assert await pg_store.find_ready_by_hash("alice", "missing") is None
 
@@ -149,7 +152,8 @@ async def test_get_by_task_id_is_owner_scoped(pg_store: PostgresMetadataStore) -
     await pg_store.set_task_id(rec.id, "task-xyz")
 
     found = await pg_store.get_by_task_id("task-xyz", "alice")
-    assert found is not None and found.id == rec.id
+    assert found is not None
+    assert found.id == rec.id
     assert await pg_store.get_by_task_id("task-xyz", "bob") is None
     assert await pg_store.get_by_task_id("nope", "alice") is None
 
@@ -166,7 +170,8 @@ async def test_find_active_video_by_hash(pg_store: PostgresMetadataStore) -> Non
     )
     # A still-processing video matches (attach to the in-flight job).
     found = await pg_store.find_active_video_by_hash("alice", "vhash")
-    assert found is not None and found.id == processing.id
+    assert found is not None
+    assert found.id == processing.id
 
     # Owner-scoped, and an image with the same hash is not a video match.
     assert await pg_store.find_active_video_by_hash("bob", "vhash") is None
@@ -211,7 +216,8 @@ async def test_video_lifecycle_and_deleted_midflight(pg_store: PostgresMetadataS
     assert ready.truncated is True
 
     failed = await pg_store.mark_failed(rec.id)
-    assert failed is not None and failed.status == STATUS_FAILED
+    assert failed is not None
+    assert failed.status == STATUS_FAILED
 
     # Deleted before the worker's update lands -> update reports the row is gone.
     await pg_store.delete(rec.id, "alice")
@@ -229,7 +235,8 @@ async def test_get_by_id_is_unscoped(pg_store: PostgresMetadataStore) -> None:
     )
     # Worker-internal lookup: resolves without an owner (the api already admitted).
     found = await pg_store.get_by_id(rec.id)
-    assert found is not None and found.id == rec.id
+    assert found is not None
+    assert found.id == rec.id
     assert await pg_store.get_by_id("does-not-exist") is None
 
 
@@ -253,10 +260,12 @@ async def test_set_poster_links_and_handles_missing_video(
         status=STATUS_READY,
     )
     linked = await pg_store.set_poster(video.id, poster.id)
-    assert linked is not None and linked.poster_upload_id == poster.id
+    assert linked is not None
+    assert linked.poster_upload_id == poster.id
     # Persisted (round-trips through the column, not just the RETURNING row).
     refetched = await pg_store.get(video.id, "alice")
-    assert refetched is not None and refetched.poster_upload_id == poster.id
+    assert refetched is not None
+    assert refetched.poster_upload_id == poster.id
     # A gone video reports None (the mid-generation race).
     await pg_store.delete(video.id, "alice")
     assert await pg_store.set_poster(video.id, poster.id) is None
@@ -305,15 +314,18 @@ async def test_visibility_defaults_private_and_is_owner_scoped(
     assert rec.share_token is None
 
     made_public = await pg_store.set_visibility(rec.id, "alice", "public")
-    assert made_public is not None and made_public.visibility == "public"
+    assert made_public is not None
+    assert made_public.visibility == "public"
     # Persisted (round-trips through the column, not just RETURNING).
     refetched = await pg_store.get(rec.id, "alice")
-    assert refetched is not None and refetched.visibility == "public"
+    assert refetched is not None
+    assert refetched.visibility == "public"
 
     # Owner-scoped: another owner can't change it.
     assert await pg_store.set_visibility(rec.id, "bob", "private") is None
     still_public = await pg_store.get(rec.id, "alice")
-    assert still_public is not None and still_public.visibility == "public"
+    assert still_public is not None
+    assert still_public.visibility == "public"
 
 
 async def test_share_token_set_lookup_clear(pg_store: PostgresMetadataStore) -> None:
@@ -326,17 +338,20 @@ async def test_share_token_set_lookup_clear(pg_store: PostgresMetadataStore) -> 
         status=STATUS_READY,
     )
     set_rec = await pg_store.set_share_token(rec.id, "alice", "tok-abc")
-    assert set_rec is not None and set_rec.share_token == "tok-abc"
+    assert set_rec is not None
+    assert set_rec.share_token == "tok-abc"
 
     # Unscoped lookup: the token is the grant (no owner arg).
     by_token = await pg_store.get_by_share_token("tok-abc")
-    assert by_token is not None and by_token.id == rec.id
+    assert by_token is not None
+    assert by_token.id == rec.id
     assert await pg_store.get_by_share_token("nope") is None
 
     # Owner-scoped mint/clear.
     assert await pg_store.set_share_token(rec.id, "bob", "tok-x") is None
     cleared = await pg_store.clear_share_token(rec.id, "alice")
-    assert cleared is not None and cleared.share_token is None
+    assert cleared is not None
+    assert cleared.share_token is None
     assert await pg_store.get_by_share_token("tok-abc") is None
     assert await pg_store.clear_share_token(rec.id, "bob") is None
 

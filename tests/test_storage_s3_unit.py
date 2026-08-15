@@ -6,8 +6,6 @@ dummy credentials -- not mocked -- without needing a real bucket or
 network access.
 """
 
-from collections.abc import Iterator
-
 import pytest
 
 from app.config import settings
@@ -15,15 +13,14 @@ from app.services.storage import S3Storage
 
 
 @pytest.fixture
-def s3_backend(monkeypatch: pytest.MonkeyPatch) -> Iterator[S3Storage]:
+def s3_backend(monkeypatch: pytest.MonkeyPatch) -> S3Storage:
     monkeypatch.setattr(settings, "S3_BUCKET", "test-bucket")
     monkeypatch.setattr(settings, "AWS_ACCESS_KEY_ID", "fake-access-key")
     monkeypatch.setattr(settings, "AWS_SECRET_ACCESS_KEY", "fake-secret-key")
     monkeypatch.setattr(settings, "AWS_REGION", "us-east-1")
     monkeypatch.setattr(settings, "S3_ENDPOINT_URL", "")
     monkeypatch.setattr(settings, "S3_PUBLIC_BASE_URL", "")
-    backend = S3Storage()
-    yield backend
+    return S3Storage()
 
 
 async def test_presigned_get_url_produces_a_signed_url(s3_backend: S3Storage) -> None:

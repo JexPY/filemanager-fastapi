@@ -26,6 +26,7 @@ router = APIRouter()
 
 _STORE_UNAVAILABLE_DETAIL = "Metadata store unavailable"
 _NOT_FOUND_DETAIL = "Not found"
+_STORAGE_UNAVAILABLE_DETAIL = "Storage backend unavailable"
 
 
 @router.get(
@@ -63,7 +64,7 @@ async def list_files(
 @router.get(
     "/files/{file_id}",
     tags=["Files"],
-    summary="Get file",
+    summary="Get file metadata",
     response_model=FileRecord,
     response_model_exclude_unset=True,
 )
@@ -71,8 +72,9 @@ async def get_file(
     file_id: Annotated[str, Path(max_length=64)],
     owner: Annotated[str, Depends(verify_token)],
 ):
-    """Fetch one of the caller's upload records. 404 (not 403) when it isn't
-    the caller's, so a record's existence never leaks across owners."""
+    """Get metadata for one upload. Owner-scoped (404 for anything that isn't the
+    caller's, so existence never leaks across tokens). Returns the public schema
+    (no storage internals)."""
     store = await get_metadata_store()
     try:
         record = await store.get(file_id, owner)
@@ -88,6 +90,35 @@ async def get_file(
 
 class _VisibilityBody(BaseModel):
     visibility: Literal["public", "private"]
+
+
+async def _rotate_renditions(record: UploadRecord, new_key: str) -> dict[str, str] | None:
+    if not record.renditions:
+        return None
+    new_renditions: dict[str, str] = {}
+    for rend_name, old_rend_key in record.renditions.items():
+        new_rend_key = derive_rendition_key(new_key, rend_name)
+        try:
+            await copy_file(old_rend_key, new_rend_key)
+            new_renditions[rend_name] = new_rend_key
+        except StorageNotFound:
+            logger.warning(
+                "Skipping rendition key rotation for %s (%s): object %s is already gone",
+                record.id,
+                rend_name,
+                old_rend_key,
+            )
+        except StorageError as exc:
+            logger.exception("Failed to rotate rendition %s for %s", rend_name, record.id)
+            with contextlib.suppress(StorageError):
+                await delete_file(new_key)
+            for k in new_renditions.values():
+                with contextlib.suppress(StorageError):
+                    await delete_file(k)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORAGE_UNAVAILABLE_DETAIL
+            ) from exc
+    return new_renditions
 
 
 async def _rotate_key_if_going_private(
@@ -133,38 +164,34 @@ async def _rotate_key_if_going_private(
     except StorageError as exc:
         logger.exception("Failed to rotate storage key for %s", record.id)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORAGE_UNAVAILABLE_DETAIL
         ) from exc
 
     # Also rotate any materialized renditions
-    new_renditions: dict[str, str] | None = None
+    new_renditions = await _rotate_renditions(record, new_key)
+    return new_key, new_renditions
+
+
+async def _delete_old_objects_after_rotation(record: UploadRecord) -> None:
+    try:
+        await delete_file(record.storage_key)
+    except StorageError:
+        logger.error(
+            "Rotated %s to a private key but could not delete the old object %s; "
+            "its public URL stays fetchable until that object is removed",
+            record.id,
+            record.storage_key,
+        )
     if record.renditions:
-        new_renditions = {}
-        for rend_name, old_rend_key in record.renditions.items():
-            new_rend_key = derive_rendition_key(new_key, rend_name)
+        for old_rend_key in record.renditions.values():
             try:
-                await copy_file(old_rend_key, new_rend_key)
-                new_renditions[rend_name] = new_rend_key
-            except StorageNotFound:
-                logger.warning(
-                    "Skipping rendition key rotation for %s (%s): object %s is already gone",
+                await delete_file(old_rend_key)
+            except StorageError:
+                logger.error(
+                    "Rotated %s to a private key but could not delete old rendition %s",
                     record.id,
-                    rend_name,
                     old_rend_key,
                 )
-            except StorageError as exc:
-                logger.exception("Failed to rotate rendition %s for %s", rend_name, record.id)
-                with contextlib.suppress(StorageError):
-                    await delete_file(new_key)
-                if new_renditions:
-                    for k in new_renditions.values():
-                        with contextlib.suppress(StorageError):
-                            await delete_file(k)
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
-                ) from exc
-
-    return new_key, new_renditions
 
 
 @router.patch(
@@ -217,36 +244,7 @@ async def set_file_visibility(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
 
     if rotated_key is not None:
-        # Only now that the row points at the new key. Logged at error level
-        # rather than swallowed: while the stale object survives, so does the
-        # cached public URL this rotation exists to kill.
-        #
-        # These log the record's *stored* id, never the raw `file_id` path
-        # parameter. They are the same value, but `record.id` comes from the
-        # database column (a server-generated uuid4 hex) rather than from the
-        # request, so nothing user-controlled reaches the log at all. The JSON
-        # log formatter already escapes control characters, so forging a log
-        # line was not possible either way -- but that protection lives in the
-        # formatter, and a call site should not depend on it.
-        try:
-            await delete_file(record.storage_key)
-        except StorageError:
-            logger.error(
-                "Rotated %s to a private key but could not delete the old object %s; "
-                "its public URL stays fetchable until that object is removed",
-                record.id,
-                record.storage_key,
-            )
-        if record.renditions:
-            for old_rend_key in record.renditions.values():
-                try:
-                    await delete_file(old_rend_key)
-                except StorageError:
-                    logger.error(
-                        "Rotated %s to a private key but could not delete old rendition %s",
-                        record.id,
-                        old_rend_key,
-                    )
+        await _delete_old_objects_after_rotation(record)
 
     # A video's poster is its own record with its own key and its own public
     # URLs, so leaving it public would keep a thumbnail of the now-private video
@@ -358,6 +356,28 @@ async def revoke_share_link(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+async def _cascade_delete_poster(store, record: UploadRecord, owner: str) -> None:
+    """Cascade: a video's poster is a derived object with no standalone meaning,
+    so remove it with its parent. Best-effort -- a poster-cleanup failure must
+    not fail the delete that already succeeded (it would just leave the poster
+    image row/object, findable and deletable on its own)."""
+    if record.kind != KIND_VIDEO or not record.poster_upload_id:
+        return
+    try:
+        poster = await store.get(record.poster_upload_id, owner)
+    except MetadataError:
+        poster = None
+    if poster is not None:
+        with contextlib.suppress(StorageError):
+            await delete_file(poster.storage_key)
+        if poster.renditions:
+            for rend_key in poster.renditions.values():
+                with contextlib.suppress(StorageError):
+                    await delete_file(rend_key)
+        with contextlib.suppress(MetadataError):
+            await store.delete(poster.id, owner)
+
+
 @router.delete(
     "/files/{file_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -398,7 +418,7 @@ async def delete_upload(
     except StorageError as exc:
         logger.exception("Failed to delete object")
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORAGE_UNAVAILABLE_DETAIL
         ) from exc
 
     try:
@@ -409,23 +429,5 @@ async def delete_upload(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
 
-    # Cascade: a video's poster is a derived object with no standalone meaning,
-    # so remove it with its parent. Best-effort -- a poster-cleanup failure must
-    # not fail the delete that already succeeded (it would just leave the poster
-    # image row/object, findable and deletable on its own).
-    if record.kind == KIND_VIDEO and record.poster_upload_id:
-        try:
-            poster = await store.get(record.poster_upload_id, owner)
-        except MetadataError:
-            poster = None
-        if poster is not None:
-            with contextlib.suppress(StorageError):
-                await delete_file(poster.storage_key)
-            if poster.renditions:
-                for rend_key in poster.renditions.values():
-                    with contextlib.suppress(StorageError):
-                        await delete_file(rend_key)
-            with contextlib.suppress(MetadataError):
-                await store.delete(poster.id, owner)
-
+    await _cascade_delete_poster(store, record, owner)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

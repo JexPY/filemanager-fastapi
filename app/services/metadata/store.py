@@ -41,9 +41,8 @@ class MetadataStore(ABC):
         content_hash: str | None = None,
         task_id: str | None = None,
         original_filename: str | None = None,
-        callback_url: str | None = None,
         visibility: str = "private",
-        renditions: dict[str, str] | None = None,
+        **kwargs: object,
     ) -> UploadRecord: ...
 
     @abstractmethod

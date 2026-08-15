@@ -338,7 +338,8 @@ async def test_ffmpeg_failure_marks_record_failed_and_deletes_raw(
         )
 
     record = await fake_metadata.get(upload_id, OWNER)
-    assert record is not None and record.status == STATUS_FAILED
+    assert record is not None
+    assert record.status == STATUS_FAILED
     assert raw_key not in fake_storage.objects
     assert raw_key in fake_storage.deleted_keys
 
@@ -361,7 +362,8 @@ async def test_ffmpeg_timeout_marks_record_failed_and_deletes_raw(
         )
 
     record = await fake_metadata.get(upload_id, OWNER)
-    assert record is not None and record.status == STATUS_FAILED
+    assert record is not None
+    assert record.status == STATUS_FAILED
     assert raw_key not in fake_storage.objects
     assert raw_key in fake_storage.deleted_keys
 

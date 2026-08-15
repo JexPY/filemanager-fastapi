@@ -135,10 +135,12 @@ async def test_share_mint_returns_token_and_persists_it(
     assert resp.status_code == 200
     body = resp.json()
     token = body["share_token"]
-    assert token and body["share_url"].endswith(f"/share/{token}")
+    assert token
+    assert body["share_url"].endswith(f"/share/{token}")
     # Persisted, and resolvable by the unscoped lookup.
     found = await fake_metadata.get_by_share_token(token)
-    assert found is not None and found.id == rec.id
+    assert found is not None
+    assert found.id == rec.id
 
 
 async def test_share_token_is_never_in_to_public(
@@ -234,7 +236,8 @@ async def test_going_private_rotates_the_storage_key(
     stored = await fake_metadata.get(image.id, OWNER)
     assert stored is not None
     assert stored.storage_key != "images/a.webp"
-    assert stored.storage_key.startswith("images/") and stored.storage_key.endswith(".webp")
+    assert stored.storage_key.startswith("images/")
+    assert stored.storage_key.endswith(".webp")
     # Bytes moved, and the old object is gone so its cached URL now 404s.
     assert fake_storage.objects[stored.storage_key] == b"secret-bytes"
     assert "images/a.webp" not in fake_storage.objects

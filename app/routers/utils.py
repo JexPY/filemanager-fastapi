@@ -10,7 +10,7 @@ from fastapi import HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse, Response
 
 from app.config import settings
-from app.services.file_validation import get_content_disposition_type
+from app.services.file_validation import MIME_OCTET_STREAM, get_content_disposition_type
 from app.services.imgproxy import signed_image_url
 from app.services.renditions import derive_thumbnail_url
 from app.services.storage import StorageError, get_storage
@@ -108,7 +108,7 @@ def _sanitize_content_disposition_filename(filename: str) -> str:
 def _xaccel_response(
     storage_key: str,
     filename: str | None = None,
-    media_type: str = "application/octet-stream",
+    media_type: str = MIME_OCTET_STREAM,
 ) -> Response:
     """Yield a local file via nginx's X-Accel-Redirect. The app issues the
     header; nginx serves the bytes directly from the volume, natively supporting
@@ -126,9 +126,7 @@ def _xaccel_response(
     return response
 
 
-def _object_xaccel_response(
-    target_url: str, media_type: str = "application/octet-stream"
-) -> Response:
+def _object_xaccel_response(target_url: str, media_type: str = MIME_OCTET_STREAM) -> Response:
     """Stream a private object-store object through nginx, so the signed URL
     never reaches the client.
 
@@ -174,7 +172,7 @@ def _object_xaccel_response(
 def _local_file_response(
     storage_key: str,
     filename: str | None = None,
-    media_type: str = "application/octet-stream",
+    media_type: str = MIME_OCTET_STREAM,
 ) -> Response:
     """Yield a local file via Starlette's FileResponse (which does support Range).
     Used ONLY when LOCAL_MEDIA_SERVE_MODE=direct (i.e. dev without nginx). Prod
@@ -196,7 +194,7 @@ def _local_file_response(
 async def resolve_playback(
     storage_key: str,
     filename: str | None = None,
-    media_type: str = "application/octet-stream",
+    media_type: str = MIME_OCTET_STREAM,
     *,
     private: bool = False,
 ) -> Response:

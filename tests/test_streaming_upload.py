@@ -67,8 +67,10 @@ async def test_stream_to_temp_413_and_removes_partial_temp(
 
     monkeypatch.setattr(tempfile, "mkstemp", spy_mkstemp)
 
+    upload_file = _upload(b"x" * 4096)
+    req = _FakeRequest()
     with pytest.raises(HTTPException) as excinfo:
-        await _stream_capped_to_temp(_upload(b"x" * 4096), _FakeRequest(), max_bytes=100)
+        await _stream_capped_to_temp(upload_file, req, max_bytes=100)
     assert excinfo.value.status_code == 413
     # The partially-written temp file must be cleaned up on abort, not leaked.
     assert not os.path.exists(captured["path"])
@@ -89,18 +91,24 @@ async def test_stream_to_temp_aborts_with_499_and_removes_partial_temp(
 
     monkeypatch.setattr(tempfile, "mkstemp", spy_mkstemp)
 
+    upload_file = _upload(b"x" * 4096)
+    req = _DisconnectedRequest()
     with pytest.raises(HTTPException) as excinfo:
-        await _stream_capped_to_temp(_upload(b"x" * 4096), _DisconnectedRequest(), 50 * 1024 * 1024)
+        await _stream_capped_to_temp(upload_file, req, 50 * 1024 * 1024)
 
-    assert excinfo.value.status_code == HTTP_499_CLIENT_CLOSED_REQUEST == 499
+    assert excinfo.value.status_code == HTTP_499_CLIENT_CLOSED_REQUEST
+    assert excinfo.value.status_code == 499
     assert not os.path.exists(captured["path"])
 
 
 async def test_read_capped_aborts_with_499_on_client_disconnect() -> None:
+    upload_file = _upload(b"y" * 4096)
+    req = _DisconnectedRequest()
     with pytest.raises(HTTPException) as excinfo:
-        await _read_capped(_upload(b"y" * 4096), _DisconnectedRequest(), 50 * 1024 * 1024)
+        await _read_capped(upload_file, req, 50 * 1024 * 1024)
 
-    assert excinfo.value.status_code == HTTP_499_CLIENT_CLOSED_REQUEST == 499
+    assert excinfo.value.status_code == HTTP_499_CLIENT_CLOSED_REQUEST
+    assert excinfo.value.status_code == 499
 
 
 async def test_local_upload_from_path_streams_to_target(tmp_path: Path) -> None:

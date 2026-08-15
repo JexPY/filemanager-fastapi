@@ -76,7 +76,8 @@ async def test_list_reports_total_count_independent_of_pagination(
     body = (await client.get("/files?limit=1", headers=auth_headers)).json()
     assert len(body["files"]) == 1
     assert body["total_count"] == 3
-    assert body["limit"] == 1 and body["offset"] == 0
+    assert body["limit"] == 1
+    assert body["offset"] == 0
 
     # It honors the kind filter, and never leaks the other owner's record.
     videos = (await client.get("/files?kind=video", headers=auth_headers)).json()

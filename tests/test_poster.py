@@ -52,7 +52,8 @@ async def test_generate_poster_creates_linked_webp_image_record(
     assert poster.content_type == "image/webp"
     assert poster.storage_key.startswith("posters/")
     assert poster.storage_key in fake_storage.objects
-    assert poster.width and poster.height  # real dimensions from pyvips
+    assert poster.width
+    assert poster.height  # real dimensions from pyvips
 
     # The video row now points at its poster.
     video = await fake_metadata.get(video_id, OWNER)

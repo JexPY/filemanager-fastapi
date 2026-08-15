@@ -54,6 +54,9 @@ class StorageObject:
     content_type: str
 
 
+DEFAULT_CONTENT_TYPE = "application/octet-stream"
+
+
 # ---------------------------------------------------------------------------
 # Backend interface
 # ---------------------------------------------------------------------------
@@ -100,7 +103,7 @@ class StorageBackend(ABC):
         instead of playing), and filename preservation (the local byte paths set
         an inline Content-Disposition, so without this the object-store 302
         silently drops the original filename)."""
-        return None
+        pass
 
     def local_path(self, key: str) -> str | None:
         """The object's path on a filesystem the caller shares, if any
@@ -127,7 +130,7 @@ class StorageBackend(ABC):
         overrides it with a server-side copy, so a multi-hundred-MB video is
         never moved through here."""
         data = await self.download(src_key)
-        await self.upload(data, dst_key, "application/octet-stream")
+        await self.upload(data, dst_key, DEFAULT_CONTENT_TYPE)
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +565,7 @@ def has_public_base_url() -> bool:
 async def upload_file(
     file_data: bytes,
     object_name: str,
-    content_type: str = "application/octet-stream",
+    content_type: str = DEFAULT_CONTENT_TYPE,
 ) -> StorageObject:
     backend = await get_storage()
     return await backend.upload(file_data, object_name, content_type)
@@ -571,7 +574,7 @@ async def upload_file(
 async def upload_file_from_path(
     path: str,
     object_name: str,
-    content_type: str = "application/octet-stream",
+    content_type: str = DEFAULT_CONTENT_TYPE,
 ) -> StorageObject:
     """Stream a staged temp file into storage without loading it into memory (the
     write-side counterpart to upload_file's bytes-in interface)."""

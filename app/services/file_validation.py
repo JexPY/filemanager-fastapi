@@ -13,66 +13,101 @@ from __future__ import annotations
 
 import mimetypes
 import re
+from collections.abc import Callable
 
 
 class FileValidationError(Exception):
     """Raised when file content or content-type fails validation."""
 
 
+# Documents & Data MIME constants
+MIME_PDF = "application/pdf"
+MIME_TEXT_PLAIN = "text/plain"
+MIME_TEXT_CSV = "text/csv"
+MIME_JSON = "application/json"
+MIME_ZIP = "application/zip"
+MIME_GZIP = "application/gzip"
+MIME_TAR = "application/x-tar"
+MIME_OCTET_STREAM = "application/octet-stream"
+
+# Audio MIME constants
+MIME_AUDIO_MPEG = "audio/mpeg"
+MIME_AUDIO_WAV = "audio/wav"
+MIME_AUDIO_OGG = "audio/ogg"
+MIME_AUDIO_FLAC = "audio/flac"
+MIME_AUDIO_AAC = "audio/aac"
+MIME_AUDIO_MP4 = "audio/mp4"
+MIME_AUDIO_WEBM = "audio/webm"
+
+# Video MIME constants
+MIME_VIDEO_MP4 = "video/mp4"
+MIME_VIDEO_WEBM = "video/webm"
+MIME_VIDEO_QUICKTIME = "video/quicktime"
+MIME_VIDEO_MATROSKA = "video/x-matroska"
+MIME_VIDEO_OGG = "video/ogg"
+
+# Images (safe raster formats only; SVG is explicitly excluded)
+MIME_IMAGE_PNG = "image/png"
+MIME_IMAGE_JPEG = "image/jpeg"
+MIME_IMAGE_GIF = "image/gif"
+MIME_IMAGE_WEBP = "image/webp"
+MIME_IMAGE_AVIF = "image/avif"
+
+
 _ALLOWED_CONTENT_TYPES = frozenset(
     {
         # Documents & Data
-        "application/pdf",
-        "text/plain",
-        "text/csv",
-        "application/json",
-        "application/zip",
-        "application/gzip",
-        "application/x-tar",
-        "application/octet-stream",
+        MIME_PDF,
+        MIME_TEXT_PLAIN,
+        MIME_TEXT_CSV,
+        MIME_JSON,
+        MIME_ZIP,
+        MIME_GZIP,
+        MIME_TAR,
+        MIME_OCTET_STREAM,
         # Audio
-        "audio/mpeg",
-        "audio/wav",
-        "audio/ogg",
-        "audio/flac",
-        "audio/aac",
-        "audio/mp4",
-        "audio/webm",
+        MIME_AUDIO_MPEG,
+        MIME_AUDIO_WAV,
+        MIME_AUDIO_OGG,
+        MIME_AUDIO_FLAC,
+        MIME_AUDIO_AAC,
+        MIME_AUDIO_MP4,
+        MIME_AUDIO_WEBM,
         # Video
-        "video/mp4",
-        "video/webm",
-        "video/quicktime",
-        "video/x-matroska",
-        "video/ogg",
+        MIME_VIDEO_MP4,
+        MIME_VIDEO_WEBM,
+        MIME_VIDEO_QUICKTIME,
+        MIME_VIDEO_MATROSKA,
+        MIME_VIDEO_OGG,
         # Images (safe raster formats only; SVG is explicitly excluded)
-        "image/png",
-        "image/jpeg",
-        "image/gif",
-        "image/webp",
-        "image/avif",
+        MIME_IMAGE_PNG,
+        MIME_IMAGE_JPEG,
+        MIME_IMAGE_GIF,
+        MIME_IMAGE_WEBP,
+        MIME_IMAGE_AVIF,
     }
 )
 
 _MIME_ALIASES: dict[str, str] = {
-    "audio/mp3": "audio/mpeg",
-    "audio/x-wav": "audio/wav",
-    "audio/wave": "audio/wav",
-    "application/ogg": "audio/ogg",
-    "audio/x-flac": "audio/flac",
-    "audio/x-m4a": "audio/mp4",
-    "application/x-zip-compressed": "application/zip",
-    "application/x-gzip": "application/gzip",
-    "application/tar": "application/x-tar",
-    "image/jpg": "image/jpeg",
-    "image/pjpeg": "image/jpeg",
+    "audio/mp3": MIME_AUDIO_MPEG,
+    "audio/x-wav": MIME_AUDIO_WAV,
+    "audio/wave": MIME_AUDIO_WAV,
+    "application/ogg": MIME_AUDIO_OGG,
+    "audio/x-flac": MIME_AUDIO_FLAC,
+    "audio/x-m4a": MIME_AUDIO_MP4,
+    "application/x-zip-compressed": MIME_ZIP,
+    "application/x-gzip": MIME_GZIP,
+    "application/tar": MIME_TAR,
+    "image/jpg": MIME_IMAGE_JPEG,
+    "image/pjpeg": MIME_IMAGE_JPEG,
 }
 
 _INLINE_MEDIA_TYPES = frozenset(
     {
-        "application/pdf",
-        "text/plain",
-        "text/csv",
-        "application/json",
+        MIME_PDF,
+        MIME_TEXT_PLAIN,
+        MIME_TEXT_CSV,
+        MIME_JSON,
     }
 )
 
@@ -85,68 +120,107 @@ def _normalize_media_type(media_type: str | None) -> str:
     return _MIME_ALIASES.get(base, base)
 
 
-def _sniff_magic_type(header: bytes) -> str | None:
-    """Sniff standard safe formats from initial file header bytes."""
-    if len(header) >= 4 and header.startswith(b"%PDF-"):
-        return "application/pdf"
-
-    # Audio signatures
+def _is_mp3(header: bytes) -> bool:
     if len(header) >= 3 and header.startswith(b"ID3"):
-        return "audio/mpeg"
-    if (
+        return True
+    return (
         len(header) >= 2
         and header[0] == 0xFF
         and (header[1] & 0xE0) == 0xE0
         and (header[1] & 0x18) != 0x08
-    ):
-        return "audio/mpeg"
-    if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WAVE":
-        return "audio/wav"
-    if len(header) >= 4 and header.startswith(b"OggS"):
-        return "audio/ogg"
-    if len(header) >= 4 and header.startswith(b"fLaC"):
-        return "audio/flac"
-    if len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xF6) in (0xF0, 0xF1):
-        return "audio/aac"
+    )
 
-    # Archives / Compressed
-    if len(header) >= 4 and header.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
-        return "application/zip"
-    if len(header) >= 2 and header.startswith(b"\x1f\x8b"):
-        return "application/gzip"
-    if len(header) >= 262 and header[257:262] == b"ustar":
-        return "application/x-tar"
 
-    # Images
-    if len(header) >= 8 and header.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if len(header) >= 3 and header.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if len(header) >= 6 and header.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WEBP":
-        return "image/webp"
+def _is_aac(header: bytes) -> bool:
+    return len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xF6) in (0xF0, 0xF1)
 
-    # ISO Base Media File Format (MP4 / M4A / AVIF / QuickTime)
+
+def _is_m4a(header: bytes) -> bool:
+    return (
+        len(header) >= 12
+        and header[4:8] == b"ftyp"
+        and header[8:12] in {b"M4A ", b"m4a ", b"mp41", b"mp42", b"isom", b"dash"}
+    )
+
+
+def _is_avif(header: bytes) -> bool:
+    return len(header) >= 12 and header[4:8] == b"ftyp" and header[8:12] in {b"avif", b"avis"}
+
+
+def _is_quicktime(header: bytes) -> bool:
     if len(header) >= 12 and header[4:8] == b"ftyp":
-        major_brand = header[8:12]
-        if major_brand in {b"M4A ", b"m4a "}:
-            return "audio/mp4"
-        if major_brand in {b"avif", b"avis"}:
-            return "image/avif"
-        if major_brand == b"qt  ":
-            return "video/quicktime"
-        return "video/mp4"
+        return True
+    return len(header) >= 8 and header[4:8] in {b"moov", b"mdat", b"wide", b"free"}
 
-    # EBML header (WebM / MKV)
-    if len(header) >= 4 and header.startswith(b"\x1a\x45\xdf\xa3"):
-        return "video/webm"
 
-    # QuickTime atom headers
-    if len(header) >= 8 and header[4:8] in {b"moov", b"mdat", b"wide", b"free"}:
-        return "video/quicktime"
-
+def _sniff_audio(header: bytes) -> str | None:
+    if _is_mp3(header):
+        return MIME_AUDIO_MPEG
+    if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WAVE":
+        return MIME_AUDIO_WAV
+    if len(header) >= 4 and header.startswith(b"OggS"):
+        return MIME_AUDIO_OGG
+    if len(header) >= 4 and header.startswith(b"fLaC"):
+        return MIME_AUDIO_FLAC
+    if _is_aac(header):
+        return MIME_AUDIO_AAC
     return None
+
+
+def _sniff_archive(header: bytes) -> str | None:
+    if len(header) >= 4 and header.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
+        return MIME_ZIP
+    if len(header) >= 2 and header.startswith(b"\x1f\x8b"):
+        return MIME_GZIP
+    if len(header) >= 262 and header[257:262] == b"ustar":
+        return MIME_TAR
+    return None
+
+
+def _sniff_image(header: bytes) -> str | None:
+    if len(header) >= 8 and header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return MIME_IMAGE_PNG
+    if len(header) >= 3 and header.startswith(b"\xff\xd8\xff"):
+        return MIME_IMAGE_JPEG
+    if len(header) >= 6 and header.startswith((b"GIF87a", b"GIF89a")):
+        return MIME_IMAGE_GIF
+    if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return MIME_IMAGE_WEBP
+    return None
+
+
+def _sniff_isobmff(header: bytes) -> str | None:
+    if len(header) < 12 or header[4:8] != b"ftyp":
+        return None
+    major_brand = header[8:12]
+    if major_brand in {b"M4A ", b"m4a "}:
+        return MIME_AUDIO_MP4
+    if major_brand in {b"avif", b"avis"}:
+        return MIME_IMAGE_AVIF
+    if major_brand == b"qt  ":
+        return MIME_VIDEO_QUICKTIME
+    return MIME_VIDEO_MP4
+
+
+def _sniff_video(header: bytes) -> str | None:
+    if len(header) >= 4 and header.startswith(b"\x1a\x45\xdf\xa3"):
+        return MIME_VIDEO_WEBM
+    if len(header) >= 8 and header[4:8] in {b"moov", b"mdat", b"wide", b"free"}:
+        return MIME_VIDEO_QUICKTIME
+    return None
+
+
+def _sniff_magic_type(header: bytes) -> str | None:
+    """Sniff standard safe formats from initial file header bytes."""
+    if len(header) >= 4 and header.startswith(b"%PDF-"):
+        return MIME_PDF
+    return (
+        _sniff_audio(header)
+        or _sniff_archive(header)
+        or _sniff_image(header)
+        or _sniff_isobmff(header)
+        or _sniff_video(header)
+    )
 
 
 def _is_dangerous_content(header: bytes) -> bool:
@@ -179,179 +253,59 @@ def _is_dangerous_content(header: bytes) -> bool:
             return True
 
     # XML containing SVG or HTML doctype
-    if lower.startswith(b"<?xml") and (b"<svg" in lower or b"<!doctype" in lower):
-        return True
+    return bool(lower.startswith(b"<?xml") and (b"<svg" in lower or b"<!doctype" in lower))
 
-    return False
+
+_MAGIC_VALIDATORS: dict[str, tuple[Callable[[bytes], bool], str]] = {
+    MIME_PDF: (lambda h: len(h) >= 4 and h.startswith(b"%PDF-"), "PDF"),
+    MIME_IMAGE_PNG: (lambda h: len(h) >= 8 and h.startswith(b"\x89PNG\r\n\x1a\n"), "PNG"),
+    MIME_IMAGE_JPEG: (lambda h: len(h) >= 3 and h.startswith(b"\xff\xd8\xff"), "JPEG"),
+    MIME_IMAGE_GIF: (lambda h: len(h) >= 6 and h.startswith((b"GIF87a", b"GIF89a")), "GIF"),
+    MIME_IMAGE_WEBP: (
+        lambda h: len(h) >= 12 and h.startswith(b"RIFF") and h[8:12] == b"WEBP",
+        "WEBP",
+    ),
+    MIME_IMAGE_AVIF: (_is_avif, "AVIF"),
+    MIME_ZIP: (
+        lambda h: len(h) >= 4 and h.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")),
+        "ZIP",
+    ),
+    MIME_GZIP: (lambda h: len(h) >= 2 and h.startswith(b"\x1f\x8b"), "GZIP"),
+    MIME_TAR: (lambda h: len(h) >= 262 and h[257:262] == b"ustar", "TAR"),
+    MIME_AUDIO_MPEG: (_is_mp3, "MP3"),
+    MIME_AUDIO_WAV: (
+        lambda h: len(h) >= 12 and h.startswith(b"RIFF") and h[8:12] == b"WAVE",
+        "WAV",
+    ),
+    MIME_AUDIO_OGG: (lambda h: len(h) >= 4 and h.startswith(b"OggS"), "OGG"),
+    MIME_AUDIO_FLAC: (lambda h: len(h) >= 4 and h.startswith(b"fLaC"), "FLAC"),
+    MIME_AUDIO_AAC: (_is_aac, "AAC"),
+    MIME_AUDIO_MP4: (_is_m4a, "M4A/MP4"),
+    MIME_AUDIO_WEBM: (lambda h: len(h) >= 4 and h.startswith(b"\x1a\x45\xdf\xa3"), "WebM"),
+    MIME_VIDEO_MP4: (lambda h: len(h) >= 12 and h[4:8] == b"ftyp", "MP4"),
+    MIME_VIDEO_WEBM: (lambda h: len(h) >= 4 and h.startswith(b"\x1a\x45\xdf\xa3"), "WebM"),
+    MIME_VIDEO_MATROSKA: (
+        lambda h: len(h) >= 4 and h.startswith(b"\x1a\x45\xdf\xa3"),
+        "Matroska",
+    ),
+    MIME_VIDEO_QUICKTIME: (_is_quicktime, "QuickTime"),
+    MIME_VIDEO_OGG: (lambda h: len(h) >= 4 and h.startswith(b"OggS"), "OGG"),
+}
 
 
 def _verify_magic_bytes_for_type(header: bytes, expected_type: str) -> None:
     """Verify that header bytes match the expected MIME type."""
-    if expected_type == "application/pdf":
-        if not (len(header) >= 4 and header.startswith(b"%PDF-")):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected PDF)"
-            )
+    validator = _MAGIC_VALIDATORS.get(expected_type)
+    if validator is None:
         return
-
-    if expected_type == "image/png":
-        if not (len(header) >= 8 and header.startswith(b"\x89PNG\r\n\x1a\n")):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected PNG)"
-            )
-        return
-
-    if expected_type == "image/jpeg":
-        if not (len(header) >= 3 and header.startswith(b"\xff\xd8\xff")):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected JPEG)"
-            )
-        return
-
-    if expected_type == "image/gif":
-        if not (len(header) >= 6 and header.startswith((b"GIF87a", b"GIF89a"))):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected GIF)"
-            )
-        return
-
-    if expected_type == "image/webp":
-        if not (len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WEBP"):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected WEBP)"
-            )
-        return
-
-    if expected_type == "image/avif":
-        is_avif = (
-            len(header) >= 12 and header[4:8] == b"ftyp" and header[8:12] in {b"avif", b"avis"}
+    check_fn, format_name = validator
+    if not check_fn(header):
+        raise FileValidationError(
+            f"File content does not match declared content-type (expected {format_name})"
         )
-        if not is_avif:
-            raise FileValidationError(
-                "File content does not match declared content-type (expected AVIF)"
-            )
-        return
-
-    if expected_type == "application/zip":
-        if not (
-            len(header) >= 4 and header.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"))
-        ):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected ZIP)"
-            )
-        return
-
-    if expected_type == "application/gzip":
-        if not (len(header) >= 2 and header.startswith(b"\x1f\x8b")):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected GZIP)"
-            )
-        return
-
-    if expected_type == "application/x-tar":
-        if not (len(header) >= 262 and header[257:262] == b"ustar"):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected TAR)"
-            )
-        return
-
-    # Audio formats
-    if expected_type == "audio/mpeg":
-        is_mp3 = (len(header) >= 3 and header.startswith(b"ID3")) or (
-            len(header) >= 2
-            and header[0] == 0xFF
-            and (header[1] & 0xE0) == 0xE0
-            and (header[1] & 0x18) != 0x08
-        )
-        if not is_mp3:
-            raise FileValidationError(
-                "File content does not match declared content-type (expected MP3)"
-            )
-        return
-
-    if expected_type == "audio/wav":
-        if not (len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WAVE"):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected WAV)"
-            )
-        return
-
-    if expected_type == "audio/ogg":
-        if not (len(header) >= 4 and header.startswith(b"OggS")):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected OGG)"
-            )
-        return
-
-    if expected_type == "audio/flac":
-        if not (len(header) >= 4 and header.startswith(b"fLaC")):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected FLAC)"
-            )
-        return
-
-    if expected_type == "audio/aac":
-        if not (len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xF6) in (0xF0, 0xF1)):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected AAC)"
-            )
-        return
-
-    if expected_type == "audio/mp4":
-        is_m4a = (
-            len(header) >= 12
-            and header[4:8] == b"ftyp"
-            and header[8:12] in {b"M4A ", b"m4a ", b"mp41", b"mp42", b"isom", b"dash"}
-        )
-        if not is_m4a:
-            raise FileValidationError(
-                "File content does not match declared content-type (expected M4A/MP4)"
-            )
-        return
-
-    if expected_type == "audio/webm":
-        if not (len(header) >= 4 and header.startswith(b"\x1a\x45\xdf\xa3")):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected WebM)"
-            )
-        return
-
-    # Video formats
-    if expected_type == "video/mp4":
-        is_mp4 = len(header) >= 12 and header[4:8] == b"ftyp"
-        if not is_mp4:
-            raise FileValidationError(
-                "File content does not match declared content-type (expected MP4)"
-            )
-        return
-
-    if expected_type in {"video/webm", "video/x-matroska"}:
-        if not (len(header) >= 4 and header.startswith(b"\x1a\x45\xdf\xa3")):
-            name = "WebM" if expected_type == "video/webm" else "Matroska"
-            raise FileValidationError(
-                f"File content does not match declared content-type (expected {name})"
-            )
-        return
-
-    if expected_type == "video/quicktime":
-        is_qt = (len(header) >= 12 and header[4:8] == b"ftyp") or (
-            len(header) >= 8 and header[4:8] in {b"moov", b"mdat", b"wide", b"free"}
-        )
-        if not is_qt:
-            raise FileValidationError(
-                "File content does not match declared content-type (expected QuickTime)"
-            )
-        return
-
-    if expected_type == "video/ogg":
-        if not (len(header) >= 4 and header.startswith(b"OggS")):
-            raise FileValidationError(
-                "File content does not match declared content-type (expected OGG)"
-            )
-        return
 
 
-_TEXT_INLINE_TYPES = frozenset({"text/plain", "text/csv", "application/json"})
+_TEXT_INLINE_TYPES = frozenset({MIME_TEXT_PLAIN, MIME_TEXT_CSV, MIME_JSON})
 _SCAN_CHUNK_SIZE = 64 * 1024
 _OVERLAP_SIZE = 256
 
@@ -371,6 +325,19 @@ def _scan_file_for_dangerous_text(file_path: str) -> None:
             if re.search(rb"<[a-zA-Z/!?]", window):
                 raise FileValidationError("Text file contains suspicious HTML/XML tags")
             carry = chunk[-_OVERLAP_SIZE:] if len(chunk) >= _OVERLAP_SIZE else chunk
+
+
+def _guess_content_type_from_filename(filename: str | None, header: bytes) -> str | None:
+    if not filename:
+        return None
+    guessed, _ = mimetypes.guess_type(filename)
+    if not guessed:
+        return None
+    norm_guessed = _normalize_media_type(guessed)
+    if norm_guessed in _ALLOWED_CONTENT_TYPES:
+        _verify_magic_bytes_for_type(header, norm_guessed)
+        return norm_guessed
+    return None
 
 
 def validate_file_content(
@@ -394,18 +361,13 @@ def validate_file_content(
     sniffed = _sniff_magic_type(header)
 
     # Empty or generic octet-stream: attempt sniffing, then filename guessing
-    if not declared or declared == "application/octet-stream":
+    if not declared or declared == MIME_OCTET_STREAM:
         if sniffed:
             return sniffed
-        if filename:
-            guessed, _ = mimetypes.guess_type(filename)
-            if guessed:
-                norm_guessed = _normalize_media_type(guessed)
-                if norm_guessed in _ALLOWED_CONTENT_TYPES:
-                    _verify_magic_bytes_for_type(header, norm_guessed)
-                    return norm_guessed
-        if not declared or declared == "application/octet-stream":
-            return "application/octet-stream"
+        guessed = _guess_content_type_from_filename(filename, header)
+        if guessed:
+            return guessed
+        return MIME_OCTET_STREAM
 
     # Declared type MUST be on the explicit allow-list
     if declared not in _ALLOWED_CONTENT_TYPES:
@@ -415,9 +377,8 @@ def validate_file_content(
     _verify_magic_bytes_for_type(header, declared)
 
     # For text formats, ensure no HTML/XML/script injection anywhere in the header buffer
-    if declared in _TEXT_INLINE_TYPES:
-        if re.search(rb"<[a-zA-Z/!?]", header):
-            raise FileValidationError("Text file contains suspicious HTML/XML tags")
+    if declared in _TEXT_INLINE_TYPES and re.search(rb"<[a-zA-Z/!?]", header):
+        raise FileValidationError("Text file contains suspicious HTML/XML tags")
 
     return declared
 

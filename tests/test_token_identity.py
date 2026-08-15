@@ -61,9 +61,13 @@ def test_verify_token_accepts_static_token_via_query_param(
 
 def test_verify_token_rejects_wrong_and_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "FILE_MANAGER_BEARER_TOKENS", "alice:tok-a")
+    req = _req()
+    creds = _creds("not-a-token")
     with pytest.raises(HTTPException) as wrong:
-        verify_token(_req(), _creds("not-a-token"))
+        verify_token(req, creds)
     assert wrong.value.status_code == 401
+
+    req_empty = _req()
     with pytest.raises(HTTPException) as missing:
-        verify_token(_req(), None)
+        verify_token(req_empty, None)
     assert missing.value.status_code == 401

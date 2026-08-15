@@ -84,7 +84,8 @@ async def test_delete_is_owner_scoped() -> None:
     assert await store.get(rec.id, "alice") is not None  # still there
 
     deleted = await store.delete(rec.id, "alice")
-    assert deleted is not None and deleted.storage_key == "images/a.webp"
+    assert deleted is not None
+    assert deleted.storage_key == "images/a.webp"
     assert await store.get(rec.id, "alice") is None
 
 
@@ -145,4 +146,5 @@ async def test_mark_failed_transitions_status() -> None:
         status=STATUS_PROCESSING,
     )
     updated = await store.mark_failed(rec.id)
-    assert updated is not None and updated.status == STATUS_FAILED
+    assert updated is not None
+    assert updated.status == STATUS_FAILED

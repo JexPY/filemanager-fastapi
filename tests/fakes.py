@@ -138,10 +138,11 @@ class InMemoryMetadataStore(MetadataStore):
         content_hash: str | None = None,
         task_id: str | None = None,
         original_filename: str | None = None,
-        callback_url: str | None = None,
         visibility: str = "private",
-        renditions: dict[str, str] | None = None,
+        **kwargs: object,
     ) -> UploadRecord:
+        callback_url = kwargs.get("callback_url")
+        renditions = kwargs.get("renditions")
         self._counter += 1
         upload_id = f"rec-{self._counter:08d}"
         now = datetime.now(UTC)

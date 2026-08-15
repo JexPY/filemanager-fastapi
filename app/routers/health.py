@@ -25,7 +25,7 @@ async def healthz() -> dict[str, str]:
 _redis_pool: redis.Redis | None = None
 
 
-async def _get_redis() -> redis.Redis:
+def _get_redis() -> redis.Redis:
     global _redis_pool
     if _redis_pool is None:
         _redis_pool = redis.Redis.from_url(settings.REDIS_URL)
@@ -41,7 +41,7 @@ async def close_redis() -> None:
 
 async def _check_redis() -> bool:
     try:
-        client = await _get_redis()
+        client = _get_redis()
         return bool(await client.ping())
     except Exception:
         logger.warning("readyz: redis check failed", exc_info=True)

@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import uuid
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from fastapi import (
@@ -33,7 +34,16 @@ from app.schemas import (
     ImageUploadResponse,
     VideoUploadResponse,
 )
-from app.services.file_validation import FileValidationError, validate_file_from_path
+from app.services.file_validation import (
+    MIME_IMAGE_WEBP,
+    MIME_OCTET_STREAM,
+    MIME_VIDEO_MP4,
+    MIME_VIDEO_OGG,
+    MIME_VIDEO_QUICKTIME,
+    MIME_VIDEO_WEBM,
+    FileValidationError,
+    validate_file_from_path,
+)
 from app.services.image_vips import ImageValidationError, validate_and_strip_image
 from app.services.metadata import (
     KIND_FILE,
@@ -53,17 +63,39 @@ from app.urls import public_url
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+DETAIL_STORAGE_UNAVAILABLE = "Storage backend unavailable"
+DETAIL_UPLOAD_FAILED = "Upload could not be completed"
+
+
+@dataclass(frozen=True)
+class _ProcessedImageData:
+    buffer: bytes
+    content_type: str
+    width: int
+    height: int
+    renditions_buffers: dict[str, bytes]
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class _CustomImgproxyParams:
+    width: int | None = None
+    height: int | None = None
+    fit: str = "auto"
+    format: str | None = None
+
+
 _ALLOWED_VIDEO_CONTENT_TYPES = frozenset(
     {
-        "video/mp4",
-        "video/webm",
-        "video/quicktime",
+        MIME_VIDEO_MP4,
+        MIME_VIDEO_WEBM,
+        MIME_VIDEO_QUICKTIME,
         "video/x-matroska",
         "video/x-msvideo",
         "video/mpeg",
-        "video/ogg",
+        MIME_VIDEO_OGG,
         "video/3gpp",
-        "application/octet-stream",  # keep as fallback — browsers often send this
+        MIME_OCTET_STREAM,  # keep as fallback — browsers often send this
     }
 )
 
@@ -152,22 +184,27 @@ async def _process_single_image(
 
         unique_id = uuid.uuid4().hex
         object_name = f"images/{unique_id}.webp"
+        img_data = _ProcessedImageData(
+            buffer=optimized_buffer,
+            content_type=content_type,
+            width=width,
+            height=height,
+            renditions_buffers=renditions_buffers,
+            content_hash=content_hash,
+        )
+        imgproxy_params = _CustomImgproxyParams(
+            width=imgproxy_width,
+            height=imgproxy_height,
+            fit=imgproxy_fit,
+            format=imgproxy_format,
+        )
 
         return await _store_and_record_image(
             store,
             owner,
-            unique_id,
             object_name,
-            optimized_buffer,
-            content_type,
-            width,
-            height,
-            renditions_buffers,
-            content_hash,
-            imgproxy_width,
-            imgproxy_height,
-            imgproxy_fit,
-            imgproxy_format,
+            img_data,
+            imgproxy_params,
             visibility=visibility,
             raise_on_error=raise_on_error,
         )
@@ -181,21 +218,36 @@ async def _process_single_image(
         return None
 
 
+async def _upload_image_renditions(
+    object_name: str,
+    renditions_buffers: dict[str, bytes],
+    raise_on_error: bool,
+    uploaded_keys: list[str],
+) -> dict[str, str]:
+    renditions_dict: dict[str, str] = {}
+    for rend_name, rend_bytes in renditions_buffers.items():
+        rend_key = derive_rendition_key(object_name, rend_name)
+        if raise_on_error:
+            try:
+                r_obj = await upload_file(rend_bytes, rend_key, MIME_IMAGE_WEBP)
+            except StorageError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=DETAIL_STORAGE_UNAVAILABLE,
+                ) from exc
+        else:
+            r_obj = await upload_file(rend_bytes, rend_key, MIME_IMAGE_WEBP)
+        uploaded_keys.append(r_obj.key)
+        renditions_dict[rend_name] = r_obj.key
+    return renditions_dict
+
+
 async def _store_and_record_image(
     store,
     owner: str,
-    unique_id: str,
     object_name: str,
-    optimized_buffer: bytes,
-    content_type: str,
-    width: int,
-    height: int,
-    renditions_buffers: dict[str, bytes],
-    content_hash: str,
-    imgproxy_width: int | None,
-    imgproxy_height: int | None,
-    imgproxy_fit: str,
-    imgproxy_format: str | None,
+    img_data: _ProcessedImageData,
+    imgproxy_params: _CustomImgproxyParams,
     *,
     visibility: str = "public",
     raise_on_error: bool,
@@ -204,44 +256,32 @@ async def _store_and_record_image(
     try:
         if raise_on_error:
             try:
-                obj = await upload_file(optimized_buffer, object_name, content_type)
+                obj = await upload_file(img_data.buffer, object_name, img_data.content_type)
             except StorageError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail="Storage backend unavailable",
+                    detail=DETAIL_STORAGE_UNAVAILABLE,
                 ) from exc
         else:
-            obj = await upload_file(optimized_buffer, object_name, content_type)
+            obj = await upload_file(img_data.buffer, object_name, img_data.content_type)
         uploaded_keys.append(obj.key)
 
         # Upload materialized renditions (same pass as main image)
-        renditions_dict: dict[str, str] = {}
-        for rend_name, rend_bytes in renditions_buffers.items():
-            rend_key = derive_rendition_key(object_name, rend_name)
-            if raise_on_error:
-                try:
-                    r_obj = await upload_file(rend_bytes, rend_key, "image/webp")
-                except StorageError as exc:
-                    raise HTTPException(
-                        status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail="Storage backend unavailable",
-                    ) from exc
-            else:
-                r_obj = await upload_file(rend_bytes, rend_key, "image/webp")
-            uploaded_keys.append(r_obj.key)
-            renditions_dict[rend_name] = r_obj.key
+        renditions_dict = await _upload_image_renditions(
+            object_name, img_data.renditions_buffers, raise_on_error, uploaded_keys
+        )
 
         try:
             record = await store.create(
                 owner=owner,
                 kind=KIND_IMAGE,
                 storage_key=obj.key,
-                content_type=content_type,
+                content_type=img_data.content_type,
                 size_bytes=obj.size,
                 status=STATUS_READY,
-                width=width,
-                height=height,
-                content_hash=content_hash,
+                width=img_data.width,
+                height=img_data.height,
+                content_hash=img_data.content_hash,
                 visibility=visibility,
                 renditions=renditions_dict,
             )
@@ -253,7 +293,7 @@ async def _store_and_record_image(
             if not raise_on_error:
                 return None
             raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=DETAIL_UPLOAD_FAILED
             ) from exc
 
         return _image_response(
@@ -263,10 +303,10 @@ async def _store_and_record_image(
             record.size_bytes,
             obj.key,
             renditions=renditions_dict,
-            custom_width=imgproxy_width,
-            custom_height=imgproxy_height,
-            custom_fit=imgproxy_fit,
-            custom_format=imgproxy_format,
+            custom_width=imgproxy_params.width,
+            custom_height=imgproxy_params.height,
+            custom_fit=imgproxy_params.fit,
+            custom_format=imgproxy_params.format,
             visibility=record.visibility,
         )
 
@@ -543,7 +583,7 @@ async def upload_video(
             await upload_file_from_path(temp_path, raw_key, content_type)
         except StorageError as exc:
             raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=DETAIL_STORAGE_UNAVAILABLE
             ) from exc
 
         # Record the upload as `processing` BEFORE enqueuing, so the worker (which
@@ -569,7 +609,7 @@ async def upload_video(
             with contextlib.suppress(StorageError):
                 await delete_file(raw_key)
             raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=DETAIL_UPLOAD_FAILED
             ) from exc
 
         # Enqueue the task with the lightweight key reference + the record id.
@@ -630,7 +670,7 @@ async def upload_generic_file(
 ):
     # Stream upload straight to temp file (bounded memory: one chunk at a time)
     # and compute its rolling sha256.
-    temp_path, size, raw_content_hash = await _stream_capped_to_temp(
+    temp_path, _, raw_content_hash = await _stream_capped_to_temp(
         file, request, settings.MAX_FILE_UPLOAD_BYTES
     )
     try:
@@ -684,7 +724,7 @@ async def upload_generic_file(
         except StorageError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Storage backend unavailable",
+                detail=DETAIL_STORAGE_UNAVAILABLE,
             ) from exc
 
         try:
@@ -705,7 +745,7 @@ async def upload_generic_file(
                 await delete_file(storage_key)
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Upload could not be completed",
+                detail=DETAIL_UPLOAD_FAILED,
             ) from exc
 
         return {
