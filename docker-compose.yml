@@ -193,34 +193,102 @@ services:
         condition: service_completed_successfully
     profiles: ["test"]
 
-  minio:
-    image: minio/minio
-    command: server /data --console-address ":9001"
+  # Local S3-compatible fixture for the `s3` backend (replaces MinIO, whose
+  # upstream repo was archived 2026-04-25). Garage is a small, actively
+  # maintained S3 implementation; the image is pinned deliberately -- the old
+  # minio/minio + minio/mc services were untagged, so a rebuild could silently
+  # change the fixture under the test suite.
+  #
+  # `--single-node` assigns the cluster layout (Garage refuses to serve without
+  # one) and `--default-bucket` provisions GARAGE_DEFAULT_BUCKET plus the
+  # GARAGE_DEFAULT_ACCESS_KEY/SECRET_KEY credentials. Both run *before* the S3
+  # API binds, so there is no window where the endpoint answers with no bucket
+  # -- which is why no separate "create the bucket" init container is needed
+  # (see garage-init below, which is a readiness gate, not a provisioner).
+  garage:
+    image: dxflrs/garage:v2.3.0
+    entrypoint: /garage
+    command: ["server", "--single-node", "--default-bucket"]
     environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
+      # Garage rejects a secret shorter than 16 characters, so this is not the
+      # symmetric minioadmin/minioadmin pair it replaces.
+      - GARAGE_DEFAULT_ACCESS_KEY=garageadmin
+      - GARAGE_DEFAULT_SECRET_KEY=garageadminsecretkey
+      - GARAGE_DEFAULT_BUCKET=filemanager-test
     ports:
-      - "9002:9000"
-      - "9003:9001"
+      # 9002 was MinIO's S3 API port; kept so existing S3_ENDPOINT_URL notes
+      # and host-side tooling do not move. 9003 (MinIO's console) now carries
+      # Garage's admin/health API. Neither collides with nginx (9000) or the
+      # api's debug port (9001).
+      - "9002:3900"
+      - "9003:3903"
+    configs:
+      - source: garage_toml
+        target: /etc/garage.toml
+    volumes:
+      - garage_meta:/var/lib/garage/meta
+      - garage_data:/var/lib/garage/data
+    # The image is distroless (no shell, no curl), so the healthcheck uses the
+    # bundled CLI. `garage status` exits non-zero until the node's RPC layer is
+    # up and it can read its own layout.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "/garage", "status"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
     profiles: ["s3-dev"]
 
-  minio-init:
-    image: minio/mc
+  # One-shot readiness gate, mirroring how minio-init gated on MinIO: it exits 0
+  # only once Garage's admin API reports the data plane fully operational, so
+  # `depends_on: {condition: service_completed_successfully}` (or a CI step) can
+  # wait on a real "S3 is serving" signal rather than a TCP port being open.
+  # Garage itself cannot express this as its own healthcheck -- no HTTP client
+  # in the image -- hence the separate container.
+  garage-init:
+    image: alpine:3.22
     depends_on:
-      minio:
+      garage:
         condition: service_healthy
+    # busybox wget; Garage's admin /health is unauthenticated and returns 200
+    # only when every partition is available.
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://minio:9000 minioadmin minioadmin &&
-      mc mb --ignore-existing local/filemanager-test
+      for i in $$(seq 1 60); do
+        if wget -q -O - http://garage:3903/health 2>/dev/null | grep -q 'fully operational'; then
+          echo 'garage: S3 API ready (bucket filemanager-test)'; exit 0;
+        fi;
+        sleep 1;
+      done;
+      echo 'garage: timed out waiting for a healthy cluster' >&2; exit 1
       "
     profiles: ["s3-dev"]
+
+configs:
+  # Inlined rather than a checked-in file so the whole fixture stays in one
+  # place. Single-node, no redundancy, sqlite metadata -- a test fixture, not a
+  # deployment topology. rpc_secret is required even for one node; this value is
+  # dev-only and never leaves the compose network.
+  garage_toml:
+    content: |
+      metadata_dir = "/var/lib/garage/meta"
+      data_dir = "/var/lib/garage/data"
+      db_engine = "sqlite"
+      replication_factor = 1
+      rpc_bind_addr = "[::]:3901"
+      rpc_public_addr = "127.0.0.1:3901"
+      rpc_secret = "6e0f4c1d9b7a2538ecf0a1b4d6528e93cf7a0b1d2e3f4a5b6c7d8e9f0a1b2c3d"
+
+      [s3_api]
+      # Must match the AWS_REGION / signing region the client uses -- Garage
+      # verifies the region in the SigV4 credential scope.
+      s3_region = "garage"
+      api_bind_addr = "[::]:3900"
+
+      [admin]
+      api_bind_addr = "[::]:3903"
 
 volumes:
   pg_data:
   worker_tmp:
+  garage_meta:
+  garage_data:

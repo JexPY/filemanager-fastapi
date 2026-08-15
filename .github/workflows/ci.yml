@@ -25,11 +25,12 @@ jobs:
       - name: Build test image
         run: docker compose build test
 
-      # Nothing currently requires a live MinIO (S3 presigned-URL tests sign
-      # locally against dummy credentials, no network needed), but this
-      # keeps the s3_integration marker usable for tests that need one later.
-      - name: Start Postgres, Redis + MinIO (s3-dev profile)
-        run: docker compose --profile s3-dev up -d db redis minio minio-init
+      # Garage is the live S3-compatible target for the s3_integration tests
+      # (multipart upload, presigned GET, Range). garage-init exits 0 only once
+      # the cluster reports fully operational, so `up` returning means the
+      # bucket is actually serving.
+      - name: Start Postgres, Redis + Garage (s3-dev profile)
+        run: docker compose --profile s3-dev up -d --wait db redis garage garage-init
 
       - name: Lint (ruff check)
         run: docker compose run --rm test ruff check .
@@ -40,8 +41,11 @@ jobs:
       - name: Type check (mypy)
         run: docker compose run --rm test mypy app
 
+      # S3_INTEGRATION_REQUIRED turns the "no live endpoint" skip into a
+      # failure, so a Garage service that failed to come up cannot quietly
+      # reduce this to a green run with zero S3 coverage.
       - name: Tests (pytest)
-        run: docker compose run --rm test pytest -v
+        run: docker compose run --rm -e S3_INTEGRATION_REQUIRED=1 test pytest -v
 
       - name: Tear down
         if: always()

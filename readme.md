@@ -25,7 +25,7 @@
 Upload an image and get back a stripped, re-encoded WebP plus signed imgproxy URLs for
 on-demand resizing. Upload a video and get back a task id while a separate worker
 transcodes it, extracts a poster frame, and pushes a signed webhook when it lands.
-Generate QR codes inline. Storage is pluggable: local disk, S3/R2/MinIO, or Google Cloud
+Generate QR codes inline. Storage is pluggable: local disk, S3/R2/Garage, or Google Cloud
 Storage.
 
 Everything runs in Docker. `docker compose up --build` gives you the whole stack.
@@ -418,13 +418,13 @@ curl -X POST -H "Authorization: Bearer $MASTER_TOKEN" \
 Selected with `STORAGE_BACKEND`. The choice changes both how imgproxy reaches source
 images and how video bytes are delivered.
 
-| | `local` | `s3` (S3 / R2 / MinIO) | `gcp` |
+| | `local` | `s3` (S3 / R2 / Garage) | `gcp` |
 |---|---|---|---|
 | Objects live in | `LOCAL_STORAGE_DIR` volume | `S3_BUCKET` | `GCS_BUCKET` |
 | imgproxy source | `local://` on a shared read-only mount | presigned or public URL | presigned or public URL |
 | Video byte path | nginx `X-Accel-Redirect` (sendfile + Range) | 302 to a presigned GET | 302 to a V4 signed URL |
 | Public video URL | not applicable — always served through nginx | 302 to `S3_PUBLIC_BASE_URL` when set | 302 to `GCS_PUBLIC_BASE_URL` when set |
-| Verified | end to end | end to end against MinIO | unit-tested with a mocked client only |
+| Verified | end to end | end to end against Garage | unit-tested with a mocked client only |
 
 The three `*_PUBLIC_BASE_URL` settings are independent on purpose, so switching backends
 cannot silently reuse a URL configured for a different one. Putting a CDN in front is a
@@ -435,17 +435,31 @@ Storage keys are `images/<uuid>.webp`, `raw/videos/<uuid>.<ext>`,
 `videos/<uuid>_compressed.<ext>`, and `posters/<uuid>.webp`. Client-supplied filenames are
 sanitized to `[a-z0-9]{,8}` before they can reach a key.
 
-Run against MinIO locally:
+Run against a local S3-compatible server. The fixture is [Garage](https://garagehq.deuxfleurs.fr/)
+(pinned to `dxflrs/garage:v2.3.0`), which replaced MinIO after that project was archived in
+April 2026. It boots with `--single-node --default-bucket`, so the cluster layout, the
+bucket, and the credentials are all provisioned before the S3 API starts listening;
+`garage-init` is a one-shot readiness gate that exits once the cluster reports healthy.
 
 ```sh
-docker compose --profile s3-dev up -d minio minio-init
+docker compose --profile s3-dev up -d --wait garage garage-init
 # then in .env:
 #   STORAGE_BACKEND=s3
 #   S3_BUCKET=filemanager-test
-#   S3_ENDPOINT_URL=http://minio:9000
-#   AWS_ACCESS_KEY_ID=minioadmin
-#   AWS_SECRET_ACCESS_KEY=minioadmin
+#   S3_ENDPOINT_URL=http://garage:3900
+#   AWS_REGION=garage
+#   AWS_ACCESS_KEY_ID=garageadmin
+#   AWS_SECRET_ACCESS_KEY=garageadminsecretkey
 ```
+
+`AWS_REGION` must match Garage's configured `s3_region`, because SigV4 binds the region into
+the credential scope. The S3 API is on host port 9002 and Garage's admin/health API on 9003
+(the ports MinIO used), clear of nginx on 9000 and the api's debug port on 9001.
+
+The `s3_integration`-marked tests in `tests/test_storage_s3_integration.py` run against this
+fixture and cover what client-side signing tests cannot: a real multipart upload, a presigned
+GET that is actually fetched, and a Range request returning 206. They skip when no endpoint is
+reachable; set `S3_INTEGRATION_REQUIRED=1` (CI does) to make that a failure instead.
 
 ---
 
