@@ -362,14 +362,20 @@ class PostgresMetadataStore(MetadataStore):
         return _row_to_record(row) if row is not None else None
 
     async def set_visibility(
-        self, upload_id: str, owner: str, visibility: str
+        self, upload_id: str, owner: str, visibility: str, storage_key: str | None = None
     ) -> UploadRecord | None:
+        # Both columns move in ONE statement on purpose: a key rotation that
+        # landed without its visibility flip (or vice versa) would leave the row
+        # pointing at an object that no longer exists, or advertise a public URL
+        # for a record that is now private.
         row = await self._fetchrow(
-            f"UPDATE uploads SET visibility = $3, updated_at = now() "
+            f"UPDATE uploads SET visibility = $3, "
+            f"storage_key = COALESCE($4, storage_key), updated_at = now() "
             f"WHERE id = $1 AND owner = $2 RETURNING {_COLUMNS}",
             upload_id,
             owner,
             visibility,
+            storage_key,
             error_msg=f"Failed to set visibility on upload {upload_id!r}",
         )
         return _row_to_record(row) if row is not None else None

@@ -132,10 +132,14 @@ class MetadataStore(ABC):
 
     @abstractmethod
     async def set_visibility(
-        self, upload_id: str, owner: str, visibility: str
+        self, upload_id: str, owner: str, visibility: str, storage_key: str | None = None
     ) -> UploadRecord | None:
         """Owner-scoped visibility change (VISIBILITY_PRIVATE/PUBLIC). None means
-        no such row for this owner (unknown id or another owner's -> 404 upstream)."""
+        no such row for this owner (unknown id or another owner's -> 404 upstream).
+
+        ``storage_key`` re-points the row at a rotated object in the same
+        statement -- turning a record private copies it to a fresh key so that
+        URLs already cached in a CDN stop resolving."""
 
     @abstractmethod
     async def set_share_token(self, upload_id: str, owner: str, token: str) -> UploadRecord | None:

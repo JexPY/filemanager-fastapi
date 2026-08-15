@@ -1,6 +1,7 @@
 import contextlib
 import logging
 import secrets
+import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
@@ -8,8 +9,15 @@ from pydantic import BaseModel
 
 from app.routers.auth import verify_token
 from app.schemas import FileListResponse, FileRecord, ShareLinkResponse
-from app.services.metadata import KIND_VIDEO, MetadataError, get_metadata_store
-from app.services.storage import StorageError, delete_file
+from app.services.metadata import (
+    KIND_VIDEO,
+    VISIBILITY_PRIVATE,
+    VISIBILITY_PUBLIC,
+    MetadataError,
+    UploadRecord,
+    get_metadata_store,
+)
+from app.services.storage import StorageError, StorageNotFound, copy_file, delete_file
 from app.urls import public_url
 
 logger = logging.getLogger(__name__)
@@ -81,6 +89,51 @@ class _VisibilityBody(BaseModel):
     visibility: Literal["public", "private"]
 
 
+async def _rotate_key_if_going_private(record: UploadRecord, new_visibility: str) -> str | None:
+    """Copy a record's object to a fresh key when it turns private; else None.
+
+    Making a record private has to invalidate what is already *out there*, not
+    just stop advertising it. While public it may have been fetched through a
+    CDN and embedded in rendered HTML, and neither can be recalled. Rotating the
+    key kills every one of those in a single step: the object URL changes, and
+    because an imgproxy URL signs its source, every rendition URL changes with
+    it. Marking the row private without rotating would leave the old bytes
+    served from a warm cache indefinitely.
+
+    Only public -> private rotates. The reverse direction has nothing cached to
+    invalidate, so it would be a pointless copy.
+
+    The old object is deleted only after the row is re-pointed (by the caller),
+    so a failure here leaves the record on its original key and is retryable.
+    Returns the new key, or None when no rotation is needed.
+    """
+    if new_visibility != VISIBILITY_PRIVATE or record.visibility != VISIBILITY_PUBLIC:
+        return None
+
+    prefix, _, name = record.storage_key.rpartition("/")
+    suffix = name.partition(".")[2]
+    new_key = f"{prefix}/{uuid.uuid4().hex}{'.' + suffix if suffix else ''}"
+    try:
+        await copy_file(record.storage_key, new_key)
+    except StorageNotFound:
+        # The object is already gone -- a reachable state, since DELETE removes
+        # the object before the row. There is nothing to rotate and nothing
+        # cached that we could invalidate anyway, so let the visibility change
+        # proceed rather than trapping the owner on a half-deleted record.
+        logger.warning(
+            "Skipping key rotation for %s: object %s is already gone",
+            record.id,
+            record.storage_key,
+        )
+        return None
+    except StorageError as exc:
+        logger.exception("Failed to rotate storage key for %s", record.id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Storage backend unavailable"
+        ) from exc
+    return new_key
+
+
 @router.patch(
     "/files/{file_id}",
     tags=["Files"],
@@ -114,8 +167,10 @@ async def set_file_visibility(
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
 
+    rotated_key = await _rotate_key_if_going_private(record, body.visibility)
+
     try:
-        updated = await store.set_visibility(file_id, owner, body.visibility)
+        updated = await store.set_visibility(file_id, owner, body.visibility, rotated_key)
     except MetadataError as exc:
         logger.exception("Failed to set visibility")
         raise HTTPException(
@@ -125,7 +180,41 @@ async def set_file_visibility(
     # treat it as gone.
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
+
+    if rotated_key is not None:
+        # Only now that the row points at the new key. Logged at error level
+        # rather than swallowed: while the stale object survives, so does the
+        # cached public URL this rotation exists to kill.
+        try:
+            await delete_file(record.storage_key)
+        except StorageError:
+            logger.error(
+                "Rotated %s to a private key but could not delete the old object %s; "
+                "its public URL stays fetchable until that object is removed",
+                file_id,
+                record.storage_key,
+            )
+
+    # A video's poster is its own record with its own key and its own public
+    # URLs, so leaving it public would keep a thumbnail of the now-private video
+    # served from cache -- the same hole one level down.
+    if record.poster_upload_id:
+        with contextlib.suppress(StorageError, MetadataError, HTTPException):
+            await _cascade_visibility_to_poster(record.poster_upload_id, owner, body.visibility)
+
     return updated.to_public()
+
+
+async def _cascade_visibility_to_poster(poster_id: str, owner: str, visibility: str) -> None:
+    """Apply a visibility change (and any key rotation) to a video's poster."""
+    store = await get_metadata_store()
+    poster = await store.get(poster_id, owner)
+    if poster is None or poster.visibility == visibility:
+        return
+    rotated = await _rotate_key_if_going_private(poster, visibility)
+    if await store.set_visibility(poster_id, owner, visibility, rotated) and rotated:
+        with contextlib.suppress(StorageError):
+            await delete_file(poster.storage_key)
 
 
 @router.post(

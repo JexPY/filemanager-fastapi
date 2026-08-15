@@ -584,7 +584,13 @@ async def generate_poster_task(upload_id: str, at_seconds: float | None = None) 
     input_source = await _resolve_ffmpeg_input(src_key)
     seek = at_seconds if at_seconds is not None else await _poster_seek_seconds(input_source)
 
-    linked = await _extract_and_store_poster(unique_id, input_source, seek, video.owner, upload_id)
+    # Inherit the parent's visibility. Omitting it defaulted the poster to
+    # `public`, so asking for a poster of a *private* video minted a publicly
+    # fetchable still of it -- the inline poster path (compress_video_task) was
+    # already passing this through; only the on-demand path was not.
+    linked = await _extract_and_store_poster(
+        unique_id, input_source, seek, video.owner, upload_id, visibility=video.visibility
+    )
     if linked is None:
         return {"status": "discarded", "upload_id": upload_id}
 

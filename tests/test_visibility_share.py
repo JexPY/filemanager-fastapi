@@ -7,13 +7,17 @@ import httpx
 
 from app.config import _derive_owner
 from app.services.metadata import UploadRecord
-from tests.fakes import InMemoryMetadataStore
+from tests.fakes import InMemoryMetadataStore, InMemoryStorageBackend
 
 OWNER = _derive_owner("test-token")
 
 
 async def _seed_video(
-    store: InMemoryMetadataStore, owner: str = OWNER, key: str = "videos/v.mp4"
+    store: InMemoryMetadataStore,
+    owner: str = OWNER,
+    key: str = "videos/v.mp4",
+    *,
+    visibility: str = "private",
 ) -> UploadRecord:
     return await store.create(
         owner=owner,
@@ -22,6 +26,7 @@ async def _seed_video(
         content_type="video/mp4",
         size_bytes=1,
         status="ready",
+        visibility=visibility,
     )
 
 
@@ -193,6 +198,138 @@ async def test_share_is_owner_scoped_404(
     delete = await client.delete(f"/files/{other.id}/share", headers=auth_headers)
     assert post.status_code == 404
     assert delete.status_code == 404
+
+
+async def test_going_private_rotates_the_storage_key(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+    fake_storage: InMemoryStorageBackend,
+) -> None:
+    """Turning a record private must invalidate what is already cached, not just
+    stop advertising it.
+
+    While public, the object URL may have been fetched through a CDN and embedded
+    in rendered HTML; neither can be recalled. Copying to a fresh key kills every
+    such URL at once -- including all imgproxy renditions, since an imgproxy URL
+    signs its source. Leaving the key alone would keep the old bytes served from
+    a warm cache indefinitely, which would make "private" cosmetic.
+    """
+    await fake_storage.upload(b"secret-bytes", "images/a.webp", "image/webp")
+    image = await fake_metadata.create(
+        owner=OWNER,
+        kind="image",
+        storage_key="images/a.webp",
+        content_type="image/webp",
+        size_bytes=12,
+        status="ready",
+        visibility="public",
+    )
+
+    resp = await client.patch(
+        f"/files/{image.id}", headers=auth_headers, json={"visibility": "private"}
+    )
+    assert resp.status_code == 200
+
+    stored = await fake_metadata.get(image.id, OWNER)
+    assert stored is not None
+    assert stored.storage_key != "images/a.webp"
+    assert stored.storage_key.startswith("images/") and stored.storage_key.endswith(".webp")
+    # Bytes moved, and the old object is gone so its cached URL now 404s.
+    assert fake_storage.objects[stored.storage_key] == b"secret-bytes"
+    assert "images/a.webp" not in fake_storage.objects
+    assert "images/a.webp" in fake_storage.deleted_keys
+
+
+async def test_going_public_does_not_rotate(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+    fake_storage: InMemoryStorageBackend,
+) -> None:
+    """The reverse direction has nothing cached to invalidate, so rotating would
+    be a pointless copy of (potentially) a multi-hundred-MB video."""
+    await fake_storage.upload(b"bytes", "images/b.webp", "image/webp")
+    image = await fake_metadata.create(
+        owner=OWNER,
+        kind="image",
+        storage_key="images/b.webp",
+        content_type="image/webp",
+        size_bytes=5,
+        status="ready",
+        visibility="private",
+    )
+
+    resp = await client.patch(
+        f"/files/{image.id}", headers=auth_headers, json={"visibility": "public"}
+    )
+
+    assert resp.status_code == 200
+    stored = await fake_metadata.get(image.id, OWNER)
+    assert stored is not None
+    assert stored.storage_key == "images/b.webp"
+    assert fake_storage.deleted_keys == []
+
+
+async def test_going_private_cascades_to_the_poster(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+    fake_storage: InMemoryStorageBackend,
+) -> None:
+    """A poster is its own record with its own key and its own public URLs, so a
+    private video with a still-public poster leaks a thumbnail of itself."""
+    await fake_storage.upload(b"vid", "videos/v.mp4", "video/mp4")
+    await fake_storage.upload(b"post", "posters/p.webp", "image/webp")
+    video = await _seed_video(fake_metadata, visibility="public", key="videos/v.mp4")
+    poster = await fake_metadata.create(
+        owner=OWNER,
+        kind="image",
+        storage_key="posters/p.webp",
+        content_type="image/webp",
+        size_bytes=4,
+        status="ready",
+        visibility="public",
+    )
+    await fake_metadata.set_poster(video.id, poster.id)
+
+    resp = await client.patch(
+        f"/files/{video.id}", headers=auth_headers, json={"visibility": "private"}
+    )
+    assert resp.status_code == 200
+
+    stored_poster = await fake_metadata.get(poster.id, OWNER)
+    assert stored_poster is not None
+    assert stored_poster.visibility == "private"
+    assert stored_poster.storage_key != "posters/p.webp"
+    assert "posters/p.webp" not in fake_storage.objects
+
+
+async def test_going_private_survives_a_missing_object(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+) -> None:
+    """A record whose object is already gone is reachable in production -- DELETE
+    removes the object before the row, so a failed row-delete leaves one. The
+    owner must still be able to make it private rather than being trapped on a
+    502 by a rotation that has nothing to copy."""
+    image = await fake_metadata.create(
+        owner=OWNER,
+        kind="image",
+        storage_key="images/vanished.webp",
+        content_type="image/webp",
+        size_bytes=1,
+        status="ready",
+        visibility="public",
+    )
+
+    resp = await client.patch(
+        f"/files/{image.id}", headers=auth_headers, json={"visibility": "private"}
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["visibility"] == "private"
 
 
 async def test_share_can_be_minted_for_any_kind(

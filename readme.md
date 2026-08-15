@@ -487,7 +487,7 @@ full match count, so a client can size its pager without walking every page.
 |---|---|---|---|
 | `GET` | `/files` | bearer | Newest first. Query: `limit` (1–200, default 50), `offset`, `kind` (`image`\|`video`). |
 | `GET` | `/files/{id}` | bearer | Full record. Poll this for `status`, `poster_upload_id`, and webhook state. |
-| `PATCH` | `/files/{id}` | bearer | JSON body `{"visibility": "public"}` or `{"visibility": "private"}`. Any kind. |
+| `PATCH` | `/files/{id}` | bearer | JSON body `{"visibility": "public"}` or `{"visibility": "private"}`. Any kind. Going private rotates the storage key (see below). |
 | `DELETE` | `/files/{id}` | bearer | Deletes the object first, then the row. Cascades to the video's poster. `204`. |
 | `GET` | `/files/{id}/download` | none if `public`; else owner or a `read:file` grant | The canonical URL for any kind. Range on every backend. |
 | `POST` | `/files/{id}/share` | bearer | Mints or rotates the share token; the only response that returns it. Any kind. |
@@ -504,6 +504,16 @@ set, then fetch that id for the image record.
 Deleting is explicit and irreversible, and the object is removed before the row — so a
 transient storage failure leaves the record intact and retryable rather than stranding an
 object with no record.
+
+**Turning a record private rotates its storage key.** The object is copied to a fresh UUID
+key, the row is re-pointed, and the old object is deleted. That is what actually invalidates
+access rather than merely withdrawing it: while the record was public its URL may have been
+cached by a CDN and embedded in already-rendered HTML, neither of which can be recalled.
+Rotating kills all of them at once — the object URL changes, and since an imgproxy URL signs
+its source, every rendition URL changes with it. A video's poster is cascaded the same way,
+since it is a separate record with its own public URLs. The copy is server-side on `s3`/`gcp`
+(and `shutil` on `local`), so the bytes never move through this process. Going *public* does
+not rotate — there is nothing cached to invalidate.
 
 ### Tasks, QR codes, and system
 

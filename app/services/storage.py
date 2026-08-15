@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import shutil
 from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -30,6 +31,17 @@ from app.config import settings
 
 class StorageError(Exception):
     """Backend-agnostic storage failure. Never carries provider internals to callers."""
+
+
+class StorageNotFound(StorageError):
+    """The object is not there -- distinct from "the backend is unreachable".
+
+    Callers need to tell these apart: a record whose object is already gone is a
+    real, reachable state (DELETE removes the object before the row, so a failed
+    row-delete leaves one behind), and operations like a key rotation should skip
+    rather than fail when there is nothing to copy. A backend that is simply down
+    must still surface as a 502.
+    """
 
 
 @dataclass(frozen=True)
@@ -106,6 +118,17 @@ class StorageBackend(ABC):
             data = await f.read()
         return await self.upload(data, key, content_type)
 
+    async def copy(self, src_key: str, dst_key: str) -> None:
+        """Copy an object within the same backend.
+
+        Used to rotate an object's key when a record turns private, which is what
+        makes already-cached public URLs dead rather than merely unadvertised.
+        The default pulls the bytes through this process; every real backend
+        overrides it with a server-side copy, so a multi-hundred-MB video is
+        never moved through here."""
+        data = await self.download(src_key)
+        await self.upload(data, dst_key, "application/octet-stream")
+
 
 # ---------------------------------------------------------------------------
 # Local filesystem backend
@@ -166,11 +189,20 @@ class LocalStorage(StorageBackend):
             async with aiofiles.open(target, "rb") as f:
                 return await f.read()
         except FileNotFoundError as exc:
-            raise StorageError(f"Object not found: {key!r}") from exc
+            raise StorageNotFound(f"Object not found: {key!r}") from exc
 
     async def delete(self, key: str) -> None:
         # Idempotent: deleting a missing object is not an error.
         self._resolve(key).unlink(missing_ok=True)
+
+    async def copy(self, src_key: str, dst_key: str) -> None:
+        src, dst = self._resolve(src_key), self._resolve(dst_key)
+        if not src.is_file():
+            raise StorageNotFound(f"Object not found: {src_key!r}")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        # shutil does the copy in C and off the event loop; never read the whole
+        # object into this process just to write it back out.
+        await asyncio.to_thread(shutil.copyfile, src, dst)
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +306,28 @@ class S3Storage(StorageBackend):
             await client.delete_object(Bucket=self._bucket, Key=key)
         except (BotoCoreError, ClientError) as exc:
             raise StorageError(f"S3 delete failed for {key!r}") from exc
+
+    async def copy(self, src_key: str, dst_key: str) -> None:
+        """Server-side copy: the bytes never traverse this process.
+
+        `copy_object` is a single API call, capped by S3 at 5 GB per object --
+        comfortably above MAX_VIDEO_UPLOAD_BYTES (2000 MiB by default). Raise
+        that past 5 GB and this needs the multipart copy flow instead.
+        """
+        client = await self._get_client()
+        try:
+            await client.copy_object(
+                Bucket=self._bucket,
+                Key=dst_key,
+                CopySource={"Bucket": self._bucket, "Key": src_key},
+            )
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"NoSuchKey", "NotFound", "404"}:
+                raise StorageNotFound(f"Object not found: {src_key!r}") from exc
+            raise StorageError(f"S3 copy failed for {src_key!r}") from exc
+        except BotoCoreError as exc:
+            raise StorageError(f"S3 copy failed for {src_key!r}") from exc
 
     async def presigned_get_url(
         self,
@@ -391,6 +445,18 @@ class GCSStorage(StorageBackend):
             raise StorageError(f"GCS delete failed for {key!r}") from exc
         except aiohttp.ClientError as exc:
             raise StorageError(f"GCS delete failed for {key!r}") from exc
+
+    async def copy(self, src_key: str, dst_key: str) -> None:
+        """Server-side copy within the same bucket (rewrite API under the hood)."""
+        client = await self._get_client()
+        try:
+            await client.copy(self._bucket, src_key, self._bucket, new_name=dst_key)
+        except aiohttp.ClientResponseError as exc:
+            if exc.status == 404:
+                raise StorageNotFound(f"Object not found: {src_key!r}") from exc
+            raise StorageError(f"GCS copy failed for {src_key!r}") from exc
+        except aiohttp.ClientError as exc:
+            raise StorageError(f"GCS copy failed for {src_key!r}") from exc
 
     async def presigned_get_url(
         self,
@@ -521,6 +587,11 @@ async def download_file(object_name: str) -> bytes:
 async def delete_file(object_name: str) -> None:
     backend = await get_storage()
     await backend.delete(object_name)
+
+
+async def copy_file(src_key: str, dst_key: str) -> None:
+    backend = await get_storage()
+    await backend.copy(src_key, dst_key)
 
 
 async def close_storage() -> None:

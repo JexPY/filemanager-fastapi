@@ -17,7 +17,7 @@ from app.services.metadata import (
     MetadataStore,
     UploadRecord,
 )
-from app.services.storage import StorageBackend, StorageError, StorageObject
+from app.services.storage import StorageBackend, StorageNotFound, StorageObject
 
 
 class InMemoryStorageBackend(StorageBackend):
@@ -47,7 +47,7 @@ class InMemoryStorageBackend(StorageBackend):
         try:
             return self.objects[key]
         except KeyError as exc:
-            raise StorageError(f"Object not found: {key!r}") from exc
+            raise StorageNotFound(f"Object not found: {key!r}") from exc
 
     async def delete(self, key: str) -> None:
         self.objects.pop(key, None)
@@ -318,12 +318,17 @@ class InMemoryMetadataStore(MetadataStore):
         return updated
 
     async def set_visibility(
-        self, upload_id: str, owner: str, visibility: str
+        self, upload_id: str, owner: str, visibility: str, storage_key: str | None = None
     ) -> UploadRecord | None:
         record = self.records.get(upload_id)
         if record is None or record.owner != owner:
             return None
-        updated = replace(record, visibility=visibility, updated_at=datetime.now(UTC))
+        updated = replace(
+            record,
+            visibility=visibility,
+            storage_key=storage_key or record.storage_key,
+            updated_at=datetime.now(UTC),
+        )
         self.records[upload_id] = updated
         return updated
 
