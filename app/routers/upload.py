@@ -76,6 +76,7 @@ async def _process_single_image(
     imgproxy_fit: str,
     imgproxy_format: str | None,
     *,
+    visibility: str = "public",
     raise_on_error: bool,
 ) -> dict | None:
     """Process one image upload end-to-end: sha256 hash -> dedup check ->
@@ -86,10 +87,14 @@ async def _process_single_image(
     try:
         # Content hash of the *input* bytes for idempotency. Hashing 25 MB is
         # borderline CPU work, so offload it like the other CPU-bound steps.
-        # We include the optimization profile in the hash, so different
-        # optimization levels are treated as distinct uploads for the same
-        # source bytes.
-        signature = f"{await asyncio.to_thread(_sha256_hex, file_data)}:{optimization}"
+        # The processing parameters are folded in, so the same bytes requested
+        # with different options are correctly treated as distinct uploads.
+        # `visibility` is part of that on purpose: without it, re-uploading a
+        # photo as `private` would dedupe onto the existing `public` record and
+        # silently ignore the caller's intent -- a security surprise, not a
+        # cache hit.
+        input_hash = await asyncio.to_thread(_sha256_hex, file_data)
+        signature = f"{input_hash}:{optimization}:{visibility}"
         content_hash = hashlib.sha256(signature.encode()).hexdigest()
 
         store = await get_metadata_store()
@@ -145,6 +150,7 @@ async def _process_single_image(
             imgproxy_height,
             imgproxy_fit,
             imgproxy_format,
+            visibility=visibility,
             raise_on_error=raise_on_error,
         )
 
@@ -171,6 +177,7 @@ async def _store_and_record_image(
     imgproxy_fit: str,
     imgproxy_format: str | None,
     *,
+    visibility: str = "public",
     raise_on_error: bool,
 ) -> dict | None:
     if raise_on_error:
@@ -194,7 +201,7 @@ async def _store_and_record_image(
             width=width,
             height=height,
             content_hash=content_hash,
-            visibility="public",
+            visibility=visibility,
         )
     except MetadataError as exc:
         logger.exception("Failed to record image upload")
@@ -244,6 +251,7 @@ async def upload_image(
     optimization: Literal["size", "balanced", "quality"] = Form(
         "balanced", description="Encoding profile for initial image compression"
     ),
+    visibility: Literal["public", "private"] = Form("public"),
     owner: str = Depends(require_image_upload),
 ):
     file_data = await _read_capped(file, request, settings.MAX_IMAGE_UPLOAD_BYTES)
@@ -255,6 +263,7 @@ async def upload_image(
         imgproxy_height,
         imgproxy_fit,
         imgproxy_format,
+        visibility=visibility,
         raise_on_error=True,
     )
 
@@ -302,6 +311,11 @@ _BULK_UPLOAD_OPENAPI_EXTRA = {
                             "enum": ["size", "balanced", "quality"],
                             "default": "balanced",
                         },
+                        "visibility": {
+                            "type": "string",
+                            "enum": ["public", "private"],
+                            "default": "public",
+                        },
                     },
                     "required": ["files"],
                 }
@@ -342,6 +356,7 @@ async def upload_images(
     optimization: Literal["size", "balanced", "quality"] = Form(
         "balanced", description="Encoding profile for initial image compression"
     ),
+    visibility: Literal["public", "private"] = Form("public"),
     owner: str = Depends(require_image_upload),
 ):
     if not files or len(files) == 0:
@@ -372,6 +387,7 @@ async def upload_images(
                 imgproxy_height,
                 imgproxy_fit,
                 imgproxy_format,
+                visibility=visibility,
                 raise_on_error=False,
             )
             for data in files_data

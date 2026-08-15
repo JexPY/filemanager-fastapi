@@ -63,11 +63,17 @@ async def test_patch_rejects_bad_visibility(
     assert resp.status_code == 422
 
 
-async def test_patch_is_video_only(
+async def test_patch_visibility_applies_to_any_kind(
     client: httpx.AsyncClient,
     auth_headers: dict[str, str],
     fake_metadata: InMemoryMetadataStore,
 ) -> None:
+    """Visibility is a property of a record, not of videos.
+
+    Replaces a test asserting images were rejected with 400. Flipping an image
+    to private must also withhold the accelerator URLs, since those bypass the
+    app's auth entirely -- leaving them would make "private" cosmetic.
+    """
     image = await fake_metadata.create(
         owner=OWNER,
         kind="image",
@@ -75,15 +81,20 @@ async def test_patch_is_video_only(
         content_type="image/webp",
         size_bytes=1,
         status="ready",
+        visibility="public",
     )
+    assert "thumbnail_url" in image.to_public()
+
     resp = await client.patch(
-        f"/files/{image.id}", headers=auth_headers, json={"visibility": "public"}
+        f"/files/{image.id}", headers=auth_headers, json={"visibility": "private"}
     )
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == (
-        "Visibility only applies to videos — images are always"
-        " served through imgproxy with no visibility model"
-    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["visibility"] == "private"
+    assert "thumbnail_url" not in body
+    assert "direct_url" not in body
+    assert body["url"].endswith(f"/files/{image.id}/download")
 
 
 async def test_patch_is_owner_scoped_404(
@@ -184,11 +195,14 @@ async def test_share_is_owner_scoped_404(
     assert delete.status_code == 404
 
 
-async def test_share_is_video_only(
+async def test_share_can_be_minted_for_any_kind(
     client: httpx.AsyncClient,
     auth_headers: dict[str, str],
     fake_metadata: InMemoryMetadataStore,
 ) -> None:
+    """Replaces a test asserting images were rejected with 400. Sharing a private
+    image by link is exactly as meaningful as sharing a video, and the token
+    still never appears in the record view."""
     image = await fake_metadata.create(
         owner=OWNER,
         kind="image",
@@ -196,8 +210,17 @@ async def test_share_is_video_only(
         content_type="image/webp",
         size_bytes=1,
         status="ready",
+        visibility="private",
     )
-    assert (await client.post(f"/files/{image.id}/share", headers=auth_headers)).status_code == 400
+
+    resp = await client.post(f"/files/{image.id}/share", headers=auth_headers)
+
+    assert resp.status_code == 200
+    token = resp.json()["share_token"]
+    assert token
+    stored = await fake_metadata.get(image.id, OWNER)
+    assert stored is not None
+    assert "share_token" not in stored.to_public()
 
 
 async def test_share_requires_auth(

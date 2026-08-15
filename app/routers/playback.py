@@ -5,10 +5,9 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 
-from app.routers.auth import _resolve_owner_optional, security
+from app.routers.auth import _resolve_principal_optional, may_read_record, security
 from app.routers.utils import resolve_playback
 from app.services.metadata import (
-    KIND_VIDEO,
     VISIBILITY_PUBLIC,
     MetadataError,
     get_metadata_store,
@@ -32,7 +31,12 @@ async def stream_video(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)] = None,
 ):
-    """The permanent, backend-agnostic playback URL -- the one clients embed.
+    """The permanent, backend-agnostic URL -- the one clients embed.
+
+    Kind-agnostic on purpose: an image, a video, and anything stored later go
+    through the same route, the same auth, and the same per-backend byte path.
+    Nothing here inspects `kind`.
+
     Visibility decides the auth *and* the URL form:
 
     * `public` -> tokenless. On an object store (s3/gcp) with a public/CDN base,
@@ -40,12 +44,12 @@ async def stream_video(
       read path; no per-request presigning, which would defeat that caching). On
       local, always the tokenless X-Accel path -- the media volume has no public
       URL to redirect to.
-    * `private` -> requires the owner bearer; a non-owner or missing token gets
-      404 (not 403), matching the rest of the owner-scoping so existence never
-      leaks. Then resolved per backend (local X-Accel / s3 presigned / gcs signed).
+    * `private` -> the access ladder in `may_read_record`: a per-file `read:file`
+      capability, or the owner. Anything else is 404 (not 403), matching the rest
+      of the owner-scoping so existence never leaks. Then resolved per backend
+      (local X-Accel / s3 presigned / gcs signed).
 
-    Video-scoped (kind != video -> 400). The API only *issues* the redirect/header;
-    it never proxies the bytes for the public/feed case.
+    The API only *issues* the redirect/header; it never proxies the bytes.
     """
     store = await get_metadata_store()
     try:
@@ -57,10 +61,6 @@ async def stream_video(
         ) from exc
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
-    if record.kind != KIND_VIDEO:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Downloads are only for videos"
-        )
 
     if record.visibility == VISIBILITY_PUBLIC:
         # Object stores (s3/gcp) with a public/CDN base -> a stable, embeddable
@@ -74,11 +74,12 @@ async def stream_video(
                 url=backend.public_url(record.storage_key), status_code=status.HTTP_302_FOUND
             )
     else:
-        # Private: owner-only, and a non-owner is a 404 (existence never leaks).
-        # Accepts the owner's bearer via header OR ?token= (a <video src> can't
-        # set headers), static token or capability JWT alike.
-        owner = _resolve_owner_optional(credentials, request)
-        if owner is None or owner != record.owner:
+        # Private: the owner, or a read capability bound to this exact record.
+        # Anything else is a 404 (existence never leaks). Accepts the credential
+        # via header OR ?token= -- a <video src>/<img src> cannot set headers,
+        # which is precisely how a per-file grant reaches a browser.
+        principal = _resolve_principal_optional(credentials, request)
+        if not may_read_record(principal, record_owner=record.owner, record_id=record.id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
     try:
@@ -101,8 +102,10 @@ async def stream_video(
     response_class=RedirectResponse,
 )
 async def play_shared_video(share_token: Annotated[str, Path(max_length=128)]):
-    """Public video streaming via an unlisted share token. Does NOT require
-    a bearer token -- the share token *is* the capability. 404 on revoked/unknown."""
+    """Serve any shared record via an unlisted share token, regardless of kind or
+    visibility. Does NOT require a bearer token -- the share token *is* the
+    capability, and it is also the locator, so there is no id to owner-scope.
+    404 on revoked/unknown."""
     store = await get_metadata_store()
     try:
         record = await store.get_by_share_token(share_token)
@@ -112,7 +115,7 @@ async def play_shared_video(share_token: Annotated[str, Path(max_length=128)]):
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Metadata store unavailable"
         ) from exc
 
-    if record is None or record.kind != KIND_VIDEO:
+    if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
 
     try:

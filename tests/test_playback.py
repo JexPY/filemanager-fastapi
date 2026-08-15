@@ -9,9 +9,11 @@ the visibility/owner matrix.
 
 from __future__ import annotations
 
+import time
 from urllib.parse import unquote
 
 import httpx
+import jwt
 import pytest
 
 from app.config import _derive_owner, settings
@@ -124,9 +126,14 @@ async def test_local_private_download_other_owner_404(
     assert resp.status_code == 404
 
 
-async def test_download_non_video_is_400(
+async def test_download_is_kind_agnostic(
     client: httpx.AsyncClient, fake_metadata: InMemoryMetadataStore
 ) -> None:
+    """An image resolves through the identical route, auth, and byte path a video
+    does -- the route inspects visibility, never `kind`. This replaces a test that
+    asserted the opposite (non-video -> 400); the video-only gate was what stopped
+    the service from storing anything else, and a PDF or audio file added later
+    needs no new endpoint because of this."""
     image = await fake_metadata.create(
         owner=OWNER,
         kind="image",
@@ -134,12 +141,59 @@ async def test_download_non_video_is_400(
         content_type="image/webp",
         size_bytes=1,
         status="ready",
+        visibility="public",
     )
-    assert (await client.get(f"/files/{image.id}/download")).status_code == 400
+    resp = await client.get(f"/files/{image.id}/download")
+
+    assert resp.status_code == 200
+    assert resp.headers["X-Accel-Redirect"] == "/internal-media/images/a.webp"
+    assert resp.headers["content-type"] == "image/webp"
 
 
 async def test_download_unknown_id_404(client: httpx.AsyncClient) -> None:
     assert (await client.get("/files/nope/download")).status_code == 404
+
+
+async def test_private_record_readable_with_a_bound_read_token_via_query(
+    client: httpx.AsyncClient,
+    fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The end-to-end shape fixcar (or any consuming service) uses: it runs its
+    own permission check, mints a short-lived `read:file` JWT bound to one id,
+    and hands the browser a URL. The token rides `?token=` because an
+    <img src>/<video src> cannot set an Authorization header.
+
+    Also asserts the binding actually holds: the same token must not open a
+    second private record belonging to the same owner.
+    """
+    secret = "unit-test-jwt-secret-that-is-long-enough-for-hs256"
+    monkeypatch.setattr(settings, "JWT_SECRET_KEY", secret)
+
+    private = await _seed_video(fake_metadata, visibility="private")
+    other = await _seed_video(fake_metadata, visibility="private", key="videos/other.mp4")
+
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "sub": OWNER,
+            "scopes": ["read:file"],
+            "file": private.id,
+            "iat": now,
+            "exp": now + 300,
+        },
+        secret,
+        algorithm="HS256",
+    )
+
+    granted = await client.get(f"/files/{private.id}/download?token={token}")
+    assert granted.status_code == 200
+    assert granted.headers["X-Accel-Redirect"] == "/internal-media/videos/v_compressed.mp4"
+
+    # Bound to one record: 404, not 403 -- existence still must not leak.
+    assert (await client.get(f"/files/{other.id}/download?token={token}")).status_code == 404
+    # And no token at all is still 404.
+    assert (await client.get(f"/files/{private.id}/download")).status_code == 404
 
 
 # --- object store (s3/gcp) + a public base -> 302 to the stable URL -----------
@@ -236,9 +290,12 @@ async def test_share_unknown_token_404(client: httpx.AsyncClient) -> None:
     assert (await client.get("/share/does-not-exist")).status_code == 404
 
 
-async def test_share_non_video_token_404(
+async def test_share_token_serves_any_kind(
     client: httpx.AsyncClient, fake_metadata: InMemoryMetadataStore
 ) -> None:
+    """A share token is the grant *and* the locator, so kind is irrelevant to it.
+    Previously a shared image 404'd, which made share links a video-only feature
+    for no reason other than the gate."""
     image = await fake_metadata.create(
         owner=OWNER,
         kind="image",
@@ -246,9 +303,14 @@ async def test_share_non_video_token_404(
         content_type="image/webp",
         size_bytes=1,
         status="ready",
+        visibility="private",
     )
     await fake_metadata.set_share_token(image.id, OWNER, "img-token")
-    assert (await client.get("/share/img-token")).status_code == 404
+
+    resp = await client.get("/share/img-token")  # no auth, despite private
+
+    assert resp.status_code == 200
+    assert resp.headers["X-Accel-Redirect"] == "/internal-media/images/a.webp"
 
 
 def test_sanitize_content_disposition_filename() -> None:

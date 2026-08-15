@@ -115,8 +115,8 @@ Four ideas explain most of the API surface.
 **Owner.** Every credential resolves to an owner id, and every record belongs to one.
 Listing, fetching, updating, deleting, poster generation, and task polling are all
 owner-scoped, and another owner's record is a **404, never a 403**, so existence never leaks
-across tenants. The two deliberate exceptions are the ones you opt into per record: a
-`public` video's playback URL, and a share link.
+across tenants. The exceptions are all opt-in, per record: a `public` record's download URL,
+a share link, and a `read:file` grant you mint for one specific record.
 
 **Record.** Each image and video upload writes one row you can fetch at `GET /files/{id}`.
 It is the system of record — status, dimensions, duration, visibility, poster link, and
@@ -362,8 +362,9 @@ from every record view, so it cannot leak through listings, webhooks, or their l
 ## API reference
 
 Every route that takes a `{id}` resolves it **scoped to your own records** — another
-owner's id is a `404`, never a `403`. The two exceptions are deliberate and per record:
-`GET /files/{id}/download` on a video you marked `public`, and `GET /share/{token}`.
+owner's id is a `404`, never a `403`. The exceptions are deliberate and per record: a
+`public` record's `GET /files/{id}/download`, a `read:file` grant bound to one id, and
+`GET /share/{token}`.
 
 ### Uploads
 
@@ -402,12 +403,13 @@ up:
 | `optimization` | `balanced` (default), `quality` | `balanced` caps width at 1280; `quality` at 1920. |
 | `start_seconds` / `end_seconds` | float | Trim the source before encoding. |
 | `poster_seconds` | float | Extract a poster frame automatically at this timestamp. |
-| `visibility` | `public` (default), `private` | Playback access model for the record. |
+| `visibility` | `public` (default), `private` | Access model for the record. Also accepted on image uploads. |
 | `callback_url` | https URL | Webhook target. Validated at upload time; `400` if webhooks are off or the host is not allow-listed. |
 
-> **`visibility` defaults to `public`.** A public video's `/files/{id}/download` URL is
-> fetchable by anyone who has the id, with no token. Pass `visibility=private` at upload, or
-> `PATCH /files/{id}` afterwards, for owner-only playback.
+> **`visibility` defaults to `public`** on both image and video uploads. A public record's
+> `/files/{id}/download` URL is fetchable by anyone who has the id, with no token. Pass
+> `visibility=private` at upload, or `PATCH /files/{id}` afterwards, to restrict it to the
+> owner and to `read:file` grants you mint.
 
 Accepted video content types: `video/mp4`, `video/webm`, `video/quicktime`,
 `video/x-matroska`, `video/x-msvideo`, `video/mpeg`, `video/ogg`, `video/3gpp`, plus
@@ -480,12 +482,12 @@ full match count, so a client can size its pager without walking every page.
 |---|---|---|---|
 | `GET` | `/files` | bearer | Newest first. Query: `limit` (1–200, default 50), `offset`, `kind` (`image`\|`video`). |
 | `GET` | `/files/{id}` | bearer | Full record. Poll this for `status`, `poster_upload_id`, and webhook state. |
-| `PATCH` | `/files/{id}` | bearer | JSON body `{"visibility": "public"}` or `{"visibility": "private"}`. Videos only — `400` on an image. |
+| `PATCH` | `/files/{id}` | bearer | JSON body `{"visibility": "public"}` or `{"visibility": "private"}`. Any kind. |
 | `DELETE` | `/files/{id}` | bearer | Deletes the object first, then the row. Cascades to the video's poster. `204`. |
-| `GET` | `/files/{id}/download` | bearer, or none if `public` | Stable playback URL, Range on every backend. Videos only. |
-| `POST` | `/files/{id}/share` | bearer | Mints or rotates the share token; the only response that returns it. Videos only. |
+| `GET` | `/files/{id}/download` | none if `public`; else owner or a `read:file` grant | The canonical URL for any kind. Range on every backend. |
+| `POST` | `/files/{id}/share` | bearer | Mints or rotates the share token; the only response that returns it. Any kind. |
 | `DELETE` | `/files/{id}/share` | bearer | Revokes it. Idempotent, `204`. |
-| `GET` | `/share/{token}` | none | Serves the video; the token is the grant. Unknown or revoked is a `404`. |
+| `GET` | `/share/{token}` | none | Serves the record regardless of kind or visibility; the token is the grant. Unknown or revoked is a `404`. |
 | `POST` | `/files/{id}/poster` | bearer | On-demand poster from a *ready* video. `202` when enqueued, `200` with the poster record if one already exists, `409` if the video is not ready. |
 | `POST` | `/files/{id}/redeliver` | bearer | Replays a webhook with the same idempotency id. `400` if webhooks are off or the record has no `callback_url`, `409` while still processing. |
 
@@ -533,10 +535,10 @@ to the client.
 
 | Code | When |
 |---|---|
-| `400` | Unsupported or corrupt input, a video-only route called on an image, a rejected `callback_url`, a malformed QR field. |
+| `400` | Unsupported or corrupt input, a poster requested for a non-video, a rejected `callback_url`, a malformed QR field. |
 | `401` | Missing, invalid, or expired credential. No hint as to which. |
-| `403` | A capability JWT lacking the required upload scope, or a JWT presented to `/upload/presign`. |
-| `404` | Unknown id, another owner's record, a private video without the owner's token, an unknown or revoked share token, a non-compression task id. |
+| `403` | A capability JWT lacking the required upload scope, a `read:file` token on an owner-scoped route, or a JWT presented to `/upload/presign`. |
+| `404` | Unknown id, another owner's record, a private record without a valid credential for it, an unknown or revoked share token, a non-compression task id. |
 | `409` | Poster requested for a video that is not `ready`; redelivery while still processing. |
 | `413` | Upload over `MAX_IMAGE_UPLOAD_BYTES` / `MAX_VIDEO_UPLOAD_BYTES` / `MAX_QR_LOGO_BYTES`, or over nginx's `client_max_body_size` before that. |
 | `422` | Malformed query, body, or form field (FastAPI validation) — including QR content over `MAX_QR_CONTENT_LENGTH`. |
@@ -568,9 +570,28 @@ time. Unrestricted: they bypass every scope check. Each entry is either a bare `
 > [`docs/PRODUCTION.md`](docs/PRODUCTION.md) for the intended integration pattern.
 
 **Capability JWTs** — short-lived HS256 tokens signed with `JWT_SECRET_KEY`, carrying `sub`
-(owner), `exp` (strictly enforced), and `scopes`. Scopes gate **only the three upload
-routes**; for every other owner-scoped route a JWT behaves exactly like a static token for
-its `sub`. A bad, expired, or mis-signed token is a flat `401` with no explanation of why.
+(owner), `exp` (strictly enforced), and `scopes`. A bad, expired, or mis-signed token is a
+flat `401` with no explanation of why.
+
+| Scope | Grants |
+|---|---|
+| `upload:image` | `POST /upload/image`, `POST /upload/images`. Also acts as its `sub` on the owner-scoped routes, like a static token. |
+| `upload:video` | `POST /upload/video`. Same owner-equivalence. |
+| `read:file` | Read **one** record via `GET /files/{id}/download`. Nothing else. |
+
+`read:file` is the credential your service mints for an end user *after* running its own
+permission check, so it can fetch one private file directly. It requires a `file` claim
+naming the record — a `read:file` token without one is rejected outright rather than treated
+as a broader grant — and it is deliberately **not** owner-equivalent: presenting one to any
+owner-scoped route (`GET /files`, `DELETE`, share minting) is a `403`. Otherwise handing a
+user one file would hand them the whole tenant.
+
+Your backend can sign these itself with the shared `JWT_SECRET_KEY`; there is no mint
+endpoint to call.
+
+```json
+{ "sub": "tenant-42", "scopes": ["read:file"], "file": "0f1c2b7a...", "exp": 1760000300 }
+```
 
 JWT auth is off unless `JWT_SECRET_KEY` is set. Leave it blank and only static tokens are
 accepted — the original behavior — and `/upload/presign` returns `503`.
@@ -882,8 +903,9 @@ Deliberate boundaries, stated plainly rather than discovered later:
 - **Dedup is best-effort.** Two genuinely simultaneous identical uploads can both slip
   through; there is no unique constraint behind it. The same is true of two simultaneous
   poster requests, where the loser becomes a harmless standalone image row.
-- **Scopes are coarse.** `upload:image` and `upload:video` are the entire taxonomy, and they
-  gate only the upload routes. There are no read-only, read-write, or admin roles.
+- **Scopes are coarse.** `upload:image`, `upload:video`, and the per-file `read:file` are the
+  entire taxonomy. The upload scopes are owner-equivalent everywhere else, so there is still
+  no read-only-listing or admin role.
 - **Only compression tasks are pollable.** Poster generation and webhook delivery run as
   their own tasks but are observed through the record, not `GET /tasks/{id}`.
 - **Webhook replay is manual.** Dead-lettered deliveries are durable and replayable, but

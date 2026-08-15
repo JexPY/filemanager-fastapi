@@ -44,23 +44,63 @@ logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
 router = APIRouter()
 
-# Capability scopes a JWT may carry. A usable upload JWT must grant at least one.
+# Capability scopes a JWT may carry.
 SCOPE_UPLOAD_IMAGE = "upload:image"
 SCOPE_UPLOAD_VIDEO = "upload:video"
+# A per-file read grant: the credential a consuming service mints for an end user
+# after running its own permission check, so that user can fetch exactly one
+# private record. Deliberately NOT owner-equivalent -- see `grants_owner_access`.
+SCOPE_READ_FILE = "read:file"
 _UPLOAD_SCOPES = frozenset({SCOPE_UPLOAD_IMAGE, SCOPE_UPLOAD_VIDEO})
+# A JWT is only a principal at all if it grants one of these.
+_PRINCIPAL_SCOPES = _UPLOAD_SCOPES | {SCOPE_READ_FILE}
 
 
 @dataclass(frozen=True)
 class Principal:
     """The authenticated caller. ``scopes is None`` marks a static master token,
-    which is unrestricted; a JWT carries an explicit, finite scope set."""
+    which is unrestricted; a JWT carries an explicit, finite scope set.
+
+    ``file_id`` is set only for a ``read:file`` token and binds it to exactly one
+    record, so a leaked read grant can never be replayed against another."""
 
     owner: str
     scopes: frozenset[str] | None = None
+    file_id: str | None = None
 
     def has_scope(self, scope: str) -> bool:
         # Static master tokens (scopes is None) bypass all scope checks.
         return self.scopes is None or scope in self.scopes
+
+    @property
+    def grants_owner_access(self) -> bool:
+        """Whether this credential may act as its owner on the owner-scoped
+        routes (list, get, patch, delete, share, poster, redeliver, tasks).
+
+        A static master token always may. A capability JWT may only if it carries
+        an upload scope -- a bare ``read:file`` token must not, because it is
+        handed to an *end user* to fetch one file. If it were owner-equivalent,
+        that user could list or delete every other record belonging to the
+        tenant that minted it.
+        """
+        return self.scopes is None or bool(self.scopes & _UPLOAD_SCOPES)
+
+
+def may_read_record(principal: Principal | None, *, record_owner: str, record_id: str) -> bool:
+    """Whether `principal` may read one specific record's bytes.
+
+    Pure, so the access ladder is testable without HTTP. Two ways in, and a
+    per-file capability is checked first because it is the narrower grant:
+
+    * a ``read:file`` token bound to this exact id -- and whose ``sub`` still
+      matches the record's owner, so an id leaking across tenants is not enough;
+    * the owner themselves, via a static token or an upload-scoped JWT.
+    """
+    if principal is None:
+        return False
+    if principal.file_id is not None:
+        return principal.file_id == record_id and principal.owner == record_owner
+    return principal.owner == record_owner and principal.grants_owner_access
 
 
 def _match_static_token(token: str) -> str | None:
@@ -102,10 +142,22 @@ def _decode_capability_jwt(token: str) -> Principal | None:
     if not isinstance(raw_scopes, list) or not all(isinstance(s, str) for s in raw_scopes):
         return None
     scopes = frozenset(raw_scopes)
-    if not (scopes & _UPLOAD_SCOPES):
-        # A capability token that grants no upload scope is meaningless here.
+    if not (scopes & _PRINCIPAL_SCOPES):
+        # A capability token that grants nothing this service recognises is
+        # meaningless here.
         return None
-    return Principal(owner=sub, scopes=scopes)
+
+    file_id: str | None = None
+    if SCOPE_READ_FILE in scopes:
+        # A read grant MUST name its record. Without this a `read:file` token
+        # would be a blanket read capability over everything the owner has, which
+        # is exactly what the per-file design exists to prevent -- so treat a
+        # missing/blank `file` claim as an invalid token rather than a broad one.
+        raw_file = payload.get("file")
+        if not isinstance(raw_file, str) or not raw_file:
+            return None
+        file_id = raw_file
+    return Principal(owner=sub, scopes=scopes, file_id=file_id)
 
 
 def resolve_principal(token: str | None) -> Principal | None:
@@ -153,8 +205,21 @@ def verify_token(
     """FastAPI dependency: authenticate (static token or JWT; header or
     ``?token=``) and return the owner id. Backward compatible -- the return type
     and owner semantics are identical to the static-only implementation, so
-    every existing ``owner: str = Depends(verify_token)`` route is unaffected."""
-    return _authenticate(request, credentials).owner
+    every existing ``owner: str = Depends(verify_token)`` route is unaffected.
+
+    A bare ``read:file`` token is rejected with 403: it is a per-file read grant
+    minted for an end user, and every route guarded by this dependency is
+    owner-scoped (listing, deletion, share minting, ...). Letting one through
+    here would turn a single-file read capability into full control of that
+    owner's records.
+    """
+    principal = _authenticate(request, credentials)
+    if not principal.grants_owner_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This token grants read access to a single file only",
+        )
+    return principal.owner
 
 
 def require_scopes(*required_scopes: str) -> Callable[..., str]:
@@ -198,23 +263,27 @@ def verify_static_token(
     return owner
 
 
-def _resolve_owner_optional(
+def _resolve_principal_optional(
     credentials: HTTPAuthorizationCredentials | None,
     request: Request | None = None,
-) -> str | None:
-    """Owner for a presented, valid credential (static or JWT), else None -- it
-    never raises. Used by the download endpoint (not the ``verify_token``
-    dependency) because a ``public`` video is fetchable with no token at all,
-    while a ``private`` one still needs its owner. Accepts the same header-or-
-    ``?token=`` shapes as everything else (the query form matters here: a
-    ``<video src>`` cannot set an Authorization header)."""
+) -> Principal | None:
+    """The Principal for a presented, valid credential (static or JWT), else
+    None -- it never raises. Used by the download endpoint (not the
+    ``verify_token`` dependency) because a ``public`` record is fetchable with no
+    token at all, while a ``private`` one needs its owner or a per-file read
+    grant. Returns the whole Principal, not just the owner, because the read
+    ladder needs its scopes and file binding.
+
+    Accepts the same header-or-``?token=`` shapes as everything else. The query
+    form matters here specifically: a ``<video src>`` or ``<img src>`` cannot set
+    an Authorization header, which is exactly how a per-file read grant is
+    delivered to a browser."""
     token: str | None = None
     if credentials is not None:
         token = credentials.credentials
     elif request is not None:
         token = request.query_params.get("token") or None
-    principal = resolve_principal(token)
-    return principal.owner if principal is not None else None
+    return resolve_principal(token)
 
 
 class PresignedUploadRequest(BaseModel):

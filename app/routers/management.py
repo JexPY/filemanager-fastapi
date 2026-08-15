@@ -93,11 +93,13 @@ async def set_file_visibility(
     body: _VisibilityBody,
     owner: Annotated[str, Depends(verify_token)],
 ):
-    """Set a video's playback visibility (`private` | `public`). Owner-scoped
-    (404, not 403, for anything that isn't the caller's, so existence never leaks).
-    Video-only -- images are served through imgproxy and have no visibility model
-    here. `public` makes /files/{id}/download and any share link fetchable without
-    a token; `private` restricts /download to the owner.
+    """Set a record's visibility (`private` | `public`). Owner-scoped (404, not
+    403, for anything that isn't the caller's, so existence never leaks).
+
+    Applies to every kind. `public` makes /files/{id}/download fetchable without
+    a token and lets the record carry the accelerator URLs (direct_url,
+    thumbnail_url); `private` restricts /download to the owner or a per-file
+    read grant, and withholds every URL that would bypass the app.
     """
     # A bad `visibility` value is rejected by the _VisibilityBody Literal before
     # reaching here (422), so no manual value check is needed.
@@ -111,14 +113,6 @@ async def set_file_visibility(
         ) from exc
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
-    if record.kind != KIND_VIDEO:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Visibility only applies to videos — images are always"
-                " served through imgproxy with no visibility model"
-            ),
-        )
 
     try:
         updated = await store.set_visibility(file_id, owner, body.visibility)
@@ -145,7 +139,7 @@ async def create_share_link(
     owner: Annotated[str, Depends(verify_token)],
 ):
     """Mint (or rotate) an unlisted, revocable share token for one of the caller's
-    videos. A valid token serves the video regardless of visibility via
+    records, of any kind. A valid token serves it regardless of visibility via
     GET /share/{token}. This is the ONLY endpoint that returns the token + the
     shareable URL -- it's a secret capability and never appears in to_public()
     (listings/webhooks/GET /files/{id}). Calling again rotates the token, which
@@ -161,10 +155,6 @@ async def create_share_link(
         ) from exc
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
-    if record.kind != KIND_VIDEO:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Share links only apply to videos"
-        )
 
     token = secrets.token_urlsafe(32)
     try:

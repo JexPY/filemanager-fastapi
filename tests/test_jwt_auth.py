@@ -17,9 +17,11 @@ import pytest
 
 from app.config import settings
 from app.routers.auth import (
+    SCOPE_READ_FILE,
     SCOPE_UPLOAD_IMAGE,
     SCOPE_UPLOAD_VIDEO,
     Principal,
+    may_read_record,
     resolve_principal,
 )
 from tests.conftest import fixture_bytes
@@ -45,18 +47,75 @@ def _mint(
     ttl: int = 300,
     secret: str = SECRET,
     alg: str = "HS256",
+    file: str | None = None,
 ) -> str:
     now = int(time.time())
-    return jwt.encode(
-        {
-            "sub": sub,
-            "scopes": [SCOPE_UPLOAD_IMAGE] if scopes is None else scopes,
-            "iat": now,
-            "exp": now + ttl,
-        },
-        secret,
-        algorithm=alg,
+    claims: dict[str, object] = {
+        "sub": sub,
+        "scopes": [SCOPE_UPLOAD_IMAGE] if scopes is None else scopes,
+        "iat": now,
+        "exp": now + ttl,
+    }
+    if file is not None:
+        claims["file"] = file
+    return jwt.encode(claims, secret, algorithm=alg)
+
+
+# --- read:file -- the per-file read capability -------------------------------
+
+
+def test_read_scope_requires_a_file_claim(jwt_env: None) -> None:
+    """A `read:file` token with no `file` claim must not resolve at all.
+
+    Accepting one would make it a blanket read grant over everything the owner
+    has, which is the exact opposite of what a per-file capability is for -- so
+    the missing binding is an invalid token, never a broader one.
+    """
+    assert resolve_principal(_mint(scopes=[SCOPE_READ_FILE])) is None
+    assert resolve_principal(_mint(scopes=[SCOPE_READ_FILE], file="")) is None
+
+    bound = resolve_principal(_mint(scopes=[SCOPE_READ_FILE], file="rec-1"))
+    assert bound == Principal(
+        owner="tenant-1", scopes=frozenset({SCOPE_READ_FILE}), file_id="rec-1"
     )
+
+
+def test_read_scope_is_not_owner_equivalent(jwt_env: None) -> None:
+    """The privilege-escalation guard: a read grant is minted for an *end user*,
+    so it must not authenticate as its `sub` on the owner-scoped routes. If it
+    did, a user handed one file could list or delete the whole tenant."""
+    read_only = resolve_principal(_mint(scopes=[SCOPE_READ_FILE], file="rec-1"))
+    assert read_only is not None
+    assert read_only.grants_owner_access is False
+
+    # Both other credential shapes remain owner-equivalent.
+    assert resolve_principal(_mint(scopes=[SCOPE_UPLOAD_IMAGE])).grants_owner_access is True  # type: ignore[union-attr]
+    assert resolve_principal(STATIC).grants_owner_access is True  # type: ignore[union-attr]
+
+
+def test_may_read_record_ladder(jwt_env: None) -> None:
+    """The pure access ladder, without HTTP."""
+    bound = resolve_principal(_mint(sub="owner-a", scopes=[SCOPE_READ_FILE], file="rec-1"))
+    uploader = resolve_principal(_mint(sub="owner-a", scopes=[SCOPE_UPLOAD_IMAGE]))
+
+    assert may_read_record(bound, record_owner="owner-a", record_id="rec-1") is True
+    # Bound to one record: a different id is refused even for the same owner.
+    assert may_read_record(bound, record_owner="owner-a", record_id="rec-2") is False
+    # And it cannot be replayed across tenants even if an id leaks.
+    assert may_read_record(bound, record_owner="owner-b", record_id="rec-1") is False
+
+    assert may_read_record(uploader, record_owner="owner-a", record_id="rec-2") is True
+    assert may_read_record(uploader, record_owner="owner-b", record_id="rec-2") is False
+    assert may_read_record(None, record_owner="owner-a", record_id="rec-1") is False
+
+
+async def test_read_token_is_rejected_by_owner_scoped_routes(
+    jwt_env: None, client: httpx.AsyncClient
+) -> None:
+    """End to end: 403 (authenticated, not permitted) rather than a silent grant."""
+    token = _mint(sub="tenant-1", scopes=[SCOPE_READ_FILE], file="rec-1")
+    resp = await client.get("/files", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 403
 
 
 # --- resolve_principal: the pure dual-auth core ------------------------------
