@@ -7,6 +7,7 @@ import os
 import tempfile
 from dataclasses import replace
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 from app.services.metadata import (
     KIND_VIDEO,
@@ -71,10 +72,25 @@ class InMemoryStorageBackend(StorageBackend):
             self._materialized[key] = path
         return path
 
-    async def presigned_get_url(self, key: str, expires_in: int = 3600) -> str | None:
+    async def presigned_get_url(
+        self,
+        key: str,
+        expires_in: int = 3600,
+        *,
+        content_type: str | None = None,
+        content_disposition: str | None = None,
+    ) -> str | None:
         if not self._presign_capable:
             return None
-        return f"{self._base_url}/{key}?X-Amz-Signature=fake&expires={expires_in}"
+        url = f"{self._base_url}/{key}?X-Amz-Signature=fake&expires={expires_in}"
+        # Mirror the real backends: the response-header overrides are part of the
+        # signed URL, so a test can assert the record (not the object's metadata)
+        # is what decides Content-Type and filename.
+        if content_type:
+            url += f"&response-content-type={quote(content_type, safe='')}"
+        if content_disposition:
+            url += f"&response-content-disposition={quote(content_disposition, safe='')}"
+        return url
 
     def cleanup(self) -> None:
         """Remove any temp files materialized by local_path (call on teardown)."""

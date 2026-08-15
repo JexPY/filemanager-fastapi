@@ -147,7 +147,11 @@ services:
     profiles: ["backup"]
 
   imgproxy:
-    image: darthsim/imgproxy:latest
+    # Pinned, like nginx/redis/postgres. This ran on `:latest` while every other
+    # service was pinned, which meant an upstream push could change behaviour on
+    # the next deploy with no diff on our side -- on the one container that both
+    # runs in production and validates client-supplied signatures.
+    image: darthsim/imgproxy:v4.0.12
     # Ports are intentionally NOT exposed directly to the host.
     # All access must go through nginx (:9000/imgproxy/) for cache locking.
     environment:

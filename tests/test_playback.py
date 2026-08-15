@@ -9,6 +9,8 @@ the visibility/owner matrix.
 
 from __future__ import annotations
 
+from urllib.parse import unquote
+
 import httpx
 import pytest
 
@@ -177,6 +179,39 @@ async def test_s3_private_download_302s_to_presigned(
     resp = await client.get(f"/files/{rec.id}/download", headers=auth_headers)
     assert resp.status_code == 302
     assert "X-Amz-Signature=fake" in resp.headers["location"]
+
+
+async def test_s3_presigned_url_carries_record_content_type_and_filename(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+    fake_storage: InMemoryStorageBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The object-store 302 must carry the *record's* content type and original
+    filename as signed response-header overrides, not defer to whatever metadata
+    the stored object happens to have.
+
+    Two real failures this prevents: the `local` backend stores no content-type
+    at all, so migrating local -> s3 (rclone infers it from the extension) could
+    leave a video as application/octet-stream, which browsers download instead of
+    playing; and the local byte paths already set an inline Content-Disposition,
+    so without this the 302 silently lost the filename on s3/gcp only.
+    """
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "s3")
+    fake_storage._presign_capable = True
+    rec = await _seed_video(fake_metadata, visibility="private", content_type="video/webm")
+    updated = await fake_metadata.mark_ready(
+        rec.id, storage_key=rec.storage_key, size_bytes=1, content_type="video/webm"
+    )
+    assert updated is not None
+
+    resp = await client.get(f"/files/{rec.id}/download", headers=auth_headers)
+
+    assert resp.status_code == 302
+    location = unquote(resp.headers["location"])
+    assert "response-content-type=video/webm" in location
+    assert 'response-content-disposition=inline; filename="' in location
 
 
 # --- share token: serves regardless of visibility, revocable ------------------

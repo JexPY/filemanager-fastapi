@@ -168,9 +168,12 @@ async def resolve_playback(
     (nginx or the object store moves the bytes). Raises StorageError (-> 502) if
     the backend can't produce a usable URL.
 
-    `filename` (the original upload name) is threaded onto the local byte paths
-    as an `inline` Content-Disposition; the object-store 302 leaves the header to
-    the store, so it is not applied there."""
+    `filename` (the original upload name) and `media_type` are threaded onto every
+    path, including the object-store 302: they ride as signed response-header
+    overrides on the presigned URL, so the *record* decides the Content-Type and
+    filename rather than whatever metadata the stored object carries. Previously
+    the 302 deferred both to the store, which silently dropped the filename and
+    made playback depend on upload-time metadata surviving a backend migration."""
     backend_name = settings.STORAGE_BACKEND
     if backend_name == "local":
         if settings.LOCAL_MEDIA_SERVE_MODE == "direct":
@@ -178,7 +181,15 @@ async def resolve_playback(
         return _xaccel_response(storage_key, filename, media_type=media_type)
 
     backend = await get_storage()
-    signed = await backend.presigned_get_url(storage_key, settings.VIDEO_PLAYBACK_URL_TTL_SECONDS)
+    disposition = None
+    if filename:
+        disposition = f'inline; filename="{_sanitize_content_disposition_filename(filename)}"'
+    signed = await backend.presigned_get_url(
+        storage_key,
+        settings.VIDEO_PLAYBACK_URL_TTL_SECONDS,
+        content_type=media_type,
+        content_disposition=disposition,
+    )
     if not signed:
         raise StorageError(f"Backend {backend_name!r} cannot sign a playback URL")
     return RedirectResponse(url=signed, status_code=status.HTTP_302_FOUND)

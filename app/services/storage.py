@@ -67,12 +67,27 @@ class StorageBackend(ABC):
         """Release any long-lived clients. Default is a no-op."""
 
     async def presigned_get_url(  # noqa: B027
-        self, key: str, expires_in: int = 3600
+        self,
+        key: str,
+        expires_in: int = 3600,
+        *,
+        content_type: str | None = None,
+        content_disposition: str | None = None,
     ) -> str | None:
         """Temporary signed GET URL, for backends where the plain object URL
         isn't usable as-is (e.g. a private S3 bucket). None means the
         backend doesn't support presigning -- callers should fall back to
-        the object's regular url."""
+        the object's regular url.
+
+        ``content_type``/``content_disposition`` ask the store to override those
+        response headers, which makes the *record* authoritative for them rather
+        than whatever metadata the object happens to carry. That matters in two
+        real cases: a backend migration (rclone infers Content-Type from the file
+        extension, and the `local` backend has no content-type metadata to carry
+        over at all -- a video landing as application/octet-stream downloads
+        instead of playing), and filename preservation (the local byte paths set
+        an inline Content-Disposition, so without this the object-store 302
+        silently drops the original filename)."""
         return None
 
     def local_path(self, key: str) -> str | None:
@@ -260,13 +275,29 @@ class S3Storage(StorageBackend):
         except (BotoCoreError, ClientError) as exc:
             raise StorageError(f"S3 delete failed for {key!r}") from exc
 
-    async def presigned_get_url(self, key: str, expires_in: int = 3600) -> str:
-        """Presigned GET for private buckets / temporary access."""
+    async def presigned_get_url(
+        self,
+        key: str,
+        expires_in: int = 3600,
+        *,
+        content_type: str | None = None,
+        content_disposition: str | None = None,
+    ) -> str:
+        """Presigned GET for private buckets / temporary access.
+
+        The optional response-header overrides are signed into the URL (S3's
+        response-content-* query parameters), so the record -- not the stored
+        object's metadata -- decides what the client sees. See the base class."""
         client = await self._get_client()
+        params: dict[str, str] = {"Bucket": self._bucket, "Key": key}
+        if content_type:
+            params["ResponseContentType"] = content_type
+        if content_disposition:
+            params["ResponseContentDisposition"] = content_disposition
         try:
             return await client.generate_presigned_url(
                 "get_object",
-                Params={"Bucket": self._bucket, "Key": key},
+                Params=params,
                 ExpiresIn=expires_in,
             )
         except (BotoCoreError, ClientError) as exc:
@@ -361,7 +392,14 @@ class GCSStorage(StorageBackend):
         except aiohttp.ClientError as exc:
             raise StorageError(f"GCS delete failed for {key!r}") from exc
 
-    async def presigned_get_url(self, key: str, expires_in: int = 3600) -> str:
+    async def presigned_get_url(
+        self,
+        key: str,
+        expires_in: int = 3600,
+        *,
+        content_type: str | None = None,
+        content_disposition: str | None = None,
+    ) -> str:
         """V4 signed GET URL for a private GCS object.
 
         Signed **locally** from the service-account key already loaded by the
@@ -371,12 +409,21 @@ class GCSStorage(StorageBackend):
         S3's presigned GET and is what makes private video playback on the ``gcp``
         backend possible; without it GCS can only serve objects that are public.
         GCS caps a V4 signature at 7 days (604800s); a longer request is clamped.
+
+        The response-header overrides ride as signed `response-content-*` query
+        params (GCS's equivalent of S3's ResponseContentType) -- see the base
+        class for why the record, not the object's metadata, is authoritative.
         """
         client = await self._get_client()
         expires_in = min(expires_in, 604800)
+        query_params: dict[str, str] = {}
+        if content_type:
+            query_params["response-content-type"] = content_type
+        if content_disposition:
+            query_params["response-content-disposition"] = content_disposition
         try:
             blob = Bucket(client, self._bucket).new_blob(key)
-            return await blob.get_signed_url(expires_in)
+            return await blob.get_signed_url(expires_in, query_params=query_params or None)
         except (aiohttp.ClientError, ValueError, KeyError) as exc:
             raise StorageError(f"GCS presign failed for {key!r}") from exc
 
