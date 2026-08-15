@@ -265,6 +265,22 @@ flowchart TB
     Migrate ==>|"Alembic Schema Head"| DB
 ```
 
+#### Services Breakdown
+
+| Service | Image / Build | Ports | Profile / Lifecycle | Role & Responsibilities |
+|---|---|---|---|---|
+| `nginx` | `nginx:1.27-alpine` | `9000:80` | Core (Always running) | Entry reverse proxy, origin shield caching for imgproxy, upload rate limiter (2 r/s, burst 5), and zero-copy byte streamer via `internal;` X-Accel locations. |
+| `api` | `Dockerfile.api` | `9001:80` (debug) | Core (Always running) | FastAPI HTTP server. Handles auth, input validation, synchronous image/file ingest, QR generation, storage staging, and database transactions. |
+| `worker` | `Dockerfile.worker` | *None* | Core (Always running) | TaskIQ worker. Consumes transcoding tasks from Redis, executes FFmpeg / FFprobe pipelines, extracts poster stills, and dispatches HMAC-signed webhooks. |
+| `migrate` | `Dockerfile.api` | *None* | One-Shot (Startup gate) | Runs `alembic upgrade head` to apply schema migrations before `api` and `worker` start accepting jobs. |
+| `db` | `postgres:17-alpine` | `5432` (internal) | Core (Always running) | System of record for the `uploads` table, storing metadata, visibility states, rendition paths, and webhook delivery statuses. |
+| `redis` | `redis:7-alpine` | `6379` (internal) | Core (Always running) | TaskIQ distributed task broker and task result backend. Only storage keys and task metadata travel through Redis. |
+| `imgproxy` | `darthsim/imgproxy:v4.0.12` | `8080` (internal) | Core (Always running) | Dynamic, on-demand image transformations (resizing, cropping, format conversion). Protected behind NGINX origin shield cache. |
+| `garage` | `dxflrs/garage:v2.3.0` | `9002:3900`, `9003:3903` | `s3-dev` | Lightweight S3-compatible object storage fixture for local integration testing. |
+| `garage-init` | `alpine:3.22` | *None* | `s3-dev` (One-shot) | Readiness gate container verifying Garage cluster health before running S3 tests. |
+| `db-backup` | `postgres:17-alpine` | *None* | `backup` (On-demand) | Automated pg_dump backup utility that dumps the PostgreSQL schema/data and prunes backups older than 7 days. |
+| `test` | `Dockerfile.test` | *None* | `test` (On-demand) | Containerized test runner executing pytest, ruff lint, ruff format check, and mypy type validation. |
+
 #### Key Architecture Properties:
 - **Single Public Port:** Only NGINX (`:9000`) is intended for client traffic. Port `:9001` on the API is for debugging only and cannot serve local media (which requires NGINX `X-Accel-Redirect`).
 - **Internal Security Boundaries:** The `/internal-media/` and `/internal-object/` locations in NGINX are marked `internal;`. They can only be entered via an upstream `X-Accel-Redirect` from the API, preventing direct client access and ensuring authentication cannot be bypassed.
