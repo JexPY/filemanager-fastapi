@@ -24,7 +24,12 @@ jobs:
       - name: Build test image & run pytest with coverage
         run: |
           docker compose build test
-          docker compose --profile s3-dev up -d --wait db redis garage garage-init
+          # `--wait` must not be given garage-init: it treats a container that
+          # *exits* as a failure even on exit 0, so including the one-shot
+          # readiness gate failed this step while every container was healthy.
+          # Run the gate separately -- `run --rm` propagates its exit code.
+          docker compose --profile s3-dev up -d --wait db redis garage
+          docker compose --profile s3-dev run --rm garage-init
           docker compose run --name test-runner test pytest --cov=app --cov-report=xml:coverage.xml
           docker cp test-runner:/app/coverage.xml ./coverage.xml
           docker rm -f test-runner

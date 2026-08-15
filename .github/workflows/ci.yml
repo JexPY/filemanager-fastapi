@@ -26,11 +26,23 @@ jobs:
         run: docker compose build test
 
       # Garage is the live S3-compatible target for the s3_integration tests
-      # (multipart upload, presigned GET, Range). garage-init exits 0 only once
-      # the cluster reports fully operational, so `up` returning means the
-      # bucket is actually serving.
+      # (multipart upload, presigned GET, Range).
+      #
+      # `--wait` covers only the long-running services. It must NOT be given
+      # garage-init: `up --wait` treats a container that *exits* as a failure
+      # even when it exits 0, so including the one-shot gate made this step
+      # return 1 while every container was healthy and the gate had succeeded.
+      #
+      # The gate still has to run -- garage's own healthcheck shells out to
+      # `garage status`, which only proves the RPC layer is up, not that the S3
+      # API is serving. `run --rm` propagates the container's exit code, so a
+      # cluster that never becomes operational fails this step rather than
+      # surfacing later as a confusing S3 test failure.
       - name: Start Postgres, Redis + Garage (s3-dev profile)
-        run: docker compose --profile s3-dev up -d --wait db redis garage garage-init
+        run: docker compose --profile s3-dev up -d --wait db redis garage
+
+      - name: Wait for the Garage cluster to be operational
+        run: docker compose --profile s3-dev run --rm garage-init
 
       - name: Lint (ruff check)
         run: docker compose run --rm test ruff check .
