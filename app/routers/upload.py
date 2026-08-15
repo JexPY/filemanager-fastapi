@@ -55,7 +55,13 @@ from app.services.metadata import (
     get_metadata_store,
 )
 from app.services.renditions import derive_rendition_key
-from app.services.storage import StorageError, delete_file, upload_file, upload_file_from_path
+from app.services.storage import (
+    StorageError,
+    StorageObject,
+    delete_file,
+    upload_file,
+    upload_file_from_path,
+)
 from app.services.webhooks import WebhookValidationError, validate_callback_url
 from app.tasks import compress_video_task
 from app.urls import public_url
@@ -218,6 +224,26 @@ async def _process_single_image(
         return None
 
 
+async def _cleanup_uploaded_keys(uploaded_keys: list[str]) -> None:
+    for k in uploaded_keys:
+        with contextlib.suppress(StorageError):
+            await delete_file(k)
+
+
+async def _safe_upload_file(
+    buffer: bytes, key: str, content_type: str, *, raise_on_error: bool
+) -> StorageObject:
+    try:
+        return await upload_file(buffer, key, content_type)
+    except StorageError as exc:
+        if raise_on_error:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=DETAIL_STORAGE_UNAVAILABLE,
+            ) from exc
+        raise
+
+
 async def _upload_image_renditions(
     object_name: str,
     renditions_buffers: dict[str, bytes],
@@ -227,19 +253,47 @@ async def _upload_image_renditions(
     renditions_dict: dict[str, str] = {}
     for rend_name, rend_bytes in renditions_buffers.items():
         rend_key = derive_rendition_key(object_name, rend_name)
-        if raise_on_error:
-            try:
-                r_obj = await upload_file(rend_bytes, rend_key, MIME_IMAGE_WEBP)
-            except StorageError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=DETAIL_STORAGE_UNAVAILABLE,
-                ) from exc
-        else:
-            r_obj = await upload_file(rend_bytes, rend_key, MIME_IMAGE_WEBP)
+        r_obj = await _safe_upload_file(
+            rend_bytes, rend_key, MIME_IMAGE_WEBP, raise_on_error=raise_on_error
+        )
         uploaded_keys.append(r_obj.key)
         renditions_dict[rend_name] = r_obj.key
     return renditions_dict
+
+
+async def _create_image_record(
+    store,
+    owner: str,
+    obj_key: str,
+    obj_size: int,
+    img_data: _ProcessedImageData,
+    visibility: str,
+    renditions_dict: dict[str, str],
+    raise_on_error: bool,
+    uploaded_keys: list[str],
+):
+    try:
+        return await store.create(
+            owner=owner,
+            kind=KIND_IMAGE,
+            storage_key=obj_key,
+            content_type=img_data.content_type,
+            size_bytes=obj_size,
+            status=STATUS_READY,
+            width=img_data.width,
+            height=img_data.height,
+            content_hash=img_data.content_hash,
+            visibility=visibility,
+            renditions=renditions_dict,
+        )
+    except MetadataError as exc:
+        logger.exception("Failed to record image upload")
+        await _cleanup_uploaded_keys(uploaded_keys)
+        if not raise_on_error:
+            return None
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=DETAIL_UPLOAD_FAILED
+        ) from exc
 
 
 async def _store_and_record_image(
@@ -254,16 +308,9 @@ async def _store_and_record_image(
 ) -> dict | None:
     uploaded_keys: list[str] = []
     try:
-        if raise_on_error:
-            try:
-                obj = await upload_file(img_data.buffer, object_name, img_data.content_type)
-            except StorageError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=DETAIL_STORAGE_UNAVAILABLE,
-                ) from exc
-        else:
-            obj = await upload_file(img_data.buffer, object_name, img_data.content_type)
+        obj = await _safe_upload_file(
+            img_data.buffer, object_name, img_data.content_type, raise_on_error=raise_on_error
+        )
         uploaded_keys.append(obj.key)
 
         # Upload materialized renditions (same pass as main image)
@@ -271,30 +318,19 @@ async def _store_and_record_image(
             object_name, img_data.renditions_buffers, raise_on_error, uploaded_keys
         )
 
-        try:
-            record = await store.create(
-                owner=owner,
-                kind=KIND_IMAGE,
-                storage_key=obj.key,
-                content_type=img_data.content_type,
-                size_bytes=obj.size,
-                status=STATUS_READY,
-                width=img_data.width,
-                height=img_data.height,
-                content_hash=img_data.content_hash,
-                visibility=visibility,
-                renditions=renditions_dict,
-            )
-        except MetadataError as exc:
-            logger.exception("Failed to record image upload")
-            for k in uploaded_keys:
-                with contextlib.suppress(StorageError):
-                    await delete_file(k)
-            if not raise_on_error:
-                return None
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, detail=DETAIL_UPLOAD_FAILED
-            ) from exc
+        record = await _create_image_record(
+            store,
+            owner,
+            obj.key,
+            obj.size,
+            img_data,
+            visibility,
+            renditions_dict,
+            raise_on_error,
+            uploaded_keys,
+        )
+        if record is None:
+            return None
 
         return _image_response(
             record.id,
@@ -311,14 +347,10 @@ async def _store_and_record_image(
         )
 
     except HTTPException:
-        for k in uploaded_keys:
-            with contextlib.suppress(StorageError):
-                await delete_file(k)
+        await _cleanup_uploaded_keys(uploaded_keys)
         raise
     except Exception:
-        for k in uploaded_keys:
-            with contextlib.suppress(StorageError):
-                await delete_file(k)
+        await _cleanup_uploaded_keys(uploaded_keys)
         if raise_on_error:
             raise
         logger.exception("Failed to store and record image")
