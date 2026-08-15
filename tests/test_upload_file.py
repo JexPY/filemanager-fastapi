@@ -315,3 +315,38 @@ async def test_upload_file_junk_bytes_with_declared_image_rejected(
         files={"file": ("fake.png", b"\x00\x01\x02\x03", "image/png")},
     )
     assert resp.status_code == 400
+
+
+async def test_upload_file_late_script_past_prefix_bound_rejected(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """A text/plain file with script tags beyond the 8192-byte prefix must be
+    rejected by the stream scan."""
+    pad = b"A" * 9000 + b"<script>alert(1)</script>"
+    resp = await client.post(
+        "/upload/file",
+        headers=auth_headers,
+        files={"file": ("notes.txt", pad, "text/plain")},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] in {
+        "Unsupported or unsafe file type",
+        "Text file contains suspicious HTML/XML tags",
+    }
+
+
+async def test_upload_file_large_clean_text_accepted(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """A clean text file larger than the prefix bound is accepted."""
+    clean_text = b"Valid plain text without HTML.\n" * 500  # ~15 KB
+    resp = await client.post(
+        "/upload/file",
+        headers=auth_headers,
+        files={"file": ("clean.txt", clean_text, "text/plain")},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "success"
+    assert resp.json()["content_type"] == "text/plain"

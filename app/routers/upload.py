@@ -6,7 +6,6 @@ import os
 import uuid
 from typing import Annotated, Any, Literal
 
-import aiofiles
 from fastapi import (
     APIRouter,
     Depends,
@@ -34,7 +33,7 @@ from app.schemas import (
     ImageUploadResponse,
     VideoUploadResponse,
 )
-from app.services.file_validation import FileValidationError, validate_file_content
+from app.services.file_validation import FileValidationError, validate_file_from_path
 from app.services.image_vips import ImageValidationError, validate_and_strip_image
 from app.services.metadata import (
     KIND_FILE,
@@ -633,13 +632,10 @@ async def upload_generic_file(
         file, request, settings.MAX_FILE_UPLOAD_BYTES
     )
     try:
-        # Read header sample to validate format / magic bytes
-        async with aiofiles.open(temp_path, "rb") as f:
-            header_sample = await f.read(8192)
-
         try:
-            content_type = validate_file_content(
-                header_sample,
+            content_type = await asyncio.to_thread(
+                validate_file_from_path,
+                temp_path,
                 declared_content_type=file.content_type,
                 filename=file.filename,
             )

@@ -1,6 +1,5 @@
-"""Unit tests for app.services.file_validation."""
-
-from __future__ import annotations
+import os
+import tempfile
 
 import pytest
 
@@ -8,6 +7,7 @@ from app.services.file_validation import (
     FileValidationError,
     get_content_disposition_type,
     validate_file_content,
+    validate_file_from_path,
 )
 
 PDF_SAMPLE = b"%PDF-1.4\n1 0 obj\n<<\n>>\nendobj\ntrailer\n<<\n>>\n%%EOF\n"
@@ -199,3 +199,60 @@ def test_content_disposition_type() -> None:
     assert get_content_disposition_type("application/zip") == "attachment"
     assert get_content_disposition_type("application/octet-stream") == "attachment"
     assert get_content_disposition_type("application/gzip") == "attachment"
+
+
+def test_validate_file_from_path_late_script_past_prefix_bound_rejected() -> None:
+    """A text file with markup located past the 8192-byte prefix bound must be rejected."""
+    pad = b"A" * 9000
+    html = pad + b"<script>alert(document.domain)</script>"
+
+    with tempfile.NamedTemporaryFile(delete=False) as tf:
+        tf.write(html)
+        tf_path = tf.name
+
+    try:
+        # Buffer check on only first 8192 bytes would have seen only 'A's:
+        assert (
+            validate_file_content(html[:8192], declared_content_type="text/plain") == "text/plain"
+        )
+
+        # validate_file_from_path scans the full file in bounded chunks and detects late markup:
+        with pytest.raises(FileValidationError):
+            validate_file_from_path(tf_path, declared_content_type="text/plain")
+    finally:
+        if os.path.exists(tf_path):
+            os.remove(tf_path)
+
+
+def test_validate_file_from_path_chunk_boundary_split_script_rejected() -> None:
+    """Script tag split across a 64KB chunk boundary must be detected and rejected."""
+    # Place '<scr' at byte 65533 and 'ipt>alert(1)</script>' at byte 65537
+    prefix = b"B" * 65533
+    split_payload = prefix + b"<script>alert(1)</script>"
+
+    with tempfile.NamedTemporaryFile(delete=False) as tf:
+        tf.write(split_payload)
+        tf_path = tf.name
+
+    try:
+        with pytest.raises(FileValidationError):
+            validate_file_from_path(tf_path, declared_content_type="text/plain")
+    finally:
+        if os.path.exists(tf_path):
+            os.remove(tf_path)
+
+
+def test_validate_file_from_path_large_clean_text_accepted() -> None:
+    """Valid plain text, CSV, and JSON files exceeding the prefix bound pass validation."""
+    clean_text = b"Line of clean data without any markup.\n" * 500  # ~20 KB
+
+    with tempfile.NamedTemporaryFile(delete=False) as tf:
+        tf.write(clean_text)
+        tf_path = tf.name
+
+    try:
+        assert validate_file_from_path(tf_path, declared_content_type="text/plain") == "text/plain"
+        assert validate_file_from_path(tf_path, declared_content_type="text/csv") == "text/csv"
+    finally:
+        if os.path.exists(tf_path):
+            os.remove(tf_path)

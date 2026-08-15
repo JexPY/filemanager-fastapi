@@ -351,14 +351,41 @@ def _verify_magic_bytes_for_type(header: bytes, expected_type: str) -> None:
         return
 
 
+_TEXT_INLINE_TYPES = frozenset({"text/plain", "text/csv", "application/json"})
+_SCAN_CHUNK_SIZE = 64 * 1024
+_OVERLAP_SIZE = 256
+
+
+def _scan_file_for_dangerous_text(file_path: str) -> None:
+    """Stream-scan a text file in bounded O(1) memory to guarantee no HTML/XML
+    or dangerous script markup exists anywhere in the file."""
+    with open(file_path, "rb") as f:
+        carry = b""
+        while True:
+            chunk = f.read(_SCAN_CHUNK_SIZE)
+            if not chunk:
+                break
+            window = carry + chunk
+            if _is_dangerous_content(window):
+                raise FileValidationError("Unsupported or unsafe file type")
+            if re.search(rb"<[a-zA-Z/!?]", window):
+                raise FileValidationError("Text file contains suspicious HTML/XML tags")
+            carry = chunk[-_OVERLAP_SIZE:] if len(chunk) >= _OVERLAP_SIZE else chunk
+
+
 def validate_file_content(
     header: bytes,
     declared_content_type: str | None = None,
     filename: str | None = None,
 ) -> str:
-    """Validate file content against security rules and declared content type.
+    """Validate initial header sample or buffer against magic bytes and security rules.
 
-    Returns the validated, normalized content type string or raises FileValidationError.
+    Checks magic-byte signatures, allow-listed MIME types, and scans the provided
+    buffer for dangerous executable headers or markup.
+
+    Note: When validating an entire uploaded file on disk, use `validate_file_from_path`
+    which additionally performs a streaming full-file chunked scan for text formats
+    served inline where markup could appear beyond the initial sample.
     """
     if _is_dangerous_content(header):
         raise FileValidationError("Unsupported or unsafe file type")
@@ -387,12 +414,39 @@ def validate_file_content(
     # If the declared type has known magic bytes, the sniff MUST win and mismatch MUST reject
     _verify_magic_bytes_for_type(header, declared)
 
-    # For text formats, ensure no HTML/XML/script injection anywhere in the header
-    if declared in {"text/plain", "text/csv", "application/json"}:
+    # For text formats, ensure no HTML/XML/script injection anywhere in the header buffer
+    if declared in _TEXT_INLINE_TYPES:
         if re.search(rb"<[a-zA-Z/!?]", header):
             raise FileValidationError("Text file contains suspicious HTML/XML tags")
 
     return declared
+
+
+def validate_file_from_path(
+    file_path: str,
+    declared_content_type: str | None = None,
+    filename: str | None = None,
+) -> str:
+    """Validate a file on disk against security rules and content-type allow-list.
+
+    Reads an initial 8192-byte header to verify magic bytes and determine content type
+    via `validate_file_content`. For text formats served inline, performs a bounded
+    O(1) memory chunked scan across the entire file to ensure no HTML/XML markup,
+    scripts, or executable signatures are hidden anywhere in the file.
+    """
+    with open(file_path, "rb") as f:
+        header = f.read(8192)
+
+    content_type = validate_file_content(
+        header,
+        declared_content_type=declared_content_type,
+        filename=filename,
+    )
+
+    if content_type in _TEXT_INLINE_TYPES:
+        _scan_file_for_dangerous_text(file_path)
+
+    return content_type
 
 
 def get_content_disposition_type(media_type: str) -> str:
