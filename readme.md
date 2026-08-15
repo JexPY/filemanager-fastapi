@@ -25,7 +25,7 @@
 **Upload an image** and get back a stripped, re-encoded WebP plus signed imgproxy URLs for
 on-demand resizing. **Upload a video** and get back a task id while a separate worker
 transcodes it; optionally it extracts a poster frame and pushes a signed webhook when it
-lands. **Generate QR codes** inline. Storage is pluggable: local disk, S3/R2/MinIO, or
+lands. **Generate QR codes** inline. Storage is pluggable: local disk, S3/R2/Garage, or
 Google Cloud Storage.
 
 Everything runs in Docker. `docker compose up --build` gives you the whole stack.
@@ -122,6 +122,15 @@ across tenants. The two deliberate exceptions are the ones you opt into per reco
 It is the system of record — status, dimensions, duration, visibility, poster link, and
 webhook delivery state all live there. QR codes are returned inline and never recorded.
 
+> **Store the id, not the URL.** The record id is the only permanently stable handle. Every
+> URL this service returns is derived from the id plus current configuration, and any of
+> them can legitimately change underneath you: switching `STORAGE_BACKEND` rewrites every
+> imgproxy source URL, putting a CDN in front changes the host, and a signed URL expires by
+> design. A consuming app that persists `0f1c2b7a...` and re-derives URLs from
+> `GET /files/{id}` survives all of that untouched; one that persists a rendered URL in its
+> own database has to migrate it. `GET /files/{id}/download` is the one exception — it is
+> deliberately permanent and backend-agnostic, so it is safe to embed directly.
+
 **Kind and lifecycle.** An image is written `ready` inside the request. A video is written
 `processing` *before* its task is enqueued, and the worker then flips it to `ready`
 (swapping the raw storage key for the compressed one) or `failed`.
@@ -189,8 +198,9 @@ flowchart TB
 
 Both `api` and `worker` wait on `migrate` completing (`service_completed_successfully`) and
 on `db`/`redis` being healthy, so the `uploads` table always exists before either touches
-it. Three more compose services are opt-in and left off the diagram: `minio`
-(`--profile s3-dev`), `db-backup` (`--profile backup`), and `test` (`--profile test`).
+it. Four more compose services are opt-in and left off the diagram: `garage` and
+`garage-init` (`--profile s3-dev`), `db-backup` (`--profile backup`), and `test`
+(`--profile test`).
 
 Notes on the topology as it is actually wired:
 
@@ -581,14 +591,14 @@ only when `PUBLIC_BASE_URL` is set; otherwise it is a relative path for the clie
 Selected with `STORAGE_BACKEND`. The choice changes both how imgproxy reaches source images
 and how video bytes are delivered.
 
-| | `local` | `s3` (S3 / R2 / MinIO) | `gcp` |
+| | `local` | `s3` (S3 / R2 / Garage) | `gcp` |
 |---|---|---|---|
 | Objects live in | `LOCAL_STORAGE_DIR` volume | `S3_BUCKET` | `GCS_BUCKET` |
 | imgproxy source | `local://` on a shared read-only mount | presigned or public URL | presigned or public URL |
 | Video byte path | nginx `X-Accel-Redirect` (sendfile + Range) | 302 to a presigned GET | 302 to a V4 signed URL |
 | Public video URL | not applicable — always served through nginx | 302 to `S3_PUBLIC_BASE_URL` when set | 302 to `GCS_PUBLIC_BASE_URL` when set |
 | Worker ffmpeg input | the file's path, read in place | presigned URL, streamed over HTTPS | presigned URL, streamed over HTTPS |
-| Verified | end to end | end to end against MinIO | unit-tested with a mocked client only |
+| Verified | end to end | end to end against Garage | unit-tested with a mocked client only |
 
 The three `*_PUBLIC_BASE_URL` settings are independent on purpose, so switching backends
 cannot silently reuse a URL configured for a different one. Putting a CDN in front is a
@@ -599,20 +609,31 @@ Storage keys are `images/<uuid>.webp`, `raw/videos/<uuid>.<ext>`,
 reaches a key unsanitized — only its extension survives, lowercased and reduced to at most 8
 characters of `[a-z0-9]`.
 
-Run against MinIO locally:
+Run against a local S3-compatible server. The fixture is [Garage](https://garagehq.deuxfleurs.fr/)
+(pinned to `dxflrs/garage:v2.3.0`), which replaced MinIO after that project was archived in
+April 2026. It boots with `--single-node --default-bucket`, so the cluster layout, the
+bucket, and the credentials are all provisioned before the S3 API starts listening;
+`garage-init` is a one-shot readiness gate that exits once the cluster reports healthy.
 
 ```sh
-docker compose --profile s3-dev up -d minio minio-init
+docker compose --profile s3-dev up -d --wait garage garage-init
 # then in .env:
 #   STORAGE_BACKEND=s3
 #   S3_BUCKET=filemanager-test
-#   S3_ENDPOINT_URL=http://minio:9000
-#   AWS_ACCESS_KEY_ID=minioadmin
-#   AWS_SECRET_ACCESS_KEY=minioadmin
+#   S3_ENDPOINT_URL=http://garage:3900
+#   AWS_REGION=garage
+#   AWS_ACCESS_KEY_ID=garageadmin
+#   AWS_SECRET_ACCESS_KEY=garageadminsecretkey
 ```
 
-`http://minio:9000` is the in-network address the api and worker use. From your host, MinIO's
-S3 API is on `localhost:9002` and its console on `localhost:9003`.
+`AWS_REGION` must match Garage's configured `s3_region`, because SigV4 binds the region into
+the credential scope. The S3 API is on host port 9002 and Garage's admin/health API on 9003
+(the ports MinIO used), clear of nginx on 9000 and the api's debug port on 9001.
+
+The `s3_integration`-marked tests in `tests/test_storage_s3_integration.py` run against this
+fixture and cover what client-side signing tests cannot: a real multipart upload, a presigned
+GET that is actually fetched, and a Range request returning 206. They skip when no endpoint is
+reachable; set `S3_INTEGRATION_REQUIRED=1` (CI does) to make that a failure instead.
 
 ---
 
@@ -705,7 +726,7 @@ variable, it just isn't pre-seeded there.
 | `LOCAL_STORAGE_DIR` | `/data/media` | Root of the `local` backend's volume, shared read-only with nginx and imgproxy. |
 | `LOCAL_PUBLIC_BASE_URL` | — | Base URL prepended to local object keys. Not used for video playback (that always goes through nginx). |
 | `S3_BUCKET` | — | **Required** when `STORAGE_BACKEND=s3`. |
-| `S3_ENDPOINT_URL` | — | Custom endpoint for R2 / MinIO; blank for real AWS. |
+| `S3_ENDPOINT_URL` | — | Custom endpoint for R2 / Garage; blank for real AWS. |
 | `S3_PUBLIC_BASE_URL` | — | CDN or custom domain in front of the bucket. Enables the stable 302 for `public` videos. |
 | `AWS_REGION` | — | Region for real AWS S3. |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | Blank falls back to boto's default credential chain (IAM roles, env). |

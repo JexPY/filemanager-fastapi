@@ -88,6 +88,6 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
-    "s3_integration: requires the MinIO service (docker compose --profile s3-dev)",
+    "s3_integration: requires the Garage S3 service (docker compose --profile s3-dev)",
     "pg_integration: requires the Postgres `db` service (a test-service dependency)",
 ]
