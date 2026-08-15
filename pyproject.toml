@@ -1,0 +1,93 @@
+[project]
+name = "filemanager-fastapi"
+version = "2.0.0"
+description = "2026 production-grade distributed media processing microservice"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.115.8",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.5.0",
+    "pyjwt>=2.9.0",
+    "taskiq>=0.11.0",
+    "taskiq-redis>=0.5.0",
+    "taskiq-fastapi>=0.3.0",
+    "pyvips>=2.2.3",
+    "segno>=1.6.1",
+    "aioboto3>=13.1.0",
+    "gcloud-aio-storage>=9.3.0",
+    "aiofiles>=24.1.0",
+    "python-multipart>=0.0.20",
+    "redis>=5.0.0",
+    "aiohttp>=3.10.11",
+    "asyncpg>=0.30.0",
+    "alembic>=1.13.0",
+    "cryptography>=44.0.0",
+    "urllib3>=2.3.0",
+    "requests>=2.32.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "httpx>=0.27.0",
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+    "types-aiofiles>=24.1.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ASYNC"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's DI system relies on `= Depends(...)`/`= File(...)` etc as defaults.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Body",
+    "fastapi.Security",
+]
+
+[tool.mypy]
+python_version = "3.14"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "pyvips.*",
+    "segno.*",
+    "gcloud.aio.storage.*",
+    "aioboto3.*",
+    "taskiq_fastapi.*",
+    "botocore.*",
+    "asyncpg.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "s3_integration: requires the Garage S3 service (docker compose --profile s3-dev)",
+    "pg_integration: requires the Postgres `db` service (a test-service dependency)",
+]

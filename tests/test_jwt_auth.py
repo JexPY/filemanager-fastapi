@@ -1,0 +1,299 @@
+"""Capability-JWT authentication: the dual-auth path (static token OR JWT), the
+``?token=`` query fallback, per-endpoint scope enforcement, and the
+``/upload/presign`` minting endpoint.
+
+Static-token behaviour proper is covered by test_auth / test_token_identity;
+this file exercises only what the JWT layer adds -- and, crucially, that turning
+it on does not break the legacy static-token path.
+"""
+
+from __future__ import annotations
+
+import time
+
+import httpx
+import jwt
+import pytest
+
+from app.config import settings
+from app.routers.auth import (
+    SCOPE_READ_FILE,
+    SCOPE_UPLOAD_FILE,
+    SCOPE_UPLOAD_IMAGE,
+    SCOPE_UPLOAD_VIDEO,
+    Principal,
+    may_read_record,
+    resolve_principal,
+)
+from tests.conftest import fixture_bytes
+
+SECRET = "unit-test-jwt-secret-that-is-long-enough-for-hs256"  # test-only signing key, >=32 bytes
+STATIC = "static-master-token"  # test-only bearer secret
+
+
+@pytest.fixture
+def jwt_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enable JWT auth with a known secret and a single labelled static token,
+    and pin PUBLIC_BASE_URL blank so presign URL assertions are deterministic."""
+    monkeypatch.setattr(settings, "FILE_MANAGER_BEARER_TOKENS", f"master:{STATIC}")
+    monkeypatch.setattr(settings, "JWT_SECRET_KEY", SECRET)
+    monkeypatch.setattr(settings, "JWT_ALGORITHM", "HS256")
+    monkeypatch.setattr(settings, "PUBLIC_BASE_URL", "")
+
+
+def _mint(
+    sub: str = "tenant-1",
+    scopes: list[str] | None = None,
+    *,
+    ttl: int = 300,
+    secret: str = SECRET,
+    alg: str = "HS256",
+    file: str | None = None,
+) -> str:
+    now = int(time.time())
+    claims: dict[str, object] = {
+        "sub": sub,
+        "scopes": [SCOPE_UPLOAD_IMAGE] if scopes is None else scopes,
+        "iat": now,
+        "exp": now + ttl,
+    }
+    if file is not None:
+        claims["file"] = file
+    return jwt.encode(claims, secret, algorithm=alg)
+
+
+# --- read:file -- the per-file read capability -------------------------------
+
+
+def test_read_scope_requires_a_file_claim(jwt_env: None) -> None:
+    """A `read:file` token with no `file` claim must not resolve at all.
+
+    Accepting one would make it a blanket read grant over everything the owner
+    has, which is the exact opposite of what a per-file capability is for -- so
+    the missing binding is an invalid token, never a broader one.
+    """
+    assert resolve_principal(_mint(scopes=[SCOPE_READ_FILE])) is None
+    assert resolve_principal(_mint(scopes=[SCOPE_READ_FILE], file="")) is None
+
+    bound = resolve_principal(_mint(scopes=[SCOPE_READ_FILE], file="rec-1"))
+    assert bound == Principal(
+        owner="tenant-1", scopes=frozenset({SCOPE_READ_FILE}), file_id="rec-1"
+    )
+
+
+def test_read_scope_is_not_owner_equivalent(jwt_env: None) -> None:
+    """The privilege-escalation guard: a read grant is minted for an *end user*,
+    so it must not authenticate as its `sub` on the owner-scoped routes. If it
+    did, a user handed one file could list or delete the whole tenant."""
+    read_only = resolve_principal(_mint(scopes=[SCOPE_READ_FILE], file="rec-1"))
+    assert read_only is not None
+    assert read_only.grants_owner_access is False
+
+    # Both other credential shapes remain owner-equivalent.
+    assert resolve_principal(_mint(scopes=[SCOPE_UPLOAD_IMAGE])).grants_owner_access is True  # type: ignore[union-attr]
+    assert resolve_principal(STATIC).grants_owner_access is True  # type: ignore[union-attr]
+
+
+def test_may_read_record_ladder(jwt_env: None) -> None:
+    """The pure access ladder, without HTTP."""
+    bound = resolve_principal(_mint(sub="owner-a", scopes=[SCOPE_READ_FILE], file="rec-1"))
+    uploader = resolve_principal(_mint(sub="owner-a", scopes=[SCOPE_UPLOAD_IMAGE]))
+
+    assert may_read_record(bound, record_owner="owner-a", record_id="rec-1") is True
+    # Bound to one record: a different id is refused even for the same owner.
+    assert may_read_record(bound, record_owner="owner-a", record_id="rec-2") is False
+    # And it cannot be replayed across tenants even if an id leaks.
+    assert may_read_record(bound, record_owner="owner-b", record_id="rec-1") is False
+
+    assert may_read_record(uploader, record_owner="owner-a", record_id="rec-2") is True
+    assert may_read_record(uploader, record_owner="owner-b", record_id="rec-2") is False
+    assert may_read_record(None, record_owner="owner-a", record_id="rec-1") is False
+
+
+async def test_read_token_is_rejected_by_owner_scoped_routes(
+    jwt_env: None, client: httpx.AsyncClient
+) -> None:
+    """End to end: 403 (authenticated, not permitted) rather than a silent grant."""
+    token = _mint(sub="tenant-1", scopes=[SCOPE_READ_FILE], file="rec-1")
+    resp = await client.get("/files", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 403
+
+
+# --- resolve_principal: the pure dual-auth core ------------------------------
+
+
+def test_static_token_resolves_to_unrestricted_principal(jwt_env: None) -> None:
+    p = resolve_principal(STATIC)
+    assert p is not None
+    assert p.owner == "master"
+    assert p.scopes is None  # a static master token has no scope restriction
+    assert p.has_scope("upload:video")
+    assert p.has_scope("anything")
+
+
+def test_valid_jwt_resolves_owner_and_scopes(jwt_env: None) -> None:
+    p = resolve_principal(_mint(sub="tenant-7", scopes=[SCOPE_UPLOAD_IMAGE]))
+    assert p == Principal(owner="tenant-7", scopes=frozenset({SCOPE_UPLOAD_IMAGE}))
+
+
+def test_expired_jwt_is_rejected(jwt_env: None) -> None:
+    assert resolve_principal(_mint(ttl=-10)) is None
+
+
+def test_wrong_signature_jwt_is_rejected(jwt_env: None) -> None:
+    assert resolve_principal(_mint(secret="not-the-real-secret-but-still-long-enough")) is None
+
+
+def test_jwt_without_any_upload_scope_is_rejected(jwt_env: None) -> None:
+    # A structurally-valid token that grants no upload capability is not a
+    # principal here -- it authenticates nothing this service exposes.
+    assert resolve_principal(_mint(scopes=["read:files"])) is None
+    assert resolve_principal(_mint(scopes=[])) is None
+
+
+def test_jwt_ignored_entirely_when_secret_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "FILE_MANAGER_BEARER_TOKENS", f"master:{STATIC}")
+    monkeypatch.setattr(settings, "JWT_SECRET_KEY", "")
+    # Even a perfectly-formed token is refused when the feature is disabled...
+    assert resolve_principal(_mint(secret="whatever-but-long-enough-for-hs256")) is None
+    # ...while the static token keeps working (backward compatibility).
+    assert resolve_principal(STATIC) is not None
+
+
+# --- Uploads: header auth, query-param auth, scope gating --------------------
+
+
+async def test_image_upload_with_jwt_in_header(client: httpx.AsyncClient, jwt_env: None) -> None:
+    token = _mint(sub="tenant-img", scopes=[SCOPE_UPLOAD_IMAGE])
+    resp = await client.post(
+        "/upload/image",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "success"
+
+
+async def test_image_upload_with_jwt_in_query_param(
+    client: httpx.AsyncClient, jwt_env: None
+) -> None:
+    # No Authorization header at all -- the presigned-URL / header-less path.
+    token = _mint(scopes=[SCOPE_UPLOAD_IMAGE])
+    resp = await client.post(
+        f"/upload/image?token={token}",
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp.status_code == 200
+
+
+async def test_image_scoped_jwt_cannot_upload_video(
+    client: httpx.AsyncClient, jwt_env: None
+) -> None:
+    token = _mint(scopes=[SCOPE_UPLOAD_IMAGE])
+    resp = await client.post(
+        "/upload/video",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("clip.mp4", fixture_bytes("tiny.mp4"), "video/mp4")},
+    )
+    assert resp.status_code == 403
+
+
+async def test_expired_jwt_upload_is_401(client: httpx.AsyncClient, jwt_env: None) -> None:
+    token = _mint(ttl=-5, scopes=[SCOPE_UPLOAD_IMAGE])
+    resp = await client.post(
+        "/upload/image",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp.status_code == 401
+
+
+async def test_jwt_authenticates_on_a_plain_verify_token_route(
+    client: httpx.AsyncClient, jwt_env: None
+) -> None:
+    # GET /files uses verify_token (not a scope-gated dependency); a JWT owner
+    # should authenticate and see its own (empty) listing.
+    token = _mint(sub="tenant-list", scopes=[SCOPE_UPLOAD_IMAGE])
+    resp = await client.get("/files", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    assert resp.json()["files"] == []
+
+
+# --- POST /upload/presign ----------------------------------------------------
+
+
+async def test_presign_mints_a_usable_image_token(client: httpx.AsyncClient, jwt_env: None) -> None:
+    resp = await client.post(
+        "/upload/presign",
+        headers={"Authorization": f"Bearer {STATIC}"},
+        json={"kind": "image", "owner_id": "tenant-42", "expires_in_seconds": 120},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope"] == SCOPE_UPLOAD_IMAGE
+    assert body["url"].startswith("/upload/image?token=")  # PUBLIC_BASE_URL blank
+    assert body["token"] in body["url"]
+
+    # The minted URL actually authorizes a real image upload, no header needed.
+    up = await client.post(
+        body["url"],
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert up.status_code == 200
+
+
+async def test_presign_video_uses_public_base_url_and_video_scope(
+    client: httpx.AsyncClient, jwt_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "PUBLIC_BASE_URL", "https://media.example.com")
+    resp = await client.post(
+        "/upload/presign",
+        headers={"Authorization": f"Bearer {STATIC}"},
+        json={"kind": "video", "owner_id": "tenant-v"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope"] == SCOPE_UPLOAD_VIDEO
+    assert body["url"].startswith("https://media.example.com/upload/video?token=")
+
+
+async def test_presign_file_uses_file_scope(client: httpx.AsyncClient, jwt_env: None) -> None:
+    resp = await client.post(
+        "/upload/presign",
+        headers={"Authorization": f"Bearer {STATIC}"},
+        json={"kind": "file", "owner_id": "tenant-f"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope"] == SCOPE_UPLOAD_FILE
+    assert body["url"].startswith("/upload/file?token=")
+
+
+async def test_presign_rejects_a_jwt_caller(client: httpx.AsyncClient, jwt_env: None) -> None:
+    # Only the static master token may mint capabilities; a JWT holder cannot
+    # escalate into issuing more (403, authenticated-but-forbidden).
+    token = _mint(scopes=[SCOPE_UPLOAD_IMAGE])
+    resp = await client.post(
+        "/upload/presign",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"kind": "image", "owner_id": "x"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_presign_requires_authentication(client: httpx.AsyncClient, jwt_env: None) -> None:
+    resp = await client.post("/upload/presign", json={"kind": "image", "owner_id": "x"})
+    assert resp.status_code == 401
+
+
+async def test_presign_503_when_jwt_disabled(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "FILE_MANAGER_BEARER_TOKENS", f"master:{STATIC}")
+    monkeypatch.setattr(settings, "JWT_SECRET_KEY", "")
+    resp = await client.post(
+        "/upload/presign",
+        headers={"Authorization": f"Bearer {STATIC}"},
+        json={"kind": "image", "owner_id": "x"},
+    )
+    assert resp.status_code == 503

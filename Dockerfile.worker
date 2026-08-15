@@ -1,0 +1,51 @@
+FROM python:3.14-slim
+
+COPY --from=ghcr.io/astral-sh/uv:0.6.5 /uv /uvx /bin/
+
+ENV PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+
+# Ensure we get ffmpeg 7 (which should be default or available in 3.14-slim based on Debian Trixie/Fork)
+#
+# libvips is required here on two counts. (1) tasks.py now calls pyvips
+# DIRECTLY: generate_poster_task runs an extracted video frame through
+# image_vips.validate_and_strip_image (the same validate/strip -> WebP path the
+# image route uses). (2) Even without that, taskiq_fastapi.init(broker,
+# "app.main:app") in broker.py makes the worker import the full FastAPI app at
+# startup, which transitively imports app.routers.files -> image_vips -> pyvips.
+# Either way, without libvips installed the worker process crashes on boot.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libvips \
+    libvips-dev \
+    librsvg2-2 \
+    librsvg2-dev \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY app/ ./app/
+
+# chown before switching users so a fresh media_data volume (mounted at
+# /data/media, used only when STORAGE_BACKEND=local) inherits this
+# ownership when Docker initializes it, instead of staying root-owned.
+# /tmp (used for ffmpeg scratch files) is already world-writable (1777).
+RUN useradd --create-home --uid 1000 appuser \
+    && mkdir -p /data/media \
+    && chown -R appuser:appuser /app /data/media
+
+USER appuser
+
+# Run the taskiq worker listening to the broker. --fs-discover is
+# deliberately omitted: it recursively scans the working directory for
+# task modules, and inside this image that includes .venv/site-packages --
+# it was picking up (and crashing on) unrelated third-party modules that
+# happen to be named "tasks.py" (e.g. s3transfer.tasks). app.tasks is
+# already explicitly listed below, so fs-discover adds nothing but risk.
+CMD ["taskiq", "worker", "app.broker:broker", "app.tasks", "--workers", "2"]

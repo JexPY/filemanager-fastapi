@@ -1,0 +1,307 @@
+services:
+  # One-shot schema migration. Runs `alembic upgrade head` to completion, then
+  # exits; api and worker wait for it (service_completed_successfully) so the
+  # `uploads` table always exists before either touches the DB. This replaces
+  # the store's old self-creation of the schema on first pool use.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://filemanager:filemanager@db:5432/filemanager
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # nginx is the entry proxy on :9000. Clients (and the local-playback
+  # verification) go through it, NOT the api directly -- only nginx interprets
+  # the app's X-Accel-Redirect and serves the video bytes. The api's own host
+  # port (9001) is kept for direct debugging.
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "9000:80"
+    environment:
+      - ENABLE_IMGPROXY_CACHE=${ENABLE_IMGPROXY_CACHE:-true}
+      - NGINX_MAX_BODY_SIZE=${NGINX_MAX_BODY_SIZE:-2000m}
+    command: /bin/sh -c "envsubst '$${ENABLE_IMGPROXY_CACHE} $${NGINX_MAX_BODY_SIZE}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"
+    volumes:
+      - ./nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
+      # Read-only: nginx serves bytes but never writes the media volume.
+      - ./data/media:/data/media:ro
+    depends_on:
+      - api
+      - imgproxy
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    # Behind nginx (:9000). Direct host access on 9001 is for debugging only and
+    # does NOT serve local video (X-Accel-Redirect needs nginx).
+    ports:
+      - "9001:80"
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://filemanager:filemanager@db:5432/filemanager
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
+      - LOCAL_STORAGE_DIR=/data/media
+      # xaccel -> local video playback is served by nginx (sendfile + Range),
+      # app out of the byte path. Use `direct` only for a no-nginx dev setup.
+      - LOCAL_MEDIA_SERVE_MODE=${LOCAL_MEDIA_SERVE_MODE:-xaccel}
+    volumes:
+      - ./data/media:/data/media
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://filemanager:filemanager@db:5432/filemanager
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
+      - LOCAL_STORAGE_DIR=/data/media
+    volumes:
+      - ./data/media:/data/media
+      - worker_tmp:/tmp
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      - POSTGRES_USER=filemanager
+      - POSTGRES_PASSWORD=filemanager
+      - POSTGRES_DB=filemanager
+    # Production-safe defaults: bound how long a runaway query/idle transaction
+    # can hold locks, cap connections, and log anything slower than 1s so slow
+    # queries are visible instead of silently eating latency.
+    command:
+      - "postgres"
+      - "-c"
+      - "statement_timeout=30000"
+      - "-c"
+      - "idle_in_transaction_session_timeout=60000"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "shared_buffers=128MB"
+      - "-c"
+      - "log_min_duration_statement=1000"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filemanager -d filemanager"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # On-demand custom-format pg_dump, pruning dumps older than 7 days.
+  # Usage: docker compose --profile backup run --rm db-backup
+  db-backup:
+    image: postgres:17-alpine
+    environment:
+      - PGHOST=db
+      - PGUSER=filemanager
+      - PGPASSWORD=filemanager
+      - PGDATABASE=filemanager
+    volumes:
+      - ./data/backups:/backups
+    entrypoint: >
+      /bin/sh -c "
+      pg_dump --format=custom --file=/backups/filemanager_$$(date +%Y%m%d_%H%M%S).dump &&
+      echo 'Backup completed' &&
+      find /backups -name '*.dump' -mtime +7 -delete &&
+      echo 'Old backups cleaned'
+      "
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles: ["backup"]
+
+  imgproxy:
+    # Pinned, like nginx/redis/postgres. This ran on `:latest` while every other
+    # service was pinned, which meant an upstream push could change behaviour on
+    # the next deploy with no diff on our side -- on the one container that both
+    # runs in production and validates client-supplied signatures.
+    image: darthsim/imgproxy:v4.0.12
+    # Ports are intentionally NOT exposed directly to the host.
+    # All access must go through nginx (:9000/imgproxy/) for cache locking.
+    environment:
+      # Hex-encoded strings; must match the app's IMGPROXY_KEY/IMGPROXY_SALT
+      # exactly. No fallback default here on purpose: a blank .env value
+      # used to silently become "0000" for imgproxy while staying "" for the
+      # app, so every signed URL 403'd until someone noticed the mismatch.
+      - IMGPROXY_KEY=${IMGPROXY_KEY:?IMGPROXY_KEY must be set, e.g. via `openssl rand -hex 32`}
+      - IMGPROXY_SALT=${IMGPROXY_SALT:?IMGPROXY_SALT must be set, e.g. via `openssl rand -hex 32`}
+      # Enables the local:///<key> source scheme for STORAGE_BACKEND=local --
+      # without this (and the matching volume mount below), imgproxy has no
+      # way to reach locally-stored objects at all.
+      - IMGPROXY_LOCAL_FILESYSTEM_ROOT=/data/media
+      # Egress allow-list. imgproxy fetches whatever source URL is embedded in a
+      # signed path, and it sits on this Docker network next to Postgres and
+      # Redis (and, on a cloud host, the metadata endpoint). The signature stops
+      # outsiders from minting URLs, so this only matters if IMGPROXY_KEY/SALT
+      # leak -- but then it is the difference between a leaked key and a fetch
+      # primitive inside your network. The default matches STORAGE_BACKEND=local;
+      # on s3/gcp set this to your public/CDN prefix, e.g.
+      # IMGPROXY_ALLOWED_SOURCES=https://cdn.example.com/
+      - IMGPROXY_ALLOWED_SOURCES=${IMGPROXY_ALLOWED_SOURCES:-local://}
+    volumes:
+      - ./data/media:/data/media:ro
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      # Points the pg_integration tests at the `db` service; unit tests use the
+      # in-memory metadata fake and never touch this.
+      - DATABASE_URL=postgresql://filemanager:filemanager@db:5432/filemanager
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
+      - LOCAL_STORAGE_DIR=/data/media
+      # Fixed test-only values so the suite never depends on the developer's
+      # own .env being populated correctly.
+      - FILE_MANAGER_BEARER_TOKENS=test-token
+      - IMGPROXY_KEY=00112233445566778899aabbccddeeff00112233445566778899aabbccddee
+      - IMGPROXY_SALT=aabbccddeeff00112233445566778899aabbccddeeff0011223344556677aa
+    volumes:
+      - ./data/media:/data/media
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles: ["test"]
+
+  # Local S3-compatible fixture for the `s3` backend (replaces MinIO, whose
+  # upstream repo was archived 2026-04-25). Garage is a small, actively
+  # maintained S3 implementation; the image is pinned deliberately -- the old
+  # minio/minio + minio/mc services were untagged, so a rebuild could silently
+  # change the fixture under the test suite.
+  #
+  # `--single-node` assigns the cluster layout (Garage refuses to serve without
+  # one) and `--default-bucket` provisions GARAGE_DEFAULT_BUCKET plus the
+  # GARAGE_DEFAULT_ACCESS_KEY/SECRET_KEY credentials. Both run *before* the S3
+  # API binds, so there is no window where the endpoint answers with no bucket
+  # -- which is why no separate "create the bucket" init container is needed
+  # (see garage-init below, which is a readiness gate, not a provisioner).
+  garage:
+    image: dxflrs/garage:v2.3.0
+    entrypoint: /garage
+    command: ["server", "--single-node", "--default-bucket"]
+    environment:
+      # Garage rejects a secret shorter than 16 characters, so this is not the
+      # symmetric minioadmin/minioadmin pair it replaces.
+      - GARAGE_DEFAULT_ACCESS_KEY=garageadmin
+      - GARAGE_DEFAULT_SECRET_KEY=garageadminsecretkey
+      - GARAGE_DEFAULT_BUCKET=filemanager-test
+    ports:
+      # 9002 was MinIO's S3 API port; kept so existing S3_ENDPOINT_URL notes
+      # and host-side tooling do not move. 9003 (MinIO's console) now carries
+      # Garage's admin/health API. Neither collides with nginx (9000) or the
+      # api's debug port (9001).
+      - "9002:3900"
+      - "9003:3903"
+    configs:
+      - source: garage_toml
+        target: /etc/garage.toml
+    volumes:
+      - garage_meta:/var/lib/garage/meta
+      - garage_data:/var/lib/garage/data
+    # The image is distroless (no shell, no curl), so the healthcheck uses the
+    # bundled CLI. `garage status` exits non-zero until the node's RPC layer is
+    # up and it can read its own layout.
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    profiles: ["s3-dev"]
+
+  # One-shot readiness gate, mirroring how minio-init gated on MinIO: it exits 0
+  # only once Garage's admin API reports the data plane fully operational, so
+  # `depends_on: {condition: service_completed_successfully}` (or a CI step) can
+  # wait on a real "S3 is serving" signal rather than a TCP port being open.
+  # Garage itself cannot express this as its own healthcheck -- no HTTP client
+  # in the image -- hence the separate container.
+  garage-init:
+    image: alpine:3.22
+    depends_on:
+      garage:
+        condition: service_healthy
+    # busybox wget; Garage's admin /health is unauthenticated and returns 200
+    # only when every partition is available.
+    entrypoint: >
+      /bin/sh -c "
+      for i in $$(seq 1 60); do
+        if wget -q -O - http://garage:3903/health 2>/dev/null | grep -q 'fully operational'; then
+          echo 'garage: S3 API ready (bucket filemanager-test)'; exit 0;
+        fi;
+        sleep 1;
+      done;
+      echo 'garage: timed out waiting for a healthy cluster' >&2; exit 1
+      "
+    profiles: ["s3-dev"]
+
+configs:
+  # Inlined rather than a checked-in file so the whole fixture stays in one
+  # place. Single-node, no redundancy, sqlite metadata -- a test fixture, not a
+  # deployment topology. rpc_secret is required even for one node; this value is
+  # dev-only and never leaves the compose network.
+  garage_toml:
+    content: |
+      metadata_dir = "/var/lib/garage/meta"
+      data_dir = "/var/lib/garage/data"
+      db_engine = "sqlite"
+      replication_factor = 1
+      rpc_bind_addr = "[::]:3901"
+      rpc_public_addr = "127.0.0.1:3901"
+      rpc_secret = "6e0f4c1d9b7a2538ecf0a1b4d6528e93cf7a0b1d2e3f4a5b6c7d8e9f0a1b2c3d"
+
+      [s3_api]
+      # Must match the AWS_REGION / signing region the client uses -- Garage
+      # verifies the region in the SigV4 credential scope.
+      s3_region = "garage"
+      api_bind_addr = "[::]:3900"
+
+      [admin]
+      api_bind_addr = "[::]:3903"
+
+volumes:
+  pg_data:
+  worker_tmp:
+  garage_meta:
+  garage_data:

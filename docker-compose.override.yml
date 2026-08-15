@@ -1,0 +1,12 @@
+services:
+  api:
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--reload"]
+    volumes:
+      - ./app:/app/app
+      - ./data/media:/data/media
+
+  worker:
+    command: ["taskiq", "worker", "app.broker:broker", "app.tasks"]
+    volumes:
+      - ./app:/app/app
+      - ./data/media:/data/media

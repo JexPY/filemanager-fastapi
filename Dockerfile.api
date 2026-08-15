@@ -1,0 +1,38 @@
+FROM python:3.14-slim
+
+COPY --from=ghcr.io/astral-sh/uv:0.6.5 /uv /uvx /bin/
+
+ENV PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libvips \
+    libvips-dev \
+    librsvg2-2 \
+    librsvg2-dev \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY app/ ./app/
+# Alembic config + migrations: the `migrate` compose service runs
+# `alembic upgrade head` from this image before the api/worker start.
+COPY alembic.ini ./
+COPY migrations/ ./migrations/
+
+# chown before switching users so a fresh media_data volume (mounted at
+# /data/media, used only when STORAGE_BACKEND=local) inherits this
+# ownership when Docker initializes it, instead of staying root-owned.
+RUN useradd --create-home --uid 1000 appuser \
+    && mkdir -p /data/media \
+    && chown -R appuser:appuser /app /data/media
+
+USER appuser
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--workers", "4"]

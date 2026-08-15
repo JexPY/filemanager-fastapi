@@ -1,0 +1,47 @@
+name: SonarCloud
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  sonarcloud:
+    name: SonarCloud Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Full history required for SonarCloud blame information
+          fetch-depth: 0
+
+      - name: Provision .env for docker compose
+        run: cp .env-example .env
+
+      - name: Build test image & run pytest with coverage
+        run: |
+          docker compose build test
+          # `--wait` must not be given garage-init: it treats a container that
+          # *exits* as a failure even on exit 0, so including the one-shot
+          # readiness gate failed this step while every container was healthy.
+          # Run the gate separately -- `run --rm` propagates its exit code.
+          docker compose --profile s3-dev up -d --wait db redis garage
+          docker compose --profile s3-dev run --rm garage-init
+          docker compose run --name test-runner test pytest --cov=app --cov-report=xml:coverage.xml
+          docker cp test-runner:/app/coverage.xml ./coverage.xml
+          docker rm -f test-runner
+          sed -i 's|/app/app|app|g' coverage.xml || true
+          sed -i 's|/app/|./|g' coverage.xml || true
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile s3-dev --profile test down -v

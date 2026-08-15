@@ -1,0 +1,31 @@
+name: Pysa
+
+on:
+  push:
+    branches: [master, main]
+  schedule:
+    # Weekly deep taint analysis every Monday at 07:00 UTC
+    - cron: "0 7 * * 1"
+
+jobs:
+  pysa:
+    name: Pysa — Python Taint Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Pysa
+        uses: facebook/pysa-action@v0.0.5
+        with:
+          repo-directory: "./"
+          # No extra requirements — standard library + installed stubs are enough
+          requirement-files: ""
+          pre-setup-commands: ""
+          infer-types-from-stubs: true
+        continue-on-error: true
