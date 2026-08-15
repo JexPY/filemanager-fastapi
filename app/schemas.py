@@ -130,13 +130,29 @@ class FileRecord(BaseModel):
     webhook_updated_at: str | None = Field(default=None, description="ISO-8601 timestamp, or null")
     visibility: str = Field(description="'private' | 'public'")
     url: str | None = Field(
-        default=None, description="Stable playback/image URL; present only when status='ready'"
+        default=None,
+        description=(
+            "The canonical URL, same shape for every kind: GET /files/{id}/download. "
+            "Permanent and backend-agnostic -- unaffected by a storage-backend switch, a "
+            "CDN change, or a visibility flip -- and the only URL here that resolves for a "
+            "private record. Present once status='ready'. Persist this and the id, nothing else."
+        ),
+    )
+    direct_url: str | None = Field(
+        default=None,
+        description=(
+            "The object's public/CDN URL: no redirect hop, no imgproxy. An accelerator for "
+            "LCP-sensitive embedding, present only for a public record on an object-store "
+            "backend with a *_PUBLIC_BASE_URL configured."
+        ),
     )
     thumbnail_url: str | None = Field(
-        default=None, description="Signed imgproxy URL: a 300x300 fill thumbnail"
+        default=None,
+        description="Signed imgproxy URL: a 300x300 fill thumbnail. Public images only.",
     )
     poster_url: str | None = Field(
-        default=None, description="Direct signed imgproxy URL for the video poster image"
+        default=None,
+        description="Signed imgproxy URL for the video's poster image. Public records only.",
     )
     created_at: str = Field(description="ISO-8601 timestamp")
     updated_at: str = Field(description="ISO-8601 timestamp")

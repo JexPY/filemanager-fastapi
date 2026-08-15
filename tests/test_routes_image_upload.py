@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 import app.services.storage as storage_module
-from app.config import settings
+from app.config import _derive_owner, settings
 from app.main import app
 from tests.conftest import fixture_bytes
 from tests.fakes import InMemoryMetadataStore, InMemoryStorageBackend
@@ -53,11 +53,21 @@ async def test_source_is_local_scheme_for_local_backend(
     assert "X-Amz-Signature" not in source
 
 
-async def test_source_is_presigned_when_backend_supports_it(
+async def test_imgproxy_source_is_never_presigned_and_matches_the_record(
     monkeypatch: pytest.MonkeyPatch,
     auth_headers: dict[str, str],
     fake_metadata: InMemoryMetadataStore,
 ) -> None:
+    """An imgproxy signature never expires, so the source it wraps must not either.
+
+    This asserts the inverse of the behaviour it replaces. The upload response
+    used to embed a *presigned* source (1h TTL by default) while
+    `UploadRecord.to_public` embedded the plain object URL -- so the same image
+    had two different imgproxy URLs, i.e. two CDN cache keys, and the pair handed
+    back at upload time silently rotted after an hour while looking permanent.
+
+    Both now derive from `signed_image_url`, so the two must be byte-identical.
+    """
     # STORAGE_BACKEND must actually be non-local here too: build_source_url's
     # local:// override is keyed on this setting, not on the fake's
     # presign_capable flag, since a real deployment can't run local storage
@@ -72,11 +82,17 @@ async def test_source_is_presigned_when_backend_supports_it(
             files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
         )
     assert resp.status_code == 200
-    # A private-bucket-style backend must never sign imgproxy's source over the
-    # unsigned direct URL -- the embedded source must be the presigned URL (a
-    # private bucket would otherwise be unreachable for imgproxy too).
-    source = _decode_imgproxy_source(resp.json()["imgproxy_thumbnail_url"])
-    assert "X-Amz-Signature=fake" in source
+    body = resp.json()
+
+    source = _decode_imgproxy_source(body["imgproxy_thumbnail_url"])
+    assert "X-Amz-Signature" not in source, "a presigned source would expire under a permanent URL"
+    assert source == "http://fake-storage/images/" + source.rsplit("/", 1)[-1]
+
+    # Same image, same imgproxy URL, whichever endpoint you ask.
+    record = await fake_metadata.get(body["id"], _derive_owner("test-token"))
+    assert record is not None
+    record_source = _decode_imgproxy_source(record.to_public()["thumbnail_url"])
+    assert record_source == source
 
 
 async def test_svg_upload_is_rejected(

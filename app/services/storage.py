@@ -462,6 +462,37 @@ async def get_storage() -> StorageBackend:
     return _storage
 
 
+def public_object_url(key: str) -> str:
+    """The object's plain, unsigned public URL -- resolved *synchronously*.
+
+    Exists because the sync callers that need it (``UploadRecord.to_public``,
+    which serializes inside a Pydantic response model) cannot await
+    ``get_storage()``. Reuses the singleton when it is already built and
+    otherwise constructs a throwaway backend, which is safe precisely because
+    ``_build_backend`` does no I/O and opens no client -- every backend defers
+    client construction to first use. It deliberately does NOT populate the
+    singleton, since that would bypass ``_storage_lock``.
+    """
+    backend = _storage if _storage is not None else _build_backend()
+    return backend.public_url(key)
+
+
+def has_public_base_url() -> bool:
+    """Whether the active backend can produce a URL a client can fetch directly.
+
+    True only for the object stores with a ``*_PUBLIC_BASE_URL`` (a CDN or public
+    bucket domain that actually serves the object). **Never for local**: that
+    media volume is exposed only through nginx's internal X-Accel location -- by
+    design, since that is what makes ownership checks unbypassable -- so a
+    ``LOCAL_PUBLIC_BASE_URL``-derived link would dead-end on a 404.
+    """
+    if settings.STORAGE_BACKEND == "s3":
+        return bool(settings.S3_PUBLIC_BASE_URL)
+    if settings.STORAGE_BACKEND == "gcp":
+        return bool(settings.GCS_PUBLIC_BASE_URL)
+    return False
+
+
 async def upload_file(
     file_data: bytes,
     object_name: str,

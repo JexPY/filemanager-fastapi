@@ -19,6 +19,10 @@ async def _seed(store: InMemoryMetadataStore, owner: str, kind: str, key: str) -
         content_type="image/webp",
         size_bytes=1,
         status="ready",
+        # Matches what POST /upload/image actually records. The accelerator URLs
+        # (thumbnail_url/direct_url) are public-only, so seeding without this
+        # would exercise a shape the upload path never produces.
+        visibility="public",
     )
 
 

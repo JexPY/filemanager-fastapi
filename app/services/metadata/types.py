@@ -33,18 +33,12 @@ WEBHOOK_FAILED = "failed"
 
 
 def _build_imgproxy_url(storage_key: str, processing_options: str = "rs:auto") -> str:
-    from app.config import settings
-    from app.services.imgproxy import build_source_url, generate_signed_url
+    """Thin seam over the shared imgproxy helper, kept so this module's imports
+    stay lazy (see the module docstring: ``types`` is dependency-free at import
+    time so ``store`` and ``postgres`` can build on it without a cycle)."""
+    from app.services.imgproxy import signed_image_url
 
-    if settings.STORAGE_BACKEND == "local":
-        source_url = build_source_url(storage_key, "")
-    else:
-        from app.services.storage import _build_backend, _storage
-
-        backend = _storage if _storage is not None else _build_backend()
-        source_url = build_source_url(storage_key, backend.public_url(storage_key))
-
-    return generate_signed_url(source_url, processing_options=processing_options)
+    return signed_image_url(storage_key, processing_options=processing_options)
 
 
 @dataclass(frozen=True)
@@ -108,18 +102,32 @@ class UploadRecord:
         }
 
         if self.status == STATUS_READY:
+            from app.services.storage import has_public_base_url, public_object_url
             from app.urls import public_url
 
-            if self.kind == KIND_VIDEO:
-                data["url"] = public_url(f"/files/{self.id}/download")
-            elif self.kind == KIND_IMAGE:
-                data["url"] = _build_imgproxy_url(self.storage_key)
-                data["thumbnail_url"] = _build_imgproxy_url(
-                    self.storage_key, processing_options="rs:fill:300:300:0/g:no"
-                )
+            # ONE canonical URL, same for every kind. It is permanent and
+            # backend-agnostic: switching STORAGE_BACKEND, moving behind a CDN,
+            # or flipping visibility all leave it untouched, and it is the only
+            # URL here that resolves for a private record. Consumers should
+            # persist the record id and this URL, nothing else.
+            data["url"] = public_url(f"/files/{self.id}/download")
 
-            if self.poster_upload_id:
-                pkey = poster_storage_key or self.poster_storage_key or self.poster_upload_id
-                data["poster_url"] = _build_imgproxy_url(pkey)
+            # Everything below is an *accelerator*, not the address of record:
+            # a direct, no-redirect URL for LCP-sensitive embedding, and imgproxy
+            # renditions. All of it is public-only, because both forms are
+            # unexpiring bearer URLs with no ownership check -- a private record
+            # is reachable solely through the app route above.
+            if self.visibility == VISIBILITY_PUBLIC:
+                if has_public_base_url():
+                    data["direct_url"] = public_object_url(self.storage_key)
+
+                if self.kind == KIND_IMAGE:
+                    data["thumbnail_url"] = _build_imgproxy_url(
+                        self.storage_key, processing_options="rs:fill:300:300:0/g:no"
+                    )
+
+                if self.poster_upload_id:
+                    pkey = poster_storage_key or self.poster_storage_key or self.poster_upload_id
+                    data["poster_url"] = _build_imgproxy_url(pkey)
 
         return data

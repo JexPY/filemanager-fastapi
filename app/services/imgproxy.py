@@ -47,3 +47,42 @@ def build_source_url(key: str, url: str) -> str:
     if settings.STORAGE_BACKEND == "local":
         return f"local:///{key}"
     return url
+
+
+def public_source_url(key: str) -> str:
+    """The **durable** source URL for a stored object -- the only one safe to
+    embed in an imgproxy URL that is handed out as permanent.
+
+    Always the plain object URL, never a presigned one. That distinction is the
+    whole point: an imgproxy signature never expires, so embedding a presigned
+    source produces a URL that *looks* permanent and silently dies when the
+    signature does. The upload response used to build its URLs that way while
+    ``UploadRecord.to_public`` used the plain object URL, so the same image had
+    two different imgproxy URLs -- two CDN cache keys, one of them expiring.
+
+    Requires imgproxy to be able to fetch that URL: a public bucket or a CDN in
+    front of it (``*_PUBLIC_BASE_URL``). Private objects do not get a durable
+    imgproxy URL at all -- by design, since a permanent imgproxy URL is a
+    permanent bearer capability with no owner check.
+    """
+    if settings.STORAGE_BACKEND == "local":
+        # imgproxy reads the shared volume via its local:// scheme; there is no
+        # HTTP source URL to build, so skip resolving a backend entirely.
+        return build_source_url(key, "")
+    from app.services.storage import public_object_url
+
+    return build_source_url(key, public_object_url(key))
+
+
+def signed_image_url(
+    key: str, processing_options: str = "rs:auto", format: str | None = None
+) -> str:
+    """The one way to build an imgproxy URL for a stored object.
+
+    Every caller goes through here so the source-URL derivation cannot drift
+    apart again (see ``public_source_url``). Sync on purpose -- ``to_public`` is
+    sync, and resolving a durable source needs no I/O.
+    """
+    return generate_signed_url(
+        public_source_url(key), processing_options=processing_options, format=format
+    )

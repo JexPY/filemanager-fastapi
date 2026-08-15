@@ -6,14 +6,14 @@ from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 
 from app.routers.auth import _resolve_owner_optional, security
-from app.routers.utils import _public_playback_url_available, resolve_playback
+from app.routers.utils import resolve_playback
 from app.services.metadata import (
     KIND_VIDEO,
     VISIBILITY_PUBLIC,
     MetadataError,
     get_metadata_store,
 )
-from app.services.storage import StorageError, get_storage
+from app.services.storage import StorageError, get_storage, has_public_base_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -68,7 +68,7 @@ async def stream_video(
         # nginx's internal X-Accel location, so a 302 to LOCAL_PUBLIC_BASE_URL/<key>
         # would dead-end -- local public videos fall through to the tokenless
         # X-Accel path below (resolve_playback), same as private ones.
-        if _public_playback_url_available():
+        if has_public_base_url():
             backend = await get_storage()
             return RedirectResponse(
                 url=backend.public_url(record.storage_key), status_code=status.HTTP_302_FOUND

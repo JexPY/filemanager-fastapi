@@ -10,7 +10,7 @@ from fastapi import HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse, Response
 
 from app.config import settings
-from app.services.imgproxy import build_source_url, generate_signed_url
+from app.services.imgproxy import signed_image_url
 from app.services.storage import StorageError, get_storage
 
 # 499 is nginx's non-standard "client closed request" code, which is what the
@@ -89,24 +89,6 @@ def _sanitize_extension(filename: str) -> str:
     raw_ext = filename.rsplit(".", 1)[-1] if "." in filename else ""
     cleaned = _NON_ALNUM_RE.sub("", raw_ext.lower())[:_MAX_EXTENSION_LENGTH]
     return cleaned or "bin"
-
-
-def _public_playback_url_available() -> bool:
-    """Whether GET /files/{id}/download may 302 a *public* video straight to a
-    stable, directly-servable public_url(key) instead of X-Accel / presigning.
-
-    True only for the object-store backends (s3/gcp) with a *_PUBLIC_BASE_URL --
-    a CDN / public-bucket domain that actually serves the object. **Never for
-    local**: the media volume is exposed only through nginx's internal X-Accel
-    location (never a public path -- that's the visibility security property),
-    so a 302 to LOCAL_PUBLIC_BASE_URL/<key> would dead-end on a 404. Local public
-    videos are served tokenless via the same X-Accel path as private ones.
-    """
-    if settings.STORAGE_BACKEND == "s3":
-        return bool(settings.S3_PUBLIC_BASE_URL)
-    if settings.STORAGE_BACKEND == "gcp":
-        return bool(settings.GCS_PUBLIC_BASE_URL)
-    return False
 
 
 def _assert_safe_media_key(storage_key: str) -> None:
@@ -199,34 +181,38 @@ def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-async def _image_source_url(storage_key: str) -> str:
-    backend = await get_storage()
-    presigned_url = await backend.presigned_get_url(storage_key)
-    return build_source_url(storage_key, presigned_url or backend.public_url(storage_key))
-
-
 def _image_response(
     record_id: str,
     width: int | None,
     height: int | None,
     size_bytes: int | None,
-    source_url: str,
+    storage_key: str,
     custom_width: int | None = None,
     custom_height: int | None = None,
     custom_fit: str = "auto",
     custom_format: str | None = None,
 ) -> dict:
+    """Shape the POST /upload/image response.
+
+    Takes the storage *key*, not a pre-resolved source URL, so it derives its
+    imgproxy URLs through the same `signed_image_url` helper as
+    `UploadRecord.to_public`. It previously resolved its own source via
+    `presigned_get_url`, which meant the upload response and `GET /files/{id}`
+    handed out different imgproxy URLs for the same image -- two CDN cache keys,
+    and on s3/gcp the upload response's pair silently expired after an hour
+    despite looking permanent.
+    """
     response = {
         "status": "success",
         "id": record_id,
         "size_bytes": size_bytes,
         "size_mb": round(size_bytes / (1024 * 1024), 2) if size_bytes else None,
         "dimensions": {"width": width, "height": height},
-        "imgproxy_thumbnail_url": generate_signed_url(
-            source_url, processing_options="rs:fill:300:300", format="webp"
+        "imgproxy_thumbnail_url": signed_image_url(
+            storage_key, processing_options="rs:fill:300:300", format="webp"
         ),
-        "imgproxy_optimized_url": generate_signed_url(
-            source_url, processing_options="rs:auto", format="webp"
+        "imgproxy_optimized_url": signed_image_url(
+            storage_key, processing_options="rs:auto", format="webp"
         ),
     }
 
@@ -238,8 +224,8 @@ def _image_response(
         else:
             processing_options = f"rs:{custom_fit}:{cw}:{ch}"
 
-        response["imgproxy_custom_url"] = generate_signed_url(
-            source_url, processing_options=processing_options, format=custom_format
+        response["imgproxy_custom_url"] = signed_image_url(
+            storage_key, processing_options=processing_options, format=custom_format
         )
 
     return response

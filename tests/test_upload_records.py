@@ -112,9 +112,17 @@ async def test_upload_image_custom_imgproxy_url(
     assert body["imgproxy_custom_url"].endswith(".webp")
 
 
-async def test_to_public_returns_direct_imgproxy_url(
+async def test_to_public_url_is_the_canonical_route_for_every_kind(
     fake_metadata: InMemoryMetadataStore,
 ) -> None:
+    """`url` is the same shape for an image and a video: the app's own route.
+
+    It is the one URL that is permanent (a backend switch, a CDN change, or a
+    visibility flip do not touch it) and the one that resolves for a private
+    record. imgproxy URLs are a separate, additive, public-only accelerator --
+    they are never the canonical address, because an imgproxy URL is an
+    unexpiring bearer capability with no ownership check.
+    """
     image = await fake_metadata.create(
         owner=TEST_OWNER,
         kind="image",
@@ -122,16 +130,14 @@ async def test_to_public_returns_direct_imgproxy_url(
         content_type="image/webp",
         size_bytes=123,
         status="ready",
+        visibility="public",
     )
     public_data = image.to_public()
     assert "storage_key" not in public_data
     assert "content_hash" not in public_data
-    assert "url" in public_data
-    assert "/rs:auto/" in public_data["url"]
-    assert "/files/" not in public_data["url"]
-    assert "thumbnail_url" in public_data
+    assert public_data["url"].endswith(f"/files/{image.id}/download")
+    assert "/rs:auto/" not in public_data["url"]
     assert "/rs:fill:300:300:0/g:no/" in public_data["thumbnail_url"]
-    assert "/files/" not in public_data["thumbnail_url"]
 
     video = await fake_metadata.create(
         owner=TEST_OWNER,
@@ -140,11 +146,37 @@ async def test_to_public_returns_direct_imgproxy_url(
         content_type="video/mp4",
         size_bytes=456,
         status="ready",
+        visibility="public",
     )
     video_with_poster = await fake_metadata.set_poster(video.id, "poster_abc")
     assert video_with_poster is not None
     video_data = video_with_poster.to_public()
-    assert "poster_url" in video_data
+    # Identical canonical shape to the image above -- that is the point.
+    assert video_data["url"].endswith(f"/files/{video.id}/download")
     assert "/rs:auto/" in video_data["poster_url"]
     assert "/files/" not in video_data["poster_url"]
     assert video_data["poster_upload_id"] == "poster_abc"
+
+
+async def test_to_public_withholds_accelerator_urls_from_private_records(
+    fake_metadata: InMemoryMetadataStore,
+) -> None:
+    """A private record gets the canonical route and nothing else.
+
+    `thumbnail_url`/`direct_url` bypass the app entirely, so emitting either for
+    a private record would hand out a permanent, unauthenticated way to read it.
+    """
+    private = await fake_metadata.create(
+        owner=TEST_OWNER,
+        kind="image",
+        storage_key="images/secret.webp",
+        content_type="image/webp",
+        size_bytes=123,
+        status="ready",
+        visibility="private",
+    )
+    data = private.to_public()
+
+    assert data["url"].endswith(f"/files/{private.id}/download")
+    assert "thumbnail_url" not in data
+    assert "direct_url" not in data

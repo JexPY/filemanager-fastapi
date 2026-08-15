@@ -425,8 +425,22 @@ Opus; `webm_av1` uses SVT-AV1 + Opus.
 
 ### The record
 
-`GET /files/{id}` returns the full record. `url`, `thumbnail_url`, and `poster_url` appear
-only once `status` is `ready`; `share_token` is never included.
+`GET /files/{id}` returns the full record. The URL fields appear only once `status` is
+`ready`; `share_token` is never included.
+
+**`url` is the canonical address and has the same shape for every kind** — the
+`/files/{id}/download` route. It is permanent and backend-agnostic: switching
+`STORAGE_BACKEND`, moving behind a CDN, or flipping visibility all leave it untouched, and
+it is the only URL here that resolves for a `private` record.
+
+The rest are **accelerators, present only on `public` records**, because each is an
+unexpiring URL with no ownership check:
+
+| Field | What it is | When present |
+|---|---|---|
+| `direct_url` | The object's public/CDN URL — no redirect hop, no imgproxy | public, on `s3`/`gcp` with a `*_PUBLIC_BASE_URL` |
+| `thumbnail_url` | Signed imgproxy URL, 300×300 fill | public images |
+| `poster_url` | Signed imgproxy URL for a video's poster | public records with a poster |
 
 ```json
 {
@@ -449,14 +463,14 @@ only once `status` is `ready`; `share_token` is never included.
   "webhook_updated_at": "2026-08-15T09:12:44+00:00",
   "visibility": "public",
   "url": "https://media.example.com/files/0f1c2b7a.../download",
+  "direct_url": "https://cdn.example.com/videos/0f1c2b7a..._compressed.mp4",
   "poster_url": "https://media.example.com/imgproxy/<sig>/rs:auto/<src>",
   "created_at": "2026-08-15T09:11:02+00:00",
   "updated_at": "2026-08-15T09:12:40+00:00"
 }
 ```
 
-For an image record, `url` and `thumbnail_url` are signed imgproxy URLs instead of a
-download route. `GET /files` wraps a page of these as
+`GET /files` wraps a page of these as
 `{"files": [...], "total_count": N, "limit": L, "offset": O}` — `total_count` is the owner's
 full match count, so a client can size its pager without walking every page.
 
@@ -859,11 +873,12 @@ Deliberate boundaries, stated plainly rather than discovered later:
 - **Image uploads are fully buffered in memory** by design, bounded by
   `MAX_IMAGE_UPLOAD_BYTES`. Video upload and worker processing stream to and from disk with
   bounded memory on every backend.
-- **Image imgproxy URLs are not equally durable across responses.** On s3/gcp the URLs in the
-  `POST /upload/image` response embed a *presigned* source URL that expires after an hour,
-  while the `url` / `thumbnail_url` on `GET /files/{id}` embed the plain object URL. Prefer
-  the record's URLs for anything you persist, and make sure imgproxy can actually reach that
-  object URL (a public bucket or a CDN in front of it).
+- **imgproxy needs a fetchable source.** Its URLs embed the object's *plain* public URL,
+  never a presigned one — an imgproxy signature does not expire, so a presigned source would
+  produce a URL that looks permanent and quietly dies. The consequence is that imgproxy
+  renditions require a public bucket or a CDN in front of it (`*_PUBLIC_BASE_URL`), and are
+  therefore offered only for `public` records. A private record is reachable solely through
+  `GET /files/{id}/download`.
 - **Dedup is best-effort.** Two genuinely simultaneous identical uploads can both slip
   through; there is no unique constraint behind it. The same is true of two simultaneous
   poster requests, where the loser becomes a harmless standalone image row.

@@ -22,7 +22,6 @@ from app.config import settings
 from app.routers.auth import require_scopes
 from app.routers.utils import (
     _image_response,
-    _image_source_url,
     _read_capped,
     _sanitize_extension,
     _sha256_hex,
@@ -105,13 +104,12 @@ async def _process_single_image(
             logger.warning("Idempotency lookup failed (processing normally): %s", exc)
             existing = None
         if existing is not None:
-            source_url = await _image_source_url(existing.storage_key)
             return _image_response(
                 existing.id,
                 existing.width,
                 existing.height,
                 existing.size_bytes,
-                source_url,
+                existing.storage_key,
                 custom_width=imgproxy_width,
                 custom_height=imgproxy_height,
                 custom_fit=imgproxy_fit,
@@ -208,13 +206,12 @@ async def _store_and_record_image(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Upload could not be completed"
         ) from exc
 
-    source_url = await _image_source_url(obj.key)
     return _image_response(
         record.id,
         record.width,
         record.height,
         record.size_bytes,
-        source_url,
+        obj.key,
         custom_width=imgproxy_width,
         custom_height=imgproxy_height,
         custom_fit=imgproxy_fit,
