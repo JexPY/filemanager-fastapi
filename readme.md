@@ -897,10 +897,21 @@ but invisible under a default local `up`. To verify one, inspect the running con
 
 ## Limits and scope
 
+> **Coming: arbitrary file kinds (PDF, audio, and anything else).** Ingest is still
+> image-and-video only — `POST /upload/image` and `POST /upload/video` are the only doors in.
+> Everything *after* ingest is already kind-agnostic, though: storage keys, the access ladder,
+> `GET /files/{id}/download`, visibility, share links, `read:file` grants, listing, and
+> deletion contain no reference to `kind` at all. So the remaining work is a generic
+> `POST /upload/file` that stores bytes with a validated content type and no processing
+> pipeline — not a second serving path. Optional per-kind derivations (a PDF's first-page
+> preview, say) would land as ordinary linked image records, exactly as video posters do now.
+
 Deliberate boundaries, stated plainly rather than discovered later:
 
 - **Not a general file host.** No cross-owner listing, no search, no public index. Deletion
   is explicit and irreversible.
+- **Ingest is image and video only** — see the note above; the serving side is already
+  kind-agnostic.
 - **Progressive playback only.** HTTP Range works everywhere; HLS and adaptive bitrate are
   out of scope.
 - **Video output is trimmed to `VIDEO_MAX_DURATION_SECONDS` (60 s by default).** The service
