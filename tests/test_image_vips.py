@@ -7,23 +7,19 @@ from tests.conftest import fixture_bytes
 
 def test_accepts_valid_png() -> None:
     data, content_type, width, height, renditions = validate_and_strip_image(
-        fixture_bytes("tiny.png")
+        fixture_bytes("tiny.png"), generate_renditions=True
     )
     assert content_type == "image/webp"
     assert width == 8
     assert height == 8
     assert data[:4] == b"RIFF"  # webp container signature
     assert "thumbnail" in renditions
-    assert "medium" in renditions
     assert renditions["thumbnail"][:4] == b"RIFF"
-    assert renditions["medium"][:4] == b"RIFF"
+    assert "medium" not in renditions
 
 
 def test_generate_renditions_false_skips_rendition_work() -> None:
-    """Video poster generation reuses this function for its frame -> WebP
-    encode but never persists a rendition -- without this opt-out, every
-    poster job would materialize (and immediately discard) both a thumbnail
-    and a medium encode for nothing."""
+    """generate_renditions=False skips rendition generation entirely."""
     _, _, _, _, renditions = validate_and_strip_image(
         fixture_bytes("tiny.png"), generate_renditions=False
     )

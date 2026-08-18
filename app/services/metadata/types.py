@@ -124,10 +124,14 @@ class UploadRecord:
                     data["direct_url"] = public_object_url(self.storage_key)
 
                 if self.kind == KIND_IMAGE:
-                    from app.services.renditions import derive_medium_url, derive_thumbnail_url
+                    from app.services.renditions import derive_thumbnail_url
 
-                    data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, self.renditions)
-                    data["medium_url"] = derive_medium_url(self.storage_key, self.renditions)
+                    if self.renditions and "thumbnail" in self.renditions:
+                        data["thumbnail_url"] = derive_thumbnail_url(
+                            self.storage_key, self.renditions
+                        )
+                    elif self.renditions is None:
+                        data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, None)
 
                 if self.poster_upload_id:
                     # `pkey` is a *storage key*, never the bare poster record

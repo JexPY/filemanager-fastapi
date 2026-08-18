@@ -46,6 +46,10 @@ class ImageUploadResponse(BaseModel):
         description="Stored size in megabytes, rounded to 2dp (null for a 0-byte object)",
     )
     dimensions: ImageDimensions
+    url: str | None = Field(
+        default=None,
+        description="The canonical download URL: GET /files/{id}/download",
+    )
     direct_url: str | None = Field(
         default=None,
         description="The stored object's plain object/CDN URL (full size, no crop, no "
@@ -57,26 +61,14 @@ class ImageUploadResponse(BaseModel):
         default=None,
         description="Same value and resolution as GET /files/{id}'s thumbnail_url: the "
         "materialized 300x300 fill thumbnail's direct object/CDN URL, or a signed imgproxy "
-        "URL when no public base URL is configured. Public uploads only.",
+        "URL (with extension) when no public base URL is configured. Present when thumbnail "
+        "is requested on public uploads.",
     )
-    medium_url: str | None = Field(
+    custom_url: str | None = Field(
         default=None,
-        description="Same value and resolution as GET /files/{id}'s medium_url: the "
-        "materialized, aspect-preserving (not cropped) rendition bounded to 960x720. "
-        "Public uploads only.",
-    )
-    imgproxy_thumbnail_url: str | None = Field(
-        default=None,
-        description="Kept for backward compatibility -- identical value to thumbnail_url "
-        "above now that every upload materializes a rendition (this field predates that and "
-        "was, at the time, always a live imgproxy URL). **Public uploads only** — an imgproxy "
-        "URL carries no ownership check and never expires, so a `private` upload omits it and "
-        "is readable solely through GET /files/{id}/download?rendition=thumb.",
-    )
-    imgproxy_custom_url: str | None = Field(
-        default=None,
-        description="Signed imgproxy URL for the requested custom width/height/fit/format; "
-        "present only when custom transform parameters were supplied on a public upload",
+        description="Signed imgproxy URL (with extension) for the requested custom "
+        "width/height/fit/format; present only when custom transform parameters were "
+        "supplied on a public upload",
     )
 
 
@@ -199,15 +191,7 @@ class FileRecord(BaseModel):
         description=(
             "Public URL for a 300x300 fill thumbnail. On object stores with a public base URL "
             "configured, this is a direct CDN/object read of the materialized rendition; "
-            "otherwise signed imgproxy URL. Public images only."
-        ),
-    )
-    medium_url: str | None = Field(
-        default=None,
-        description=(
-            "Public URL for a medium, aspect-preserving rendition (bounded to 960x720, not "
-            "cropped -- right for a grid card or gallery view of a landscape photo). Same "
-            "materialized-object-first resolution as thumbnail_url. Public images only."
+            "otherwise signed imgproxy URL (with extension). Public images only."
         ),
     )
     poster_url: str | None = Field(

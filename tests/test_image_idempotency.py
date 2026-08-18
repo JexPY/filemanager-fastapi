@@ -31,9 +31,9 @@ async def test_reupload_of_identical_bytes_is_deduplicated(
     )
 
     assert first.status_code == second.status_code == 200
-    # Same record id returned; exactly one image (main + thumbnail) exists.
+    # Same record id returned; exactly one image exists.
     assert first.json()["id"] == second.json()["id"]
-    assert len(_stored_images(fake_storage)) == 3  # main image + thumbnail + medium renditions
+    assert len(_stored_images(fake_storage)) == 1  # main image (no thumbnail requested)
     assert len(await fake_metadata.list(OWNER)) == 1
     # The deduplicated response is fully shaped, dimensions included.
     assert second.json()["dimensions"] == {"width": 8, "height": 8}
@@ -57,7 +57,7 @@ async def test_distinct_images_are_not_deduplicated(
     )
 
     assert png.json()["id"] != jpg.json()["id"]
-    assert len(_stored_images(fake_storage)) == 6  # 2 main + 2 thumbnails + 2 mediums
+    assert len(_stored_images(fake_storage)) == 2  # 2 main images
     assert len(await fake_metadata.list(OWNER)) == 2
 
 
@@ -83,6 +83,6 @@ async def test_dedup_is_scoped_to_the_owner(
 
     # Same bytes, different owners -> two separate objects and records, no
     # cross-tenant dedup.
-    assert len(_stored_images(fake_storage)) == 6  # 2 main + 2 thumbnails + 2 mediums
+    assert len(_stored_images(fake_storage)) == 2  # 2 main images
     assert len(await fake_metadata.list("alice")) == 1
     assert len(await fake_metadata.list("bob")) == 1

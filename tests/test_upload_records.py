@@ -99,37 +99,34 @@ async def test_upload_image_custom_imgproxy_url(
         headers={"Authorization": "Bearer test-token"},
         files={"file": ("tiny.png", png, "image/png")},
         data={
-            "imgproxy_width": 1024,
-            "imgproxy_height": 768,
-            "imgproxy_fit": "fill",
-            "imgproxy_format": "webp",
+            "width": 1024,
+            "height": 768,
+            "fit": "fill",
+            "format": "webp",
         },
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert "imgproxy_custom_url" in body
-    assert "/rs:fill:1024:768/" in body["imgproxy_custom_url"]
-    assert body["imgproxy_custom_url"].endswith(".webp")
+    assert "custom_url" in body
+    assert "/rs:fill:1024:768/" in body["custom_url"]
+    assert body["custom_url"].endswith(".webp")
 
 
 async def test_upload_image_no_custom_url_for_a_no_op_format_request(
     client: httpx.AsyncClient,
 ) -> None:
-    """imgproxy_format="webp" alone (no width/height/fit) is not a real
-    customization -- every processed image is already stored as webp, so
-    this used to trigger a pointless fourth URL: a live imgproxy round trip
-    that re-fetches and re-encodes the already-webp original for zero actual
-    change. Observed via Swagger UI's "Try it out" form, which sends its own
-    default imgproxy_format=webp even when width/height are left blank."""
+    """format="webp" alone (no width/height/fit) is not a real customization --
+    every processed image is already stored as webp, so this avoids a pointless
+    extra URL."""
     png = fixture_bytes("tiny.png")
     resp = await client.post(
         "/upload/image",
         headers={"Authorization": "Bearer test-token"},
         files={"file": ("tiny.png", png, "image/png")},
-        data={"imgproxy_fit": "auto", "imgproxy_format": "webp"},
+        data={"fit": "auto", "format": "webp"},
     )
     assert resp.status_code == 200
-    assert "imgproxy_custom_url" not in resp.json()
+    assert "custom_url" not in resp.json()
 
 
 async def test_to_public_url_is_the_canonical_route_for_every_kind(

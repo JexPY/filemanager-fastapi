@@ -12,8 +12,9 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from app.config import settings
 from app.services.file_validation import MIME_OCTET_STREAM, get_content_disposition_type
 from app.services.imgproxy import signed_image_url
-from app.services.renditions import derive_medium_url, derive_thumbnail_url
+from app.services.renditions import derive_thumbnail_url
 from app.services.storage import StorageError, get_storage, has_public_base_url, public_object_url
+from app.urls import public_url
 
 # 499 is nginx's non-standard "client closed request" code, which is what the
 # edge proxy in front of this app already logs for an abandoned upload. Starlette
@@ -277,6 +278,7 @@ def _image_response(
         "size_bytes": size_bytes,
         "size_mb": round(size_bytes / (1024 * 1024), 2) if size_bytes else None,
         "dimensions": {"width": width, "height": height},
+        "url": public_url(f"/files/{record_id}/download"),
     }
     if visibility != "public":
         return response
@@ -284,11 +286,8 @@ def _image_response(
     if has_public_base_url():
         response["direct_url"] = public_object_url(storage_key)
 
-    thumbnail_url = derive_thumbnail_url(storage_key, renditions)
-    response["thumbnail_url"] = thumbnail_url
-    response["medium_url"] = derive_medium_url(storage_key, renditions)
-    # Kept for backward compatibility -- see the schema field's docstring.
-    response["imgproxy_thumbnail_url"] = thumbnail_url
+    if renditions and "thumbnail" in renditions:
+        response["thumbnail_url"] = derive_thumbnail_url(storage_key, renditions)
 
     # A processed image is *always* stored as webp (image_vips.py's
     # validate_and_strip_image encodes to .webp unconditionally), so
@@ -296,8 +295,8 @@ def _image_response(
     # all -- it's a no-op imgproxy round trip that re-fetches and re-encodes
     # the already-webp original for zero actual change. A client (or, as
     # observed, Swagger UI's "Try it out" form) that leaves width/height
-    # blank but still sends the form's own default imgproxy_format=webp used
-    # to trigger this branch and get a redundant fourth URL for nothing.
+    # blank but still sends the form's own default format=webp used to
+    # trigger this branch and get a redundant custom URL for nothing.
     requests_format_change = custom_format is not None and custom_format != "webp"
     if custom_width or custom_height or requests_format_change or custom_fit != "auto":
         cw = custom_width or 0
@@ -307,8 +306,8 @@ def _image_response(
         else:
             processing_options = f"rs:{custom_fit}:{cw}:{ch}"
 
-        response["imgproxy_custom_url"] = signed_image_url(
-            storage_key, processing_options=processing_options, format=custom_format
+        response["custom_url"] = signed_image_url(
+            storage_key, processing_options=processing_options, format=custom_format or "webp"
         )
 
     return response

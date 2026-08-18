@@ -42,18 +42,14 @@ def sniff_format(data: bytes) -> str | None:
 
 
 def validate_and_strip_image(
-    file_data: bytes, optimization: str = "balanced", *, generate_renditions: bool = True
+    file_data: bytes, optimization: str = "balanced", *, generate_renditions: bool = False
 ) -> tuple[bytes, str, int, int, dict[str, bytes]]:
     """Load image using pyvips, strip metadata (EXIF), generate materialized
-    renditions (thumbnail + medium) in the same pass, and return the optimized
-    bytes along with detected format, dimensions, and renditions buffers.
+    thumbnail rendition if requested, and return the optimized bytes along with
+    detected format, dimensions, and renditions buffers.
 
-    `generate_renditions=False` skips that pass entirely (returning an empty
-    dict in its place) for a caller that has no use for renditions -- video
-    poster generation reuses this exact function for its own frame -> WebP
-    encode but never persists a poster rendition, so without this the two
-    materialized encodes (a 300x300 crop and a 960x720 fit, the latter
-    non-trivial CPU) would run and be thrown away on every single poster job.
+    `generate_renditions=False` skips rendition generation (returning an empty
+    dict in its place) when the caller does not request a thumbnail.
     """
     if sniff_format(file_data) is None:
         raise ImageValidationError("Unsupported or unrecognized image format")

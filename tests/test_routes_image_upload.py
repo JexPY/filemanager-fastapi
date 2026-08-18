@@ -13,6 +13,7 @@ from tests.fakes import InMemoryMetadataStore, InMemoryStorageBackend
 async def test_valid_image_upload_succeeds(
     client: httpx.AsyncClient, auth_headers: dict[str, str]
 ) -> None:
+    # Default upload: thumbnail=False, returns canonical url and no thumbnail_url
     resp = await client.post(
         "/upload/image",
         headers=auth_headers,
@@ -23,8 +24,22 @@ async def test_valid_image_upload_succeeds(
     assert body["status"] == "success"
     assert body["id"]  # a metadata record id the client can list/get/delete by
     assert body["dimensions"] == {"width": 8, "height": 8}
-    assert "imgproxy_thumbnail_url" in body
-    assert "imgproxy_optimized_url" not in body
+    assert "url" in body
+    assert body["url"].endswith(f"/files/{body['id']}/download")
+    assert "thumbnail_url" not in body
+    assert "imgproxy_thumbnail_url" not in body
+    assert "medium_url" not in body
+
+    # Upload with ?thumbnail=true returns thumbnail_url with .webp extension
+    resp_thumb = await client.post(
+        "/upload/image?thumbnail=true",
+        headers=auth_headers,
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp_thumb.status_code == 200
+    body_thumb = resp_thumb.json()
+    assert "thumbnail_url" in body_thumb
+    assert body_thumb["thumbnail_url"].endswith(".webp")
 
 
 def _decode_imgproxy_source(imgproxy_url: str) -> str:
@@ -44,11 +59,11 @@ async def test_source_is_local_scheme_for_local_backend(
     # source is no longer returned directly (raw_url was dropped); it survives
     # only b64-embedded in the signed imgproxy URLs, so assert it there.
     resp = await client.post(
-        "/upload/image",
+        "/upload/image?thumbnail=true",
         headers=auth_headers,
         files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
     )
-    source = _decode_imgproxy_source(resp.json()["imgproxy_thumbnail_url"])
+    source = _decode_imgproxy_source(resp.json()["thumbnail_url"])
     assert source.startswith("local:///images/")
     assert "X-Amz-Signature" not in source
 
@@ -77,14 +92,14 @@ async def test_imgproxy_source_is_never_presigned_and_matches_the_record(
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.post(
-            "/upload/image",
+            "/upload/image?thumbnail=true",
             headers=auth_headers,
             files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
         )
     assert resp.status_code == 200
     body = resp.json()
 
-    source = _decode_imgproxy_source(body["imgproxy_thumbnail_url"])
+    source = _decode_imgproxy_source(body["thumbnail_url"])
     assert "X-Amz-Signature" not in source, "a presigned source would expire under a permanent URL"
     assert source == "http://fake-storage/images/" + source.rsplit("/", 1)[-1]
 
