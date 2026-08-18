@@ -93,16 +93,26 @@ def validate_and_strip_image(
                 smart_subsample=True,
             )
 
-    # Determine quality and max dimension based on optimization profile
+    # Determine quality, max dimension, and encode effort based on
+    # optimization profile. Only "quality" pays libwebp's effort=6 (its
+    # slowest, most exhaustive compression search) -- "size" and "balanced"
+    # (the default, and what the vast majority of uploads use) get effort=4,
+    # the same trade made for materialized renditions above: a little file
+    # size for a large, synchronous-request-latency win. A caller that
+    # explicitly asked for "quality" is opting into the slower encode; one
+    # that didn't shouldn't pay for it by default.
     if optimization == "size":
         q_value = 65
         max_dim = 1280
+        effort = 4
     elif optimization == "quality":
         q_value = 95
         max_dim = 3840
+        effort = 6
     else:  # "balanced"
         q_value = 85
         max_dim = 1920
+        effort = 4
 
     if width > max_dim or height > max_dim:
         scale = min(max_dim / width, max_dim / height)
@@ -112,9 +122,8 @@ def validate_and_strip_image(
 
     # Write to optimized webp format. strip=True removes ALL metadata
     # (EXIF/GPS, ICC profile, XMP) on output in a single call.
-    # effort=6 maximizes compression efficiency (smallest size for given Q).
     # smart_subsample=True improves color sharpness for high contrast edges.
     optimized_buffer = image.write_to_buffer(
-        ".webp", Q=q_value, strip=True, effort=6, smart_subsample=True
+        ".webp", Q=q_value, strip=True, effort=effort, smart_subsample=True
     )
     return optimized_buffer, "image/webp", width, height, renditions

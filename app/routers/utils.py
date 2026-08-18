@@ -290,7 +290,16 @@ def _image_response(
     # Kept for backward compatibility -- see the schema field's docstring.
     response["imgproxy_thumbnail_url"] = thumbnail_url
 
-    if custom_width or custom_height or custom_format or custom_fit != "auto":
+    # A processed image is *always* stored as webp (image_vips.py's
+    # validate_and_strip_image encodes to .webp unconditionally), so
+    # custom_format="webp" with no width/height/fit is not a customization at
+    # all -- it's a no-op imgproxy round trip that re-fetches and re-encodes
+    # the already-webp original for zero actual change. A client (or, as
+    # observed, Swagger UI's "Try it out" form) that leaves width/height
+    # blank but still sends the form's own default imgproxy_format=webp used
+    # to trigger this branch and get a redundant fourth URL for nothing.
+    requests_format_change = custom_format is not None and custom_format != "webp"
+    if custom_width or custom_height or requests_format_change or custom_fit != "auto":
         cw = custom_width or 0
         ch = custom_height or 0
         if cw == 0 and ch == 0:
