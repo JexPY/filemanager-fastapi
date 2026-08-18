@@ -78,6 +78,8 @@ def validate_and_strip_image(
     # libvips pass as the main encode. crop=CENTRE fill-crops to an exact box
     # (matching imgproxy's rs:fill); crop=NONE fits *within* the box instead,
     # preserving aspect ratio so a landscape photo keeps its full frame.
+    # Each rendition uses its own (lower) `effort` -- see RenditionSpec's
+    # docstring on that field for why this must not be the main encode's 6.
     renditions: dict[str, bytes] = {}
     if generate_renditions:
         for spec in RENDITION_SPECS.values():
@@ -87,7 +89,7 @@ def validate_and_strip_image(
                 f".{spec.format}",
                 Q=spec.quality,
                 strip=True,
-                effort=6,
+                effort=spec.effort,
                 smart_subsample=True,
             )
 

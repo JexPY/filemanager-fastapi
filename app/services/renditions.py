@@ -25,6 +25,15 @@ class RenditionSpec:
     mime_type: str = "image/webp"
     quality: int = 80
     crop: bool = True
+    # libwebp's compression-effort search, 0 (fastest) to 6 (slowest, smallest
+    # file). 6 is the right choice for the *primary* encode (a one-time cost
+    # for the asset people actually view/embed) but the wrong default for a
+    # materialized rendition: these are accelerators generated synchronously
+    # on every upload, and effort=6 on a real photo -- not the tiny test
+    # fixtures -- is genuinely slow (libwebp's own benchmarks put 4->6 at
+    # roughly 2-4x slower for a low-single-digit-percent size gain). 4 trades
+    # a little file size for a large, worthwhile speed win here.
+    effort: int = 4
 
 
 RENDITION_SPECS: dict[str, RenditionSpec] = {
@@ -37,6 +46,7 @@ RENDITION_SPECS: dict[str, RenditionSpec] = {
         mime_type="image/webp",
         quality=80,
         crop=True,
+        effort=4,
     ),
     # A larger, aspect-preserving rendition for grid cards / gallery views --
     # deliberately not center-cropped, since a square crop cuts the front or
@@ -51,6 +61,7 @@ RENDITION_SPECS: dict[str, RenditionSpec] = {
         mime_type="image/webp",
         quality=82,
         crop=False,
+        effort=4,
     ),
 }
 
