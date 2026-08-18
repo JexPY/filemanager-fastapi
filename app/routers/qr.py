@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, Upl
 
 from app.config import settings
 from app.routers.auth import verify_token
+from app.services.file_validation import MIME_IMAGE_PNG
 from app.services.qr_generator import (
     InvalidLogoError,
     generate_epc_qr,
@@ -25,7 +26,26 @@ _IBAN_RE = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$")
 
 _SCALE_DESC = "QR code pixel scale factor (1 to 20, default 10)"
 _LOGO_DESC = "Optional logo image overlay."
-_MEDIA_TYPE_PNG = "image/png"
+_FORMAT_DESC = "Output format: 'png' or 'svg' (default 'png')"
+_ALLOWED_FORMATS = {"png", "svg"}
+_MEDIA_TYPES = {
+    # "image/svg+xml" has no shared constant: file_validation.py deliberately
+    # treats it as a dangerous *upload* format (XXE/entity-expansion risk),
+    # so it isn't given a "safe" named constant there. This SVG is generated
+    # here, not uploaded, so that risk doesn't apply.
+    "png": MIME_IMAGE_PNG,
+    "svg": "image/svg+xml",
+}
+
+
+def _validate_format(format: str) -> str:
+    fmt = format.lower().strip()
+    if fmt not in _ALLOWED_FORMATS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid format. Supported formats: png, svg",
+        )
+    return fmt
 
 
 async def _run_qr_generator(func, *args, **kwargs) -> bytes:
@@ -43,16 +63,24 @@ async def _run_qr_generator(func, *args, **kwargs) -> bytes:
         ) from exc
 
 
-async def _read_logo_capped(
-    logo: UploadFile | None, max_bytes: int = settings.MAX_QR_LOGO_BYTES
-) -> bytes | None:
+async def _read_logo_capped(logo: UploadFile | None, max_bytes: int | None = None) -> bytes | None:
+    # `max_bytes` is resolved from `settings` *inside* the body, not as a
+    # parameter default -- a default expression is evaluated once, at
+    # function-definition (import) time, and would freeze whatever
+    # MAX_QR_LOGO_BYTES held then. Every sibling cap (MAX_IMAGE_UPLOAD_BYTES,
+    # MAX_VIDEO_UPLOAD_BYTES, ...) is read fresh at its call site for exactly
+    # this reason: it's what makes `monkeypatch.setattr(settings, ...)` in
+    # tests actually take effect.
     if logo is None:
         return None
-    data = await logo.read(max_bytes + 1)
-    if len(data) > max_bytes:
+    cap = max_bytes if max_bytes is not None else settings.MAX_QR_LOGO_BYTES
+    data = await logo.read(cap + 1)
+    if not data:
+        return None
+    if len(data) > cap:
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=f"Logo exceeds {max_bytes} bytes",
+            detail=f"Logo exceeds {cap} bytes",
         )
     return data
 
@@ -62,7 +90,7 @@ async def _read_logo_capped(
     tags=["QR Codes"],
     summary="Generate QR code",
     description=(
-        "Generate a high-resolution QR code PNG with optional centered logo overlay. "
+        "Generate a QR code (PNG raster or SVG vector) with optional centered logo overlay. "
         "Accepted logo image formats: PNG, JPEG, GIF, WebP, HEIC (SVG is rejected for security)."
     ),
     dependencies=[Depends(verify_token)],
@@ -74,16 +102,18 @@ async def generate_qrcode(
         description="Text or URL to encode in the QR code",
     ),
     scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
+    format: str = Form("png", description=_FORMAT_DESC),
     logo: UploadFile | None = File(
         None,
         description="Optional logo image overlay. Accepted formats: PNG, JPEG, GIF, WebP, HEIC.",
     ),
 ):
+    fmt = _validate_format(format)
     logo_bytes = await _read_logo_capped(logo)
-    png_data = await _run_qr_generator(
-        generate_qr_image, content, scale=scale, logo_bytes=logo_bytes
+    qr_data = await _run_qr_generator(
+        generate_qr_image, content, scale=scale, logo_bytes=logo_bytes, output_format=fmt
     )
-    return Response(content=png_data, media_type=_MEDIA_TYPE_PNG)
+    return Response(content=qr_data, media_type=_MEDIA_TYPES[fmt])
 
 
 @router.post(
@@ -100,6 +130,7 @@ async def generate_qrcode_vcard(
     email: str | None = Form(None, description="Email address"),
     url: str | None = Form(None, description="Website URL"),
     scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
+    format: str = Form("png", description=_FORMAT_DESC),
     logo: UploadFile | None = File(None, description=_LOGO_DESC),
 ):
     if not name.strip():
@@ -109,8 +140,9 @@ async def generate_qrcode_vcard(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid email address format"
         )
 
+    fmt = _validate_format(format)
     logo_bytes = await _read_logo_capped(logo)
-    png_data = await _run_qr_generator(
+    qr_data = await _run_qr_generator(
         generate_vcard_qr,
         name=name.strip(),
         displayname=displayname.strip() if displayname else None,
@@ -119,8 +151,9 @@ async def generate_qrcode_vcard(
         url=url.strip() if url else None,
         scale=scale,
         logo_bytes=logo_bytes,
+        output_format=fmt,
     )
-    return Response(content=png_data, media_type=_MEDIA_TYPE_PNG)
+    return Response(content=qr_data, media_type=_MEDIA_TYPES[fmt])
 
 
 @router.post(
@@ -136,6 +169,7 @@ async def generate_qrcode_mecard(
     email: str | None = Form(None, description="Email address"),
     url: str | None = Form(None, description="Website URL"),
     scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
+    format: str = Form("png", description=_FORMAT_DESC),
     logo: UploadFile | None = File(None, description=_LOGO_DESC),
 ):
     if not name.strip():
@@ -145,8 +179,9 @@ async def generate_qrcode_mecard(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid email address format"
         )
 
+    fmt = _validate_format(format)
     logo_bytes = await _read_logo_capped(logo)
-    png_data = await _run_qr_generator(
+    qr_data = await _run_qr_generator(
         generate_mecard_qr,
         name=name.strip(),
         email=email.strip() if email else None,
@@ -154,8 +189,9 @@ async def generate_qrcode_mecard(
         url=url.strip() if url else None,
         scale=scale,
         logo_bytes=logo_bytes,
+        output_format=fmt,
     )
-    return Response(content=png_data, media_type=_MEDIA_TYPE_PNG)
+    return Response(content=qr_data, media_type=_MEDIA_TYPES[fmt])
 
 
 @router.post(
@@ -171,6 +207,7 @@ async def generate_qrcode_wifi(
     security: str | None = Form("WPA", description="Security type: WPA, WEP, or nopass"),
     hidden: bool = Form(False, description="True if hidden network SSID"),
     scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
+    format: str = Form("png", description=_FORMAT_DESC),
     logo: UploadFile | None = File(None, description=_LOGO_DESC),
 ):
     if not ssid.strip():
@@ -181,8 +218,9 @@ async def generate_qrcode_wifi(
             detail="Invalid security type. Use WPA, WEP, or nopass",
         )
 
+    fmt = _validate_format(format)
     logo_bytes = await _read_logo_capped(logo)
-    png_data = await _run_qr_generator(
+    qr_data = await _run_qr_generator(
         generate_wifi_qr,
         ssid=ssid.strip(),
         password=password if password else None,
@@ -190,8 +228,9 @@ async def generate_qrcode_wifi(
         hidden=hidden,
         scale=scale,
         logo_bytes=logo_bytes,
+        output_format=fmt,
     )
-    return Response(content=png_data, media_type=_MEDIA_TYPE_PNG)
+    return Response(content=qr_data, media_type=_MEDIA_TYPES[fmt])
 
 
 @router.post(
@@ -209,17 +248,20 @@ async def generate_qrcode_geo(
         ..., ge=-180.0, le=180.0, description="Longitude coordinate (-180.0 to 180.0)"
     ),
     scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
+    format: str = Form("png", description=_FORMAT_DESC),
     logo: UploadFile | None = File(None, description=_LOGO_DESC),
 ):
+    fmt = _validate_format(format)
     logo_bytes = await _read_logo_capped(logo)
-    png_data = await _run_qr_generator(
+    qr_data = await _run_qr_generator(
         generate_geo_qr,
         lat=lat,
         lng=lng,
         scale=scale,
         logo_bytes=logo_bytes,
+        output_format=fmt,
     )
-    return Response(content=png_data, media_type=_MEDIA_TYPE_PNG)
+    return Response(content=qr_data, media_type=_MEDIA_TYPES[fmt])
 
 
 @router.post(
@@ -239,6 +281,7 @@ async def generate_qrcode_epc(
         None, max_length=140, description="Remittance / payment reference text"
     ),
     scale: int = Form(10, ge=1, le=20, description=_SCALE_DESC),
+    format: str = Form("png", description=_FORMAT_DESC),
     logo: UploadFile | None = File(None, description=_LOGO_DESC),
 ):
     if not name.strip():
@@ -251,8 +294,9 @@ async def generate_qrcode_epc(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid SEPA IBAN format"
         )
 
+    fmt = _validate_format(format)
     logo_bytes = await _read_logo_capped(logo)
-    png_data = await _run_qr_generator(
+    qr_data = await _run_qr_generator(
         generate_epc_qr,
         name=name.strip(),
         iban=normalized_iban,
@@ -260,5 +304,6 @@ async def generate_qrcode_epc(
         text=text.strip() if text else None,
         scale=scale,
         logo_bytes=logo_bytes,
+        output_format=fmt,
     )
-    return Response(content=png_data, media_type=_MEDIA_TYPE_PNG)
+    return Response(content=qr_data, media_type=_MEDIA_TYPES[fmt])

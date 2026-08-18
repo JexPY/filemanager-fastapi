@@ -520,7 +520,7 @@ does not rotate keys.
 | `GET` | `/healthz` | None | Liveness probe (returns 200 OK when web process is responding). |
 | `GET` | `/readyz` | None | Readiness probe. Validates live round-trips to Redis and PostgreSQL, plus storage initialization (returns 503 on dependency failure). |
 
-All QR endpoints support optional image logo overlays (`logo` form field) and custom `scale` (1–20).
+All QR endpoints support optional image logo overlays (`logo` form field), output format selection (`format=png` [default] or `format=svg`), and custom `scale` (1–20).
 
 ---
 
