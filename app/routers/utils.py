@@ -12,8 +12,8 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from app.config import settings
 from app.services.file_validation import MIME_OCTET_STREAM, get_content_disposition_type
 from app.services.imgproxy import signed_image_url
-from app.services.renditions import derive_thumbnail_url
-from app.services.storage import StorageError, get_storage
+from app.services.renditions import derive_medium_url, derive_thumbnail_url
+from app.services.storage import StorageError, get_storage, has_public_base_url, public_object_url
 
 # 499 is nginx's non-standard "client closed request" code, which is what the
 # edge proxy in front of this app already logs for an abandoned upload. Starlette
@@ -281,7 +281,14 @@ def _image_response(
     if visibility != "public":
         return response
 
-    response["imgproxy_thumbnail_url"] = derive_thumbnail_url(storage_key, renditions)
+    if has_public_base_url():
+        response["direct_url"] = public_object_url(storage_key)
+
+    thumbnail_url = derive_thumbnail_url(storage_key, renditions)
+    response["thumbnail_url"] = thumbnail_url
+    response["medium_url"] = derive_medium_url(storage_key, renditions)
+    # Kept for backward compatibility -- see the schema field's docstring.
+    response["imgproxy_thumbnail_url"] = thumbnail_url
 
     if custom_width or custom_height or custom_format or custom_fit != "auto":
         cw = custom_width or 0

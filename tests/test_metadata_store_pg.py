@@ -90,6 +90,40 @@ async def test_owner_scoping(pg_store: PostgresMetadataStore) -> None:
     assert await pg_store.get(rec.id, "alice") is not None
 
 
+async def test_get_many_is_owner_scoped_and_silently_omits_the_rest(
+    pg_store: PostgresMetadataStore,
+) -> None:
+    a = await pg_store.create(
+        owner="alice",
+        kind=KIND_IMAGE,
+        storage_key="images/a.webp",
+        content_type="image/webp",
+        size_bytes=1,
+        status=STATUS_READY,
+    )
+    b = await pg_store.create(
+        owner="alice",
+        kind=KIND_IMAGE,
+        storage_key="images/b.webp",
+        content_type="image/webp",
+        size_bytes=1,
+        status=STATUS_READY,
+    )
+    bobs = await pg_store.create(
+        owner="bob",
+        kind=KIND_IMAGE,
+        storage_key="images/c.webp",
+        content_type="image/webp",
+        size_bytes=1,
+        status=STATUS_READY,
+    )
+
+    result = await pg_store.get_many("alice", [a.id, b.id, bobs.id, "does-not-exist"])
+
+    assert {r.id for r in result} == {a.id, b.id}
+    assert await pg_store.get_many("alice", []) == []
+
+
 async def test_list_ordering_pagination_and_kind_filter(pg_store: PostgresMetadataStore) -> None:
     first = await pg_store.create(
         owner="alice",

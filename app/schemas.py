@@ -46,11 +46,32 @@ class ImageUploadResponse(BaseModel):
         description="Stored size in megabytes, rounded to 2dp (null for a 0-byte object)",
     )
     dimensions: ImageDimensions
+    direct_url: str | None = Field(
+        default=None,
+        description="The stored object's plain object/CDN URL (full size, no crop, no "
+        "imgproxy) -- present immediately on upload so a caller doesn't need a follow-up "
+        "GET /files/{id} just to render something. Public uploads on an object-store "
+        "backend with a public base URL configured only.",
+    )
+    thumbnail_url: str | None = Field(
+        default=None,
+        description="Same value and resolution as GET /files/{id}'s thumbnail_url: the "
+        "materialized 300x300 fill thumbnail's direct object/CDN URL, or a signed imgproxy "
+        "URL when no public base URL is configured. Public uploads only.",
+    )
+    medium_url: str | None = Field(
+        default=None,
+        description="Same value and resolution as GET /files/{id}'s medium_url: the "
+        "materialized, aspect-preserving (not cropped) rendition bounded to 960x720. "
+        "Public uploads only.",
+    )
     imgproxy_thumbnail_url: str | None = Field(
         default=None,
-        description="Signed imgproxy URL: a 300x300 fill thumbnail. **Public uploads only** — "
-        "an imgproxy URL carries no ownership check and never expires, so a `private` upload "
-        "omits it and is readable solely through GET /files/{id}/download?rendition=thumb.",
+        description="Kept for backward compatibility -- identical value to thumbnail_url "
+        "above now that every upload materializes a rendition (this field predates that and "
+        "was, at the time, always a live imgproxy URL). **Public uploads only** — an imgproxy "
+        "URL carries no ownership check and never expires, so a `private` upload omits it and "
+        "is readable solely through GET /files/{id}/download?rendition=thumb.",
     )
     imgproxy_custom_url: str | None = Field(
         default=None,
@@ -181,9 +202,25 @@ class FileRecord(BaseModel):
             "otherwise signed imgproxy URL. Public images only."
         ),
     )
+    medium_url: str | None = Field(
+        default=None,
+        description=(
+            "Public URL for a medium, aspect-preserving rendition (bounded to 960x720, not "
+            "cropped -- right for a grid card or gallery view of a landscape photo). Same "
+            "materialized-object-first resolution as thumbnail_url. Public images only."
+        ),
+    )
     poster_url: str | None = Field(
         default=None,
         description="Signed imgproxy URL for the video's poster image. Public records only.",
+    )
+    poster_direct_url: str | None = Field(
+        default=None,
+        description=(
+            "The poster's plain object/CDN URL -- no imgproxy, no live encode, unlike "
+            "poster_url. Present only on an object-store backend with a public base URL "
+            "configured, for a public record with a poster."
+        ),
     )
     created_at: str = Field(description="ISO-8601 timestamp")
     updated_at: str = Field(description="ISO-8601 timestamp")
@@ -198,6 +235,20 @@ class FileListResponse(BaseModel):
     )
     limit: int
     offset: int
+
+
+class FileBatchResponse(BaseModel):
+    """Returned by ``GET /files/batch``.
+
+    One round trip for many records instead of one ``GET /files/{id}`` per id
+    -- the shape a listing page (many photos across many parent records)
+    actually needs. An id that doesn't exist or belongs to another owner is
+    silently omitted, not an error (existence never leaks, same as every
+    other owner-scoped route); order is not guaranteed to match the
+    requested ids.
+    """
+
+    files: list[FileRecord]
 
 
 # ---------------------------------------------------------------------------

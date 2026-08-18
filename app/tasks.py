@@ -53,7 +53,7 @@ async def _resolve_ffmpeg_input(storage_key: str) -> str:
     still passes through LocalStorage's traversal guard.
     """
     backend = await get_storage()
-    local = backend.local_path(storage_key)
+    local = await backend.local_path(storage_key)
     if local is not None:
         return local
     signed = await backend.presigned_get_url(storage_key, settings.FFMPEG_INPUT_URL_TTL_SECONDS)
@@ -94,9 +94,24 @@ async def _probe_video_metadata(input_path: str) -> tuple[float | None, int | No
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await asyncio.wait_for(
-            process.communicate(), timeout=settings.FFPROBE_TIMEOUT_SECONDS
-        )
+        try:
+            stdout, _ = await asyncio.wait_for(
+                process.communicate(), timeout=settings.FFPROBE_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            # TimeoutError is a subclass of OSError, so without this it would
+            # fall through to the `except (ValueError, OSError)` below and be
+            # treated as an ordinary probe failure -- silently leaking this
+            # process (it's never killed/reaped), unlike every ffmpeg call
+            # site in this file, which explicitly kill()+wait() on timeout.
+            process.kill()
+            await process.wait()
+            logger.warning(
+                "ffprobe timed out after %ss for %s",
+                settings.FFPROBE_TIMEOUT_SECONDS,
+                input_path,
+            )
+            return None, None, None
         if process.returncode != 0:
             return None, None, None
 
@@ -327,28 +342,46 @@ async def _extract_and_store_poster(
             frame_bytes = await f.read()
 
         # Reuse the exact image validate/strip path (CPU-bound -> threadpool).
+        # generate_renditions=False: a poster never gets its own thumbnail/
+        # medium rendition (see CLAUDE.md), so skip that encode work entirely
+        # instead of throwing the result away.
         webp_bytes, content_type, width, height, _ = await asyncio.to_thread(
-            validate_and_strip_image, frame_bytes
+            validate_and_strip_image, frame_bytes, generate_renditions=False
         )
         poster_key = f"posters/{unique_id}.webp"
         obj = await upload_file(webp_bytes, poster_key, content_type)
 
-        poster = await store.create(
-            owner=owner,
-            kind=KIND_IMAGE,
-            storage_key=obj.key,
-            content_type=content_type,
-            size_bytes=obj.size,
-            status=STATUS_READY,
-            width=width,
-            height=height,
-            visibility=visibility,
-        )
+        try:
+            poster = await store.create(
+                owner=owner,
+                kind=KIND_IMAGE,
+                storage_key=obj.key,
+                content_type=content_type,
+                size_bytes=obj.size,
+                status=STATUS_READY,
+                width=width,
+                height=height,
+                visibility=visibility,
+            )
+        except MetadataError:
+            # The object already exists in storage; a raised (not just a
+            # failed-to-find-a-row) failure here must not leave it orphaned.
+            with contextlib.suppress(StorageError):
+                await delete_file(obj.key)
+            raise
 
         # Link the video to its poster. None means the owner DELETEd the video
         # mid-generation -- discard the poster we just wrote (object + record)
-        # instead of orphaning it.
-        linked = await store.set_poster(upload_id, poster.id)
+        # instead of orphaning it. A *raised* MetadataError needs the same
+        # cleanup: the object and the row we just created both already exist.
+        try:
+            linked = await store.set_poster(upload_id, poster.id)
+        except MetadataError:
+            with contextlib.suppress(StorageError):
+                await delete_file(obj.key)
+            with contextlib.suppress(MetadataError):
+                await store.delete(poster.id, owner)
+            raise
         if linked is None:
             logger.warning(
                 "Upload %s gone during poster generation; discarding %s", upload_id, obj.key
@@ -431,17 +464,27 @@ async def compress_video_task(
         # Flip the record from `processing` to `ready`, pointing it at the
         # compressed object. A None result means the owner DELETEd the upload
         # while it was compressing -- don't leave the object we just wrote
-        # orphaned with no record.
-        record = await store.mark_ready(
-            upload_id,
-            storage_key=obj.key,
-            size_bytes=obj.size,
-            duration_seconds=input_duration,
-            truncated=truncated,
-            width=width,
-            height=height,
-            content_type=content_type,
-        )
+        # orphaned with no record. A *raised* MetadataError (a transient store
+        # failure, not the delete race) needs the same cleanup: the object
+        # already exists in storage, and the outer `except Exception:` handler
+        # below has no reference to `obj` -- without this it would mark the
+        # row failed and re-raise while leaving the object permanently
+        # orphaned.
+        try:
+            record = await store.mark_ready(
+                upload_id,
+                storage_key=obj.key,
+                size_bytes=obj.size,
+                duration_seconds=input_duration,
+                truncated=truncated,
+                width=width,
+                height=height,
+                content_type=content_type,
+            )
+        except MetadataError:
+            with contextlib.suppress(StorageError):
+                await delete_file(obj.key)
+            raise
         if record is None:
             logger.warning(
                 "Upload %s no longer exists (deleted mid-compression); discarding %s",

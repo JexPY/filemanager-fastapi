@@ -1,3 +1,6 @@
+import asyncio
+import os
+import tempfile
 from typing import Any
 
 import pytest
@@ -366,6 +369,42 @@ async def test_ffmpeg_timeout_marks_record_failed_and_deletes_raw(
     assert record.status == STATUS_FAILED
     assert raw_key not in fake_storage.objects
     assert raw_key in fake_storage.deleted_keys
+
+
+async def test_probe_timeout_kills_process_and_returns_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct unit test of _probe_video_metadata, mirroring the ffmpeg-timeout
+    test's pattern: a real subprocess can't finish inside a 0s window, forcing
+    the asyncio.wait_for timeout path deterministically. TimeoutError is a
+    subclass of OSError, so before this fix it was silently caught by
+    `except (ValueError, OSError)` without ever killing the process -- a real
+    process/fd leak on every probe timeout. Must kill+reap the process and
+    return the best-effort (None, None, None) triple rather than raising or
+    leaking."""
+    monkeypatch.setattr(settings, "FFPROBE_TIMEOUT_SECONDS", 0)
+
+    killed: list[asyncio.subprocess.Process] = []
+    real_kill = asyncio.subprocess.Process.kill
+
+    def spy_kill(self: asyncio.subprocess.Process) -> None:
+        killed.append(self)
+        real_kill(self)
+
+    monkeypatch.setattr(asyncio.subprocess.Process, "kill", spy_kill)
+
+    fd, path = tempfile.mkstemp(suffix=".mp4")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(fixture_bytes("tiny.mp4"))
+        duration, width, height = await tasks_module._probe_video_metadata(path)
+    finally:
+        os.remove(path)
+
+    assert duration is None
+    assert width is None
+    assert height is None
+    assert len(killed) == 1
 
 
 async def test_success_fires_completed_webhook_when_callback_set(

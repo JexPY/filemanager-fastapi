@@ -148,14 +148,26 @@ async def test_to_public_url_is_the_canonical_route_for_every_kind(
         status="ready",
         visibility="public",
     )
-    video_with_poster = await fake_metadata.set_poster(video.id, "poster_abc")
+    # A real poster record -- poster_storage_key is resolved fresh from the
+    # linked row (mirroring Postgres's LEFT JOIN), not persisted at link time,
+    # so set_poster needs an id that actually exists to produce a poster_url.
+    poster = await fake_metadata.create(
+        owner=TEST_OWNER,
+        kind="image",
+        storage_key="posters/test_to_public.webp",
+        content_type="image/webp",
+        size_bytes=10,
+        status="ready",
+        visibility="public",
+    )
+    video_with_poster = await fake_metadata.set_poster(video.id, poster.id)
     assert video_with_poster is not None
     video_data = video_with_poster.to_public()
     # Identical canonical shape to the image above -- that is the point.
     assert video_data["url"].endswith(f"/files/{video.id}/download")
     assert "/rs:auto/" in video_data["poster_url"]
     assert "/files/" not in video_data["poster_url"]
-    assert video_data["poster_upload_id"] == "poster_abc"
+    assert video_data["poster_upload_id"] == poster.id
 
 
 async def test_to_public_withholds_accelerator_urls_from_private_records(

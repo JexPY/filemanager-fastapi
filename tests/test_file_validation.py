@@ -22,6 +22,9 @@ JPEG_SAMPLE = b"\xff\xd8\xff\xe0\x00\x10JFIF"
 GIF_SAMPLE = b"GIF89a\x01\x00\x01\x00"
 WEBP_SAMPLE = b"RIFF\x1a\x00\x00\x00WEBPVP8 "
 MP4_SAMPLE = b"\x00\x00\x00 ftypisom\x00\x00\x02\x00isomiso2mp41"
+AVIF_SAMPLE = b"\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1"
+QUICKTIME_FTYP_SAMPLE = b"\x00\x00\x00\x14ftypqt  \x00\x00\x02\x00qt  "
+M4A_SAMPLE = b"\x00\x00\x00 ftypM4A \x00\x00\x00\x00M4A mp42isom"
 TEXT_SAMPLE = b"Hello, this is plain text content."
 BINARY_SAMPLE = b"\x01\x02\x03\x04\x05\x06\x07\x08"
 
@@ -58,6 +61,21 @@ def test_validate_audio_mismatch_rejected() -> None:
         validate_file_content(MP3_ID3_SAMPLE, "audio/wav")
 
 
+def test_validate_m4a() -> None:
+    assert validate_file_content(M4A_SAMPLE, "audio/mp4") == "audio/mp4"
+
+
+def test_validate_m4a_rejects_generic_mp4_video_brand() -> None:
+    """_is_m4a's brand set previously also accepted isom/mp41/mp42/dash --
+    generic/video ISO-BMFF brands in practice, not audio-specific ones (a
+    real M4A encoder's major brand is standardly "M4A "). That meant a plain
+    MP4 *video* file declared as Content-Type: audio/mp4 passed validation
+    untouched. Narrowed to match _sniff_isobmff (the trusted auto-detect
+    path) exactly."""
+    with pytest.raises(FileValidationError, match="expected M4A/MP4"):
+        validate_file_content(MP4_SAMPLE, "audio/mp4")
+
+
 def test_validate_zip_archive() -> None:
     assert validate_file_content(ZIP_SAMPLE, "application/zip") == "application/zip"
     with pytest.raises(FileValidationError, match="expected ZIP"):
@@ -85,6 +103,26 @@ def test_validate_video_formats() -> None:
 def test_validate_video_mismatch_rejected() -> None:
     with pytest.raises(FileValidationError, match="expected MP4"):
         validate_file_content(b"\x00\x01\x02\x03", "video/mp4")
+
+
+def test_validate_mp4_rejects_other_isobmff_brands() -> None:
+    """The video/mp4 magic-byte check previously only verified an `ftyp` box
+    was present, not its actual brand -- so an AVIF image or a QuickTime .mov
+    declared as video/mp4 passed validation untouched."""
+    with pytest.raises(FileValidationError, match="expected MP4"):
+        validate_file_content(AVIF_SAMPLE, "video/mp4")
+    with pytest.raises(FileValidationError, match="expected MP4"):
+        validate_file_content(QUICKTIME_FTYP_SAMPLE, "video/mp4")
+
+
+def test_validate_quicktime_accepts_qt_brand_and_rejects_other_isobmff() -> None:
+    assert validate_file_content(QUICKTIME_FTYP_SAMPLE, "video/quicktime") == "video/quicktime"
+    # _is_quicktime's ftyp branch previously accepted ANY ftyp box regardless
+    # of brand, so an AVIF image declared as video/quicktime also passed.
+    with pytest.raises(FileValidationError, match="expected QuickTime"):
+        validate_file_content(AVIF_SAMPLE, "video/quicktime")
+    with pytest.raises(FileValidationError, match="expected QuickTime"):
+        validate_file_content(MP4_SAMPLE, "video/quicktime")
 
 
 def test_validate_plain_text() -> None:
@@ -181,6 +219,21 @@ def test_validate_opaque_binary() -> None:
         == "application/octet-stream"
     )
     assert validate_file_content(BINARY_SAMPLE, filename="data.dat") == "application/octet-stream"
+
+
+def test_octet_stream_with_mismatched_extension_falls_back_instead_of_rejecting() -> None:
+    """_guess_content_type_from_filename is a best-effort filename *hint*, not
+    a caller-asserted declaration. A mismatch between the extension's guessed
+    type and the actual bytes (here: "photo.png" whose content isn't a real
+    PNG) previously propagated as a hard rejection instead of falling through
+    to the generic octet-stream default -- rejecting an upload the caller
+    correctly declared as octet-stream/unspecified in the first place."""
+    assert (
+        validate_file_content(
+            BINARY_SAMPLE, declared_content_type="application/octet-stream", filename="photo.png"
+        )
+        == "application/octet-stream"
+    )
 
 
 def test_content_disposition_type() -> None:

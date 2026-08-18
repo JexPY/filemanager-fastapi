@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
+import pytest
 
 from app.config import _derive_owner
-from app.services.metadata import UploadRecord
+from app.services.metadata import MetadataError, UploadRecord
 from tests.fakes import InMemoryMetadataStore, InMemoryStorageBackend
 
 OWNER = _derive_owner("test-token")
@@ -244,6 +247,83 @@ async def test_going_private_rotates_the_storage_key(
     assert "images/a.webp" in fake_storage.deleted_keys
 
 
+async def test_going_private_cleans_up_rotated_copy_when_set_visibility_raises(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+    fake_storage: InMemoryStorageBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_rotate_key_if_going_private already copied the object to a fresh key
+    before store.set_visibility runs. If that call *raises* (a transient
+    store failure, not the delete-race None case), the row was never
+    re-pointed at the rotated copy -- it must be cleaned up rather than left
+    as a permanently orphaned duplicate."""
+    await fake_storage.upload(b"secret-bytes", "images/raise.webp", "image/webp")
+    image = await fake_metadata.create(
+        owner=OWNER,
+        kind="image",
+        storage_key="images/raise.webp",
+        content_type="image/webp",
+        size_bytes=12,
+        status="ready",
+        visibility="public",
+    )
+
+    async def raising_set_visibility(*args: Any, **kwargs: Any):
+        raise MetadataError("transient store failure")
+
+    monkeypatch.setattr(fake_metadata, "set_visibility", raising_set_visibility)
+
+    resp = await client.patch(
+        f"/files/{image.id}", headers=auth_headers, json={"visibility": "private"}
+    )
+
+    assert resp.status_code == 502
+    # The original object is untouched (the swap never happened)...
+    assert "images/raise.webp" in fake_storage.objects
+    assert fake_storage.objects["images/raise.webp"] == b"secret-bytes"
+    # ...and the rotated copy it made along the way must not be left behind.
+    assert len(fake_storage.objects) == 1
+    assert len(fake_storage.deleted_keys) == 1
+
+
+async def test_going_private_cleans_up_rotated_copy_when_row_is_gone(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+    fake_storage: InMemoryStorageBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same cleanup requirement as the raise above, for the other failure
+    shape: set_visibility returning None (row deleted between the load and
+    the update)."""
+    await fake_storage.upload(b"secret-bytes", "images/gone.webp", "image/webp")
+    image = await fake_metadata.create(
+        owner=OWNER,
+        kind="image",
+        storage_key="images/gone.webp",
+        content_type="image/webp",
+        size_bytes=12,
+        status="ready",
+        visibility="public",
+    )
+
+    async def race_set_visibility(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(fake_metadata, "set_visibility", race_set_visibility)
+
+    resp = await client.patch(
+        f"/files/{image.id}", headers=auth_headers, json={"visibility": "private"}
+    )
+
+    assert resp.status_code == 404
+    assert "images/gone.webp" in fake_storage.objects
+    assert len(fake_storage.objects) == 1
+    assert len(fake_storage.deleted_keys) == 1
+
+
 async def test_going_public_does_not_rotate(
     client: httpx.AsyncClient,
     auth_headers: dict[str, str],
@@ -306,6 +386,58 @@ async def test_going_private_cascades_to_the_poster(
     assert stored_poster.visibility == "private"
     assert stored_poster.storage_key != "posters/p.webp"
     assert "posters/p.webp" not in fake_storage.objects
+
+
+async def test_going_private_cascade_cleans_up_rotated_poster_copy_on_raise(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+    fake_storage: InMemoryStorageBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The poster cascade is best-effort -- the call site wraps it in
+    contextlib.suppress so a poster-side failure never fails the parent
+    PATCH. That's exactly why its own rotated-copy cleanup can't be skipped:
+    a silently-swallowed failure must not also silently orphan the copy
+    _rotate_key_if_going_private already made for the poster."""
+    await fake_storage.upload(b"vid", "videos/vraise.mp4", "video/mp4")
+    await fake_storage.upload(b"post", "posters/praise.webp", "image/webp")
+    video = await _seed_video(fake_metadata, visibility="public", key="videos/vraise.mp4")
+    poster = await fake_metadata.create(
+        owner=OWNER,
+        kind="image",
+        storage_key="posters/praise.webp",
+        content_type="image/webp",
+        size_bytes=4,
+        status="ready",
+        visibility="public",
+    )
+    await fake_metadata.set_poster(video.id, poster.id)
+
+    real_set_visibility = fake_metadata.set_visibility
+
+    async def selective_raise(upload_id: str, *args: Any, **kwargs: Any):
+        if upload_id == poster.id:
+            raise MetadataError("transient store failure")
+        return await real_set_visibility(upload_id, *args, **kwargs)
+
+    monkeypatch.setattr(fake_metadata, "set_visibility", selective_raise)
+
+    resp = await client.patch(
+        f"/files/{video.id}", headers=auth_headers, json={"visibility": "private"}
+    )
+    # The parent PATCH succeeds regardless -- the poster cascade is best-effort.
+    assert resp.status_code == 200
+
+    # The poster row itself was never updated (still public, still old key)...
+    stored_poster = await fake_metadata.get(poster.id, OWNER)
+    assert stored_poster is not None
+    assert stored_poster.visibility == "public"
+    assert stored_poster.storage_key == "posters/praise.webp"
+    # ...and the rotated copy the cascade made along the way must not be left
+    # behind, even though the failure itself was swallowed.
+    poster_objects = [k for k in fake_storage.objects if k.startswith("posters/")]
+    assert poster_objects == ["posters/praise.webp"]
 
 
 async def test_going_private_survives_a_missing_object(

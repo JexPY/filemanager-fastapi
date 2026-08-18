@@ -8,6 +8,7 @@ type that never carries DB internals to callers.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
 from .types import UploadRecord
 
@@ -69,6 +70,22 @@ class MetadataStore(ABC):
         """Total records for this owner (optionally filtered by `kind`), ignoring
         limit/offset -- the `total_count` a paginated `GET /files` reports so a
         client can size its pager without walking every page."""
+
+    @abstractmethod
+    async def get_many(self, owner: str, upload_ids: Sequence[str]) -> Sequence[UploadRecord]:
+        """Owner-scoped batch lookup by id, for a caller (e.g. a listing page
+        rendering many records at once) that would otherwise need one
+        `GET /files/{id}` round trip per id. An id that doesn't exist or
+        belongs to another owner is silently omitted from the result rather
+        than erroring -- existence never leaks, same as `get`. Order is not
+        guaranteed to match `upload_ids`; callers that need a stable order
+        should re-sort by id themselves.
+
+        Both the parameter and return types are spelled `Sequence[...]`, not
+        `list[...]` -- this class already defines a `list` method, and
+        mypy/pyright resolve a bare `list[...]` annotation on a later member
+        against that name instead of the builtin (a real, reproducible
+        shadowing quirk, not a style choice)."""
 
     @abstractmethod
     async def delete(self, upload_id: str, owner: str | None = None) -> UploadRecord | None:

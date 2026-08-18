@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import uuid
+import weakref
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -105,7 +106,28 @@ _ALLOWED_VIDEO_CONTENT_TYPES = frozenset(
     }
 )
 
-_BULK_IMAGE_CONCURRENCY = asyncio.Semaphore(4)
+_BULK_IMAGE_CONCURRENCY_LIMIT = 4
+# Keyed by event loop (WeakKeyDictionary so an entry is dropped once its loop
+# is garbage collected), one asyncio.Semaphore per loop -- not a single
+# module-level Semaphore(4). CPython's asyncio primitives bind to whichever
+# running loop first uses them and raise RuntimeError if a second loop in the
+# same process ever touches them (e.g. a test suite creating a fresh loop per
+# test function hitting this route from two different tests). A normal
+# single-worker uvicorn/gunicorn deployment has exactly one loop for its
+# whole process lifetime, so this never actually bit in production -- fixed
+# anyway since it's a small, self-contained, standard-pattern change.
+_bulk_image_semaphores: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _bulk_image_concurrency() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _bulk_image_semaphores.get(loop)
+    if sem is None:
+        sem = _bulk_image_semaphores[loop] = asyncio.Semaphore(_BULK_IMAGE_CONCURRENCY_LIMIT)
+    return sem
+
 
 # Scope-gated auth: a static master token passes unconditionally (full access);
 # a capability JWT must carry the matching upload scope, else 403. Built once at
@@ -457,7 +479,7 @@ _BULK_UPLOAD_OPENAPI_EXTRA = {
 
 
 async def _process_single_image_throttled(*args: Any, **kwargs: Any) -> dict | None:
-    async with _BULK_IMAGE_CONCURRENCY:
+    async with _bulk_image_concurrency():
         return await _process_single_image(*args, **kwargs)
 
 

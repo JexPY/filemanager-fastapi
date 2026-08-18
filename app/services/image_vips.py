@@ -26,21 +26,35 @@ def sniff_format(data: bytes) -> str | None:
             return fmt
     if len(data) >= 12 and data[0:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "webp"
-    if (
-        len(data) >= 12
-        and data[4:8] == b"ftyp"
-        and data[8:12] in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}
-    ):
-        return "heic"
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        major_brand = data[8:12]
+        if major_brand in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}:
+            return "heic"
+        # AVIF was previously entirely unrecognized here (even though
+        # file_validation.py's _is_avif already accepts it for the generic
+        # /upload/file route) -- a legitimate AVIF upload to /upload/image,
+        # a QR logo, or a poster-generation frame was rejected as
+        # "unsupported format" for no reason other than this list never
+        # having been extended to it.
+        if major_brand in {b"avif", b"avis"}:
+            return "avif"
     return None
 
 
 def validate_and_strip_image(
-    file_data: bytes, optimization: str = "balanced"
+    file_data: bytes, optimization: str = "balanced", *, generate_renditions: bool = True
 ) -> tuple[bytes, str, int, int, dict[str, bytes]]:
     """Load image using pyvips, strip metadata (EXIF), generate materialized
-    renditions (thumbnail) in the same pass, and return the optimized bytes
-    along with detected format, dimensions, and renditions buffers."""
+    renditions (thumbnail + medium) in the same pass, and return the optimized
+    bytes along with detected format, dimensions, and renditions buffers.
+
+    `generate_renditions=False` skips that pass entirely (returning an empty
+    dict in its place) for a caller that has no use for renditions -- video
+    poster generation reuses this exact function for its own frame -> WebP
+    encode but never persists a poster rendition, so without this the two
+    materialized encodes (a 300x300 crop and a 960x720 fit, the latter
+    non-trivial CPU) would run and be thrown away on every single poster job.
+    """
     if sniff_format(file_data) is None:
         raise ImageValidationError("Unsupported or unrecognized image format")
 
@@ -60,21 +74,22 @@ def validate_and_strip_image(
             f"Image dimensions {width}x{height} exceed the {settings.MAX_IMAGE_PIXELS}-pixel limit"
         )
 
-    # Materialize thumbnail rendition from spec in the same libvips pass.
-    # crop=pyvips.Interesting.CENTRE produces a center-cropped 300x300 fill thumbnail,
-    # matching imgproxy's rs:fill:300:300.
-    thumb_spec = RENDITION_SPECS["thumbnail"]
-    thumb_image = image.thumbnail_image(
-        thumb_spec.width, height=thumb_spec.height, crop=pyvips.Interesting.CENTRE
-    )
-    thumb_buffer = thumb_image.write_to_buffer(
-        f".{thumb_spec.format}",
-        Q=thumb_spec.quality,
-        strip=True,
-        effort=6,
-        smart_subsample=True,
-    )
-    renditions = {thumb_spec.name: thumb_buffer}
+    # Materialize every registered rendition from its spec, in the same
+    # libvips pass as the main encode. crop=CENTRE fill-crops to an exact box
+    # (matching imgproxy's rs:fill); crop=NONE fits *within* the box instead,
+    # preserving aspect ratio so a landscape photo keeps its full frame.
+    renditions: dict[str, bytes] = {}
+    if generate_renditions:
+        for spec in RENDITION_SPECS.values():
+            crop_mode = pyvips.Interesting.CENTRE if spec.crop else pyvips.Interesting.NONE
+            rend_image = image.thumbnail_image(spec.width, height=spec.height, crop=crop_mode)
+            renditions[spec.name] = rend_image.write_to_buffer(
+                f".{spec.format}",
+                Q=spec.quality,
+                strip=True,
+                effort=6,
+                smart_subsample=True,
+            )
 
     # Determine quality and max dimension based on optimization profile
     if optimization == "size":

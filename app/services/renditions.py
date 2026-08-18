@@ -10,7 +10,11 @@ class RenditionSpec:
     """Specification for a materialized rendition.
 
     Format and dimensions are intrinsic properties of the rendition,
-    independent of the parent object's type or extension.
+    independent of the parent object's type or extension. ``crop`` picks the
+    libvips resize strategy: True center-crops to exactly width x height
+    (right for square, avatar-shaped content); False fits *within* the
+    width x height box preserving aspect ratio, so a landscape photo keeps its
+    full frame instead of losing its edges to a square crop.
     """
 
     name: str
@@ -20,6 +24,7 @@ class RenditionSpec:
     format: str = "webp"
     mime_type: str = "image/webp"
     quality: int = 80
+    crop: bool = True
 
 
 RENDITION_SPECS: dict[str, RenditionSpec] = {
@@ -31,6 +36,21 @@ RENDITION_SPECS: dict[str, RenditionSpec] = {
         format="webp",
         mime_type="image/webp",
         quality=80,
+        crop=True,
+    ),
+    # A larger, aspect-preserving rendition for grid cards / gallery views --
+    # deliberately not center-cropped, since a square crop cuts the front or
+    # back off a landscape photo (a car, a listing photo, ...). Bounds the
+    # longest edge to 960px without forcing an exact box.
+    "medium": RenditionSpec(
+        name="medium",
+        suffix="m960",
+        width=960,
+        height=720,
+        format="webp",
+        mime_type="image/webp",
+        quality=82,
+        crop=False,
     ),
 }
 
@@ -38,6 +58,9 @@ _RENDITION_ALIASES: dict[str, str] = {
     "thumbnail": "thumbnail",
     "thumb": "thumbnail",
     "t300": "thumbnail",
+    "medium": "medium",
+    "card": "medium",
+    "m960": "medium",
 }
 
 ALLOWED_RENDITION_NAMES = frozenset(_RENDITION_ALIASES.keys())
@@ -79,22 +102,48 @@ def derive_rendition_key(parent_storage_key: str, rend_name: str) -> str:
     return f"{prefix}/{file_part}" if prefix else file_part
 
 
-def derive_thumbnail_url(storage_key: str, renditions: dict[str, str] | None = None) -> str:
-    """Derive the canonical thumbnail URL for an image.
+def _derive_rendition_public_url(
+    rendition_name: str,
+    fallback_processing_options: str,
+    storage_key: str,
+    renditions: dict[str, str] | None,
+) -> str:
+    """Shared resolution for every materialized rendition's public URL.
 
-    If a materialized thumbnail rendition exists:
+    If the rendition was materialized (present in `renditions`):
     - On object storage with a public base URL, emits the direct CDN object URL.
     - Otherwise (local or no public base URL), emits signed imgproxy with 'rs:auto'.
 
-    If no materialized rendition exists (pre-existing records):
-    - Falls back to signed imgproxy with 'rs:fill:300:300:0/g:no'.
+    If it was not materialized (pre-existing records from before a given
+    rendition spec existed), falls back to a live signed imgproxy transform of
+    the *parent* object using `fallback_processing_options`.
     """
     from app.services.imgproxy import signed_image_url
     from app.services.storage import has_public_base_url, public_object_url
 
-    thumb_key = renditions.get("thumbnail") if renditions else None
-    if thumb_key:
+    rend_key = renditions.get(rendition_name) if renditions else None
+    if rend_key:
         if has_public_base_url():
-            return public_object_url(thumb_key)
-        return signed_image_url(thumb_key, processing_options="rs:auto")
-    return signed_image_url(storage_key, processing_options="rs:fill:300:300:0/g:no")
+            return public_object_url(rend_key)
+        return signed_image_url(rend_key, processing_options="rs:auto")
+    return signed_image_url(storage_key, processing_options=fallback_processing_options)
+
+
+def derive_thumbnail_url(storage_key: str, renditions: dict[str, str] | None = None) -> str:
+    """Derive the canonical 300x300 thumbnail URL for an image (materialized
+    object when available, else a live imgproxy fallback -- see
+    `_derive_rendition_public_url`)."""
+    return _derive_rendition_public_url(
+        "thumbnail", "rs:fill:300:300:0/g:no", storage_key, renditions
+    )
+
+
+def derive_medium_url(storage_key: str, renditions: dict[str, str] | None = None) -> str:
+    """Derive the canonical medium (aspect-preserving, up to 960x720) URL for
+    an image -- the grid-card/gallery size. Materialized object when
+    available, else a live imgproxy fallback -- see
+    `_derive_rendition_public_url`."""
+    spec = RENDITION_SPECS["medium"]
+    return _derive_rendition_public_url(
+        "medium", f"rs:fit:{spec.width}:{spec.height}", storage_key, renditions
+    )

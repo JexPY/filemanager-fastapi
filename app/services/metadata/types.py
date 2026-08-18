@@ -124,12 +124,27 @@ class UploadRecord:
                     data["direct_url"] = public_object_url(self.storage_key)
 
                 if self.kind == KIND_IMAGE:
-                    from app.services.renditions import derive_thumbnail_url
+                    from app.services.renditions import derive_medium_url, derive_thumbnail_url
 
                     data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, self.renditions)
+                    data["medium_url"] = derive_medium_url(self.storage_key, self.renditions)
 
                 if self.poster_upload_id:
-                    pkey = poster_storage_key or self.poster_storage_key or self.poster_upload_id
-                    data["poster_url"] = _build_imgproxy_url(pkey)
+                    # `pkey` is a *storage key*, never the bare poster record
+                    # id -- falling back to `self.poster_upload_id` here used
+                    # to build a URL that treated a record id as if it were an
+                    # object key, producing a dead/404 poster_url instead of
+                    # simply omitting it. If neither source has the real key
+                    # (the LEFT JOIN didn't resolve it), omit both fields.
+                    pkey = poster_storage_key or self.poster_storage_key
+                    if pkey:
+                        data["poster_url"] = _build_imgproxy_url(pkey)
+                        # A static companion to poster_url: posters are their
+                        # own image record, so their plain object URL is a
+                        # direct CDN/bucket read -- no imgproxy involved, no
+                        # live encode, unlike poster_url above (always a live
+                        # imgproxy fetch).
+                        if has_public_base_url():
+                            data["poster_direct_url"] = public_object_url(pkey)
 
         return data
