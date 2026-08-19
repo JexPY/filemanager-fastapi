@@ -27,6 +27,25 @@ async def test_delete_is_idempotent(tmp_path) -> None:
     await backend.delete("never/existed.webp")  # must not raise
 
 
+async def test_local_path_returns_none_for_a_missing_object(tmp_path) -> None:
+    """local_path() used to hand back a path unconditionally -- for a key
+    that was never uploaded (or whose raw object was already deleted, e.g. a
+    race with the owner's DELETE), that meant handing ffmpeg a nonexistent
+    path instead of the caller (_resolve_ffmpeg_input) getting a clean,
+    early StorageError."""
+    backend = LocalStorage(str(tmp_path), "")
+    assert await backend.local_path("videos/never-uploaded.mp4") is None
+
+
+async def test_local_path_returns_a_readable_path_for_an_existing_object(tmp_path) -> None:
+    backend = LocalStorage(str(tmp_path), "")
+    await backend.upload(b"bytes", "videos/real.mp4", "video/mp4")
+    path = await backend.local_path("videos/real.mp4")
+    assert path is not None
+    with open(path, "rb") as f:
+        assert f.read() == b"bytes"
+
+
 @pytest.mark.parametrize(
     "key",
     [

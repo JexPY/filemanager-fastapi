@@ -76,6 +76,23 @@ async def test_list_pagination_and_kind_filter() -> None:
     assert [r.kind for r in videos] == [KIND_VIDEO]
 
 
+async def test_get_many_is_owner_scoped_and_silently_omits_the_rest() -> None:
+    store = InMemoryMetadataStore()
+    a = await _seed_image(store, "alice", "images/a.webp")
+    b = await _seed_image(store, "alice", "images/b.webp")
+    bobs = await _seed_image(store, "bob", "images/c.webp")
+
+    result = await store.get_many("alice", [a.id, b.id, bobs.id, "does-not-exist"])
+
+    # Unknown id and another owner's id are silently absent, not an error.
+    assert {r.id for r in result} == {a.id, b.id}
+
+
+async def test_get_many_with_empty_ids_returns_empty_list() -> None:
+    store = InMemoryMetadataStore()
+    assert await store.get_many("alice", []) == []
+
+
 async def test_delete_is_owner_scoped() -> None:
     store = InMemoryMetadataStore()
     rec = await _seed_image(store, "alice", "images/a.webp")

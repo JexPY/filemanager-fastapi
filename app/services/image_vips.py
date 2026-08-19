@@ -26,21 +26,31 @@ def sniff_format(data: bytes) -> str | None:
             return fmt
     if len(data) >= 12 and data[0:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "webp"
-    if (
-        len(data) >= 12
-        and data[4:8] == b"ftyp"
-        and data[8:12] in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}
-    ):
-        return "heic"
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        major_brand = data[8:12]
+        if major_brand in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}:
+            return "heic"
+        # AVIF was previously entirely unrecognized here (even though
+        # file_validation.py's _is_avif already accepts it for the generic
+        # /upload/file route) -- a legitimate AVIF upload to /upload/image,
+        # a QR logo, or a poster-generation frame was rejected as
+        # "unsupported format" for no reason other than this list never
+        # having been extended to it.
+        if major_brand in {b"avif", b"avis"}:
+            return "avif"
     return None
 
 
 def validate_and_strip_image(
-    file_data: bytes, optimization: str = "balanced"
+    file_data: bytes, optimization: str = "balanced", *, generate_renditions: bool = False
 ) -> tuple[bytes, str, int, int, dict[str, bytes]]:
     """Load image using pyvips, strip metadata (EXIF), generate materialized
-    renditions (thumbnail) in the same pass, and return the optimized bytes
-    along with detected format, dimensions, and renditions buffers."""
+    thumbnail rendition if requested, and return the optimized bytes along with
+    detected format, dimensions, and renditions buffers.
+
+    `generate_renditions=False` skips rendition generation (returning an empty
+    dict in its place) when the caller does not request a thumbnail.
+    """
     if sniff_format(file_data) is None:
         raise ImageValidationError("Unsupported or unrecognized image format")
 
@@ -60,32 +70,45 @@ def validate_and_strip_image(
             f"Image dimensions {width}x{height} exceed the {settings.MAX_IMAGE_PIXELS}-pixel limit"
         )
 
-    # Materialize thumbnail rendition from spec in the same libvips pass.
-    # crop=pyvips.Interesting.CENTRE produces a center-cropped 300x300 fill thumbnail,
-    # matching imgproxy's rs:fill:300:300.
-    thumb_spec = RENDITION_SPECS["thumbnail"]
-    thumb_image = image.thumbnail_image(
-        thumb_spec.width, height=thumb_spec.height, crop=pyvips.Interesting.CENTRE
-    )
-    thumb_buffer = thumb_image.write_to_buffer(
-        f".{thumb_spec.format}",
-        Q=thumb_spec.quality,
-        strip=True,
-        effort=6,
-        smart_subsample=True,
-    )
-    renditions = {thumb_spec.name: thumb_buffer}
+    # Materialize every registered rendition from its spec, in the same
+    # libvips pass as the main encode. crop=CENTRE fill-crops to an exact box
+    # (matching imgproxy's rs:fill); crop=NONE fits *within* the box instead,
+    # preserving aspect ratio so a landscape photo keeps its full frame.
+    # Each rendition uses its own (lower) `effort` -- see RenditionSpec's
+    # docstring on that field for why this must not be the main encode's 6.
+    renditions: dict[str, bytes] = {}
+    if generate_renditions:
+        for spec in RENDITION_SPECS.values():
+            crop_mode = pyvips.Interesting.CENTRE if spec.crop else pyvips.Interesting.NONE
+            rend_image = image.thumbnail_image(spec.width, height=spec.height, crop=crop_mode)
+            renditions[spec.name] = rend_image.write_to_buffer(
+                f".{spec.format}",
+                Q=spec.quality,
+                strip=True,
+                effort=spec.effort,
+                smart_subsample=True,
+            )
 
-    # Determine quality and max dimension based on optimization profile
+    # Determine quality, max dimension, and encode effort based on
+    # optimization profile. Only "quality" pays libwebp's effort=6 (its
+    # slowest, most exhaustive compression search) -- "size" and "balanced"
+    # (the default, and what the vast majority of uploads use) get effort=4,
+    # the same trade made for materialized renditions above: a little file
+    # size for a large, synchronous-request-latency win. A caller that
+    # explicitly asked for "quality" is opting into the slower encode; one
+    # that didn't shouldn't pay for it by default.
     if optimization == "size":
         q_value = 65
         max_dim = 1280
+        effort = 4
     elif optimization == "quality":
         q_value = 95
         max_dim = 3840
+        effort = 6
     else:  # "balanced"
         q_value = 85
         max_dim = 1920
+        effort = 4
 
     if width > max_dim or height > max_dim:
         scale = min(max_dim / width, max_dim / height)
@@ -95,9 +118,8 @@ def validate_and_strip_image(
 
     # Write to optimized webp format. strip=True removes ALL metadata
     # (EXIF/GPS, ICC profile, XMP) on output in a single call.
-    # effort=6 maximizes compression efficiency (smallest size for given Q).
     # smart_subsample=True improves color sharpness for high contrast edges.
     optimized_buffer = image.write_to_buffer(
-        ".webp", Q=q_value, strip=True, effort=6, smart_subsample=True
+        ".webp", Q=q_value, strip=True, effort=effort, smart_subsample=True
     )
     return optimized_buffer, "image/webp", width, height, renditions

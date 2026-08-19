@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import Sequence
 from typing import Any, cast
 
 import asyncpg
@@ -51,7 +52,15 @@ def _parse_renditions(raw: Any) -> dict[str, str] | None:
             val = json.loads(raw)
             if isinstance(val, dict):
                 return val
-        except ValueError, TypeError:
+        # Split rather than `except (ValueError, TypeError):` -- a bare
+        # (no `as`) except-tuple trips a ruff 0.16.3 formatter bug that
+        # strips its required parens into invalid Python 3 syntax
+        # (`except ValueError, TypeError:`). Reproduced on a trivial
+        # snippet, independent of this file; every other multi-exception
+        # catch in this codebase uses `as exc` and is unaffected.
+        except ValueError:
+            return None
+        except TypeError:
             return None
     return None
 
@@ -242,29 +251,72 @@ class PostgresMetadataStore(MetadataStore):
         return _row_to_record(row) if row is not None else None
 
     async def list(
-        self, owner: str, *, kind: str | None = None, limit: int = 50, offset: int = 0
+        self,
+        owner: str,
+        *,
+        kind: str | None = None,
+        status: str | None = None,
+        visibility: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[UploadRecord]:
         rows = await self._fetch(
             f"SELECT {_JOIN_COLUMNS} FROM uploads u "
             f"LEFT JOIN uploads p ON u.poster_upload_id = p.id "
             f"WHERE u.owner = $1 AND ($2::text IS NULL OR u.kind = $2) "
-            f"ORDER BY u.created_at DESC LIMIT $3 OFFSET $4",
+            f"AND ($3::text IS NULL OR u.status = $3) "
+            f"AND ($4::text IS NULL OR u.visibility = $4) "
+            # Secondary tiebreak on id: created_at alone is not unique (two
+            # rows can share the same timestamp at this resolution), and
+            # without a deterministic tiebreak Postgres's relative order for
+            # those rows is undefined *per query* -- a client paginating with
+            # limit/offset across separate requests could see a duplicate or
+            # skip a row entirely.
+            f"ORDER BY u.created_at DESC, u.id DESC LIMIT $5 OFFSET $6",
             owner,
             kind,
+            status,
+            visibility,
             limit,
             offset,
             error_msg="Failed to list uploads",
         )
         return [_row_to_record(row) for row in rows]
 
-    async def count(self, owner: str, *, kind: str | None = None) -> int:
+    async def count(
+        self,
+        owner: str,
+        *,
+        kind: str | None = None,
+        status: str | None = None,
+        visibility: str | None = None,
+    ) -> int:
         val = await self._fetchval(
-            "SELECT COUNT(*) FROM uploads WHERE owner = $1 AND ($2::text IS NULL OR kind = $2)",
+            "SELECT COUNT(*) FROM uploads WHERE owner = $1 "
+            "AND ($2::text IS NULL OR kind = $2) "
+            "AND ($3::text IS NULL OR status = $3) "
+            "AND ($4::text IS NULL OR visibility = $4)",
             owner,
             kind,
+            status,
+            visibility,
             error_msg="Failed to count uploads",
         )
         return cast(int, val)
+
+    async def get_many(self, owner: str, upload_ids: Sequence[str]) -> Sequence[UploadRecord]:
+        if not upload_ids:
+            return []
+        rows = await self._fetch(
+            f"SELECT {_JOIN_COLUMNS} FROM uploads u "
+            f"LEFT JOIN uploads p ON u.poster_upload_id = p.id "
+            f"WHERE u.owner = $1 AND u.id = ANY($2::text[]) "
+            f"ORDER BY u.created_at DESC, u.id DESC",
+            owner,
+            list(upload_ids),
+            error_msg="Failed to batch-load uploads",
+        )
+        return [_row_to_record(row) for row in rows]
 
     async def delete(self, upload_id: str, owner: str | None = None) -> UploadRecord | None:
         if owner is not None:
@@ -281,7 +333,7 @@ class PostgresMetadataStore(MetadataStore):
             f"SELECT {_JOIN_COLUMNS} FROM uploads u "
             f"LEFT JOIN uploads p ON u.poster_upload_id = p.id "
             f"WHERE u.owner = $1 AND u.content_hash = $2 AND u.status = '{STATUS_READY}' "
-            f"ORDER BY u.created_at DESC LIMIT 1",
+            f"ORDER BY u.created_at DESC, u.id DESC LIMIT 1",
             owner,
             content_hash,
             error_msg="Failed to look up upload by hash",
@@ -294,7 +346,7 @@ class PostgresMetadataStore(MetadataStore):
             f"LEFT JOIN uploads p ON u.poster_upload_id = p.id "
             f"WHERE u.owner = $1 AND u.content_hash = $2 AND u.kind = '{KIND_VIDEO}' "
             f"AND u.status IN ('{STATUS_READY}', '{STATUS_PROCESSING}') "
-            f"ORDER BY u.created_at DESC LIMIT 1",
+            f"ORDER BY u.created_at DESC, u.id DESC LIMIT 1",
             owner,
             content_hash,
             error_msg="Failed to look up video by hash",

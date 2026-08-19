@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import uuid
+import weakref
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -13,6 +14,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -84,7 +86,7 @@ class _ProcessedImageData:
 
 
 @dataclass(frozen=True)
-class _CustomImgproxyParams:
+class _CustomImageParams:
     width: int | None = None
     height: int | None = None
     fit: str = "auto"
@@ -105,7 +107,28 @@ _ALLOWED_VIDEO_CONTENT_TYPES = frozenset(
     }
 )
 
-_BULK_IMAGE_CONCURRENCY = asyncio.Semaphore(4)
+_BULK_IMAGE_CONCURRENCY_LIMIT = 4
+# Keyed by event loop (WeakKeyDictionary so an entry is dropped once its loop
+# is garbage collected), one asyncio.Semaphore per loop -- not a single
+# module-level Semaphore(4). CPython's asyncio primitives bind to whichever
+# running loop first uses them and raise RuntimeError if a second loop in the
+# same process ever touches them (e.g. a test suite creating a fresh loop per
+# test function hitting this route from two different tests). A normal
+# single-worker uvicorn/gunicorn deployment has exactly one loop for its
+# whole process lifetime, so this never actually bit in production -- fixed
+# anyway since it's a small, self-contained, standard-pattern change.
+_bulk_image_semaphores: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _bulk_image_concurrency() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _bulk_image_semaphores.get(loop)
+    if sem is None:
+        sem = _bulk_image_semaphores[loop] = asyncio.Semaphore(_BULK_IMAGE_CONCURRENCY_LIMIT)
+    return sem
+
 
 # Scope-gated auth: a static master token passes unconditionally (full access);
 # a capability JWT must carry the matching upload scope, else 403. Built once at
@@ -119,11 +142,12 @@ async def _process_single_image(
     file_data: bytes,
     owner: str,
     optimization: str,
-    imgproxy_width: int | None,
-    imgproxy_height: int | None,
-    imgproxy_fit: str,
-    imgproxy_format: str | None,
+    width: int | None,
+    height: int | None,
+    fit: str,
+    format: str | None,
     *,
+    thumbnail: bool = False,
     visibility: str = "public",
     raise_on_error: bool,
 ) -> dict | None:
@@ -137,12 +161,11 @@ async def _process_single_image(
         # borderline CPU work, so offload it like the other CPU-bound steps.
         # The processing parameters are folded in, so the same bytes requested
         # with different options are correctly treated as distinct uploads.
-        # `visibility` is part of that on purpose: without it, re-uploading a
-        # photo as `private` would dedupe onto the existing `public` record and
-        # silently ignore the caller's intent -- a security surprise, not a
-        # cache hit.
+        # `visibility` and `thumbnail` are part of that on purpose: without them,
+        # re-uploading with different options would dedupe onto the existing
+        # record and silently ignore the caller's intent.
         input_hash = await asyncio.to_thread(_sha256_hex, file_data)
-        signature = f"{input_hash}:{optimization}:{visibility}"
+        signature = f"{input_hash}:{optimization}:{visibility}:{thumbnail}"
         content_hash = hashlib.sha256(signature.encode()).hexdigest()
 
         store = await get_metadata_store()
@@ -164,10 +187,10 @@ async def _process_single_image(
                 existing.size_bytes,
                 existing.storage_key,
                 renditions=existing.renditions,
-                custom_width=imgproxy_width,
-                custom_height=imgproxy_height,
-                custom_fit=imgproxy_fit,
-                custom_format=imgproxy_format,
+                custom_width=width,
+                custom_height=height,
+                custom_fit=fit,
+                custom_format=format,
                 visibility=existing.visibility,
             )
 
@@ -176,10 +199,15 @@ async def _process_single_image(
             (
                 optimized_buffer,
                 content_type,
-                width,
-                height,
+                img_width,
+                img_height,
                 renditions_buffers,
-            ) = await asyncio.to_thread(validate_and_strip_image, file_data, optimization)
+            ) = await asyncio.to_thread(
+                validate_and_strip_image,
+                file_data,
+                optimization,
+                generate_renditions=thumbnail,
+            )
         except ImageValidationError as exc:
             logger.warning("Image validation rejected upload: %s", exc)
             if not raise_on_error:
@@ -193,16 +221,16 @@ async def _process_single_image(
         img_data = _ProcessedImageData(
             buffer=optimized_buffer,
             content_type=content_type,
-            width=width,
-            height=height,
+            width=img_width,
+            height=img_height,
             renditions_buffers=renditions_buffers,
             content_hash=content_hash,
         )
-        imgproxy_params = _CustomImgproxyParams(
-            width=imgproxy_width,
-            height=imgproxy_height,
-            fit=imgproxy_fit,
-            format=imgproxy_format,
+        custom_params = _CustomImageParams(
+            width=width,
+            height=height,
+            fit=fit,
+            format=format,
         )
 
         return await _store_and_record_image(
@@ -210,7 +238,7 @@ async def _process_single_image(
             owner,
             object_name,
             img_data,
-            imgproxy_params,
+            custom_params,
             visibility=visibility,
             raise_on_error=raise_on_error,
         )
@@ -301,7 +329,7 @@ async def _store_and_record_image(
     owner: str,
     object_name: str,
     img_data: _ProcessedImageData,
-    imgproxy_params: _CustomImgproxyParams,
+    custom_params: _CustomImageParams,
     *,
     visibility: str = "public",
     raise_on_error: bool,
@@ -339,10 +367,10 @@ async def _store_and_record_image(
             record.size_bytes,
             obj.key,
             renditions=renditions_dict,
-            custom_width=imgproxy_params.width,
-            custom_height=imgproxy_params.height,
-            custom_fit=imgproxy_params.fit,
-            custom_format=imgproxy_params.format,
+            custom_width=custom_params.width,
+            custom_height=custom_params.height,
+            custom_fit=custom_params.fit,
+            custom_format=custom_params.format,
             visibility=record.visibility,
         )
 
@@ -367,16 +395,13 @@ async def _store_and_record_image(
 async def upload_image(
     request: Request,
     file: UploadFile = File(...),
-    imgproxy_width: int | None = Form(
-        default=None, ge=0, le=8192, json_schema_extra={"default": ""}
-    ),
-    imgproxy_height: int | None = Form(
-        default=None, ge=0, le=8192, json_schema_extra={"default": ""}
-    ),
-    imgproxy_fit: Literal["auto", "fit", "fill", "fill-down", "force"] = Form(
+    thumbnail: bool = Query(default=False, description="Generate and return a thumbnail URL"),
+    width: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
+    height: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
+    fit: Literal["auto", "fit", "fill", "fill-down", "force"] = Form(
         default="auto", examples=["auto"]
     ),
-    imgproxy_format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
+    format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
         default=None, json_schema_extra={"example": None}
     ),
     optimization: Literal["size", "balanced", "quality"] = Form(
@@ -390,10 +415,11 @@ async def upload_image(
         file_data,
         owner,
         optimization,
-        imgproxy_width,
-        imgproxy_height,
-        imgproxy_fit,
-        imgproxy_format,
+        width,
+        height,
+        fit,
+        format,
+        thumbnail=thumbnail,
         visibility=visibility,
         raise_on_error=True,
     )
@@ -415,24 +441,24 @@ _BULK_UPLOAD_OPENAPI_EXTRA = {
                             "items": {"type": "string", "format": "binary"},
                             "description": "Multiple image files to upload",
                         },
-                        "imgproxy_width": {
+                        "width": {
                             "type": "integer",
                             "minimum": 0,
                             "maximum": 8192,
                             "nullable": True,
                         },
-                        "imgproxy_height": {
+                        "height": {
                             "type": "integer",
                             "minimum": 0,
                             "maximum": 8192,
                             "nullable": True,
                         },
-                        "imgproxy_fit": {
+                        "fit": {
                             "type": "string",
                             "enum": ["auto", "fit", "fill", "fill-down", "force"],
                             "default": "auto",
                         },
-                        "imgproxy_format": {
+                        "format": {
                             "type": "string",
                             "enum": ["webp", "png", "jpg", "jpeg", "avif", "gif"],
                             "nullable": True,
@@ -457,7 +483,7 @@ _BULK_UPLOAD_OPENAPI_EXTRA = {
 
 
 async def _process_single_image_throttled(*args: Any, **kwargs: Any) -> dict | None:
-    async with _BULK_IMAGE_CONCURRENCY:
+    async with _bulk_image_concurrency():
         return await _process_single_image(*args, **kwargs)
 
 
@@ -472,16 +498,13 @@ async def _process_single_image_throttled(*args: Any, **kwargs: Any) -> dict | N
 async def upload_images(
     request: Request,
     files: Annotated[list[UploadFile], File(description="Multiple image files to upload")],
-    imgproxy_width: int | None = Form(
-        default=None, ge=0, le=8192, json_schema_extra={"default": ""}
-    ),
-    imgproxy_height: int | None = Form(
-        default=None, ge=0, le=8192, json_schema_extra={"default": ""}
-    ),
-    imgproxy_fit: Literal["auto", "fit", "fill", "fill-down", "force"] = Form(
+    thumbnail: bool = Query(default=False, description="Generate and return thumbnail URLs"),
+    width: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
+    height: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
+    fit: Literal["auto", "fit", "fill", "fill-down", "force"] = Form(
         default="auto", examples=["auto"]
     ),
-    imgproxy_format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
+    format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
         default=None, json_schema_extra={"example": None}
     ),
     optimization: Literal["size", "balanced", "quality"] = Form(
@@ -514,10 +537,11 @@ async def upload_images(
                 data,
                 owner,
                 optimization,
-                imgproxy_width,
-                imgproxy_height,
-                imgproxy_fit,
-                imgproxy_format,
+                width,
+                height,
+                fit,
+                format,
+                thumbnail=thumbnail,
                 visibility=visibility,
                 raise_on_error=False,
             )

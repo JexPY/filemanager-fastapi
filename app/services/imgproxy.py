@@ -22,13 +22,20 @@ def sign_url(path: str) -> str:
     return f"{base}{signed_path}" if base else signed_path
 
 
+_VALID_IMAGE_EXTENSIONS = frozenset({"webp", "png", "jpg", "jpeg", "avif", "gif"})
+
+
 def generate_signed_url(
     url: str, processing_options: str = "rs:fill:300:300", format: str | None = None
 ) -> str:
+    fmt = format
+    if not fmt:
+        clean_url = url.split("?", 1)[0].split("#", 1)[0]
+        ext = clean_url.rsplit(".", 1)[-1].lower() if "." in clean_url else ""
+        fmt = ext if ext in _VALID_IMAGE_EXTENSIONS else "webp"
+
     encoded_url = base64.urlsafe_b64encode(url.encode()).decode("utf-8").rstrip("=")
-    path = f"/{processing_options}/{encoded_url}"
-    if format:
-        path = f"{path}.{format}"
+    path = f"/{processing_options}/{encoded_url}.{fmt}"
     return sign_url(path)
 
 
@@ -83,6 +90,10 @@ def signed_image_url(
     apart again (see ``public_source_url``). Sync on purpose -- ``to_public`` is
     sync, and resolving a durable source needs no I/O.
     """
+    fmt = format
+    if not fmt:
+        ext = key.rsplit(".", 1)[-1].lower() if "." in key else ""
+        fmt = ext if ext in _VALID_IMAGE_EXTENSIONS else "webp"
     return generate_signed_url(
-        public_source_url(key), processing_options=processing_options, format=format
+        public_source_url(key), processing_options=processing_options, format=fmt
     )

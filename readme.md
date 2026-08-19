@@ -122,9 +122,11 @@ Sample public image upload response:
   "size_bytes": 84210,
   "size_mb": 0.08,
   "dimensions": { "width": 1920, "height": 1080 },
-  "imgproxy_thumbnail_url": "https://media.example.com/imgproxy/<sig>/rs:auto/<src>"
+  "url": "https://media.example.com/files/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95/download"
 }
 ```
+
+When uploaded with `?thumbnail=true`, `thumbnail_url` is included with a `.webp` extension.
 
 Persist the `id`. It is the authoritative handle for record lookup, canonical download,
 sharing, visibility toggling, and deletion.
@@ -155,7 +157,7 @@ to `status='ready'` upon successful compression or `status='failed'` on error.
 
 | Kind | Ingestion Route | Initial Status | Processing Pipeline |
 |---|---|---|---|
-| `image` | `POST /upload/image`, `POST /upload/images` | `ready` | Synchronous: strip metadata, downscale, WebP encode, materialize 300x300 thumbnail |
+| `image` | `POST /upload/image`, `POST /upload/images` | `ready` | Synchronous: strip metadata, downscale, WebP encode, materialize 300x300 thumbnail if requested |
 | `video` | `POST /upload/video` | `processing` -> `ready`/`failed` | Asynchronous: TaskIQ worker running FFmpeg transcode & probe |
 | `file` | `POST /upload/file` | `ready` | Synchronous: magic-byte verification, MIME allow-list validation, stream-scan |
 
@@ -165,8 +167,8 @@ updatable via `PATCH /files/{id}`. Visibility governs both access authorization 
 
 | Feature | `public` | `private` |
 |---|---|---|
-| `GET /files/{id}/download` | Accessible to anyone with the record ID (no token required) | Accessible only by the owner or a scoped `read:file` token (unauthorized requests return 404) |
-| Accelerator URLs | Handed out in record responses (`direct_url`, `thumbnail_url`, `poster_url`) | Withheld from responses (preventing unauthenticated bypasses) |
+| Direct View / Download (`url`) | Direct CDN URL on S3/CDN; tokenless download on local storage | Accessible only by the owner or a scoped `read:file` token (unauthorized requests return 404) |
+| Accelerator URLs | Handed out in record responses (`thumbnail_url`, `poster_url`) | Withheld from responses (preventing unauthenticated bypasses) |
 | Share links | Functional | Functional (the unlisted token acts as its own grant) |
 
 ### 5. Idempotent deduplication
@@ -176,7 +178,7 @@ the existing record without redundant transcoding or storage overhead.
 
 | Kind | Deduplication Key Composition | Match Scope |
 |---|---|---|
-| `image` | `SHA-256(raw_input_hash:optimization:visibility)` | Existing `ready` records for the owner |
+| `image` | `SHA-256(raw_input_hash:optimization:visibility:thumbnail)` | Existing `ready` records for the owner |
 | `file` | `SHA-256(raw_input_hash:visibility)` | Existing `ready` records for the owner |
 | `video` | `SHA-256(raw_input_hash:format:optimization:start_seconds:end_seconds:poster_seconds)` | Existing `ready` or `processing` records for the owner |
 
@@ -192,11 +194,11 @@ while derivative and accelerator URLs can be regenerated on demand.
 
 | Use Case | Recommended URL | Description & Access Model |
 |---|---|---|
-| Permanent canonical address | `url` (`GET /files/{id}/download`) | Universal, backend-agnostic URL. Safe to store and embed for all media kinds and visibilities. |
-| 300x300 thumbnail of a public image | `thumbnail_url` | Direct CDN/object read of the materialized WebP thumbnail (falls back to imgproxy). |
+| Main file / image address | `url` | Direct CDN URL on S3 with public base URL (0-hop, instant edge read); canonical `/files/{id}/download` on local storage or private records. |
+| 300x300 thumbnail of a public image | `thumbnail_url` | Direct CDN/object read of the materialized WebP thumbnail (falls back to signed imgproxy with `.webp`). |
 | Thumbnail of a private image | `GET /files/{id}/download?rendition=thumb` | Requires owner bearer auth or a scoped `read:file` token. Also supports `?rendition=t300`. |
-| Lowest-latency public direct read | `direct_url` | Direct CDN/bucket URL on `s3`/`gcp` with a public base URL. Unauthenticated, no redirect hop. |
-| Custom image transformation | `imgproxy_custom_url` | Returned on public uploads when custom resize/crop/format parameters are provided. |
+| Custom image transformation | `custom_url` | Returned on public uploads when custom resize/crop/format parameters are provided. |
+| Video poster image | `poster_url` | Direct CDN URL when public base URL is configured, or signed imgproxy URL. |
 | Anonymous external sharing | `POST /files/{id}/share` -> `share_url` | Unlisted 32-byte secret token. Revocable via API, bypasses visibility restrictions. |
 | Scoped end-user access to a private file | Capability JWT with `read:file` | Signed token granting access strictly to one specific file ID for `GET /files/{id}/download`. |
 
@@ -424,7 +426,8 @@ record returns **404 Not Found**.
 | `POST` | `/upload/presign` | Master token | Mints short-lived capability JWTs and pre-authenticated direct upload URLs for `image`, `video`, or `file`. |
 
 #### Image Ingestion Parameters
-- **Form fields:** `file`, `optimization` (`size`|`balanced`|`quality`), `visibility` (`public`|`private`), `imgproxy_width`, `imgproxy_height`, `imgproxy_fit`, `imgproxy_format`.
+- **Query parameters:** `thumbnail` (boolean, default `false`: whether to generate and return a 300x300 thumbnail).
+- **Form fields:** `file`, `optimization` (`size`|`balanced`|`quality`), `visibility` (`public`|`private`), `width`, `height`, `fit`, `format`.
 - **Accepted formats:** PNG, JPEG, GIF, WebP, HEIC (detected via magic bytes). SVG is rejected to prevent SSRF and XML entity expansion attacks.
 - **Optimization profiles:**
   - `size`: WebP quality 65, max dimension 1280 px.
@@ -468,16 +471,15 @@ Retrieve record details via `GET /files/{id}`:
   "webhook_last_error": null,
   "webhook_updated_at": "2026-08-15T09:12:44+00:00",
   "visibility": "public",
-  "url": "https://media.example.com/files/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95/download",
-  "direct_url": "https://cdn.example.com/videos/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95_compressed.mp4",
-  "poster_url": "https://media.example.com/imgproxy/<sig>/rs:auto/<src>",
+  "url": "https://cdn.example.com/videos/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95_compressed.mp4",
+  "poster_url": "https://cdn.example.com/posters/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95_poster.webp",
   "created_at": "2026-08-15T09:11:02+00:00",
   "updated_at": "2026-08-15T09:12:40+00:00"
 }
 ```
 
-- **`url`:** Permanent canonical address (`/files/{id}/download`). Present on every ready record across all kinds and visibilities.
-- **`direct_url` / `thumbnail_url` / `poster_url`:** Public-only accelerators. Withheld on private records.
+- **`url`:** Direct CDN URL when a public base URL is configured, or canonical `/files/{id}/download` on local storage or private records.
+- **`thumbnail_url` / `poster_url`:** Public-only accelerators (withheld on private records).
 - **`GET /files`:** Returns paginated records: `{"files": [...], "total_count": N, "limit": L, "offset": O}`.
 
 ---
@@ -520,7 +522,7 @@ does not rotate keys.
 | `GET` | `/healthz` | None | Liveness probe (returns 200 OK when web process is responding). |
 | `GET` | `/readyz` | None | Readiness probe. Validates live round-trips to Redis and PostgreSQL, plus storage initialization (returns 503 on dependency failure). |
 
-All QR endpoints support optional image logo overlays (`logo` form field) and custom `scale` (1–20).
+All QR endpoints support optional image logo overlays (`logo` form field), output format selection (`format=png` [default] or `format=svg`), and custom `scale` (1–20).
 
 ---
 

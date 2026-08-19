@@ -136,11 +136,13 @@ def _is_aac(header: bytes) -> bool:
 
 
 def _is_m4a(header: bytes) -> bool:
-    return (
-        len(header) >= 12
-        and header[4:8] == b"ftyp"
-        and header[8:12] in {b"M4A ", b"m4a ", b"mp41", b"mp42", b"isom", b"dash"}
-    )
+    # Brand set narrowed to match `_sniff_isobmff`'s (the trusted auto-detect
+    # path) exactly. It previously also included mp41/mp42/isom/dash -- but
+    # those are generic/video ISO-BMFF brands in practice (a real M4A
+    # encoder's major brand is standardly "M4A ", not these), so a plain MP4
+    # *video* file declared as Content-Type: audio/mp4 passed this check
+    # untouched. See CLAUDE.md's Reliability fixes.
+    return len(header) >= 12 and header[4:8] == b"ftyp" and header[8:12] in {b"M4A ", b"m4a "}
 
 
 def _is_avif(header: bytes) -> bool:
@@ -148,9 +150,26 @@ def _is_avif(header: bytes) -> bool:
 
 
 def _is_quicktime(header: bytes) -> bool:
-    if len(header) >= 12 and header[4:8] == b"ftyp":
+    if len(header) >= 12 and header[4:8] == b"ftyp" and header[8:12] == b"qt  ":
         return True
+    # An older/"flat" QuickTime .mov can lack a leading ftyp box entirely.
     return len(header) >= 8 and header[4:8] in {b"moov", b"mdat", b"wide", b"free"}
+
+
+def _is_mp4(header: bytes) -> bool:
+    """An ISO-BMFF (`ftyp`-boxed) container whose major brand isn't already
+    claimed by a more specific type above. Mirrors `_sniff_isobmff`'s own
+    fallback (that function is the trusted auto-detection path already; this
+    reuses its same brand distinction rather than inventing a new one).
+
+    Previously this was `ftyp box present`, full stop -- so declaring
+    Content-Type: video/mp4 for an AVIF image or a QuickTime .mov passed
+    validation untouched, defeating the 'sniff wins' guarantee for exactly
+    those two cases (see CLAUDE.md's Reliability fixes).
+    """
+    if len(header) < 12 or header[4:8] != b"ftyp":
+        return False
+    return header[8:12] not in {b"avif", b"avis", b"qt  "}
 
 
 def _sniff_audio(header: bytes) -> str | None:
@@ -282,7 +301,7 @@ _MAGIC_VALIDATORS: dict[str, tuple[Callable[[bytes], bool], str]] = {
     MIME_AUDIO_AAC: (_is_aac, "AAC"),
     MIME_AUDIO_MP4: (_is_m4a, "M4A/MP4"),
     MIME_AUDIO_WEBM: (lambda h: len(h) >= 4 and h.startswith(b"\x1a\x45\xdf\xa3"), "WebM"),
-    MIME_VIDEO_MP4: (lambda h: len(h) >= 12 and h[4:8] == b"ftyp", "MP4"),
+    MIME_VIDEO_MP4: (_is_mp4, "MP4"),
     MIME_VIDEO_WEBM: (lambda h: len(h) >= 4 and h.startswith(b"\x1a\x45\xdf\xa3"), "WebM"),
     MIME_VIDEO_MATROSKA: (
         lambda h: len(h) >= 4 and h.startswith(b"\x1a\x45\xdf\xa3"),
@@ -334,10 +353,22 @@ def _guess_content_type_from_filename(filename: str | None, header: bytes) -> st
     if not guessed:
         return None
     norm_guessed = _normalize_media_type(guessed)
-    if norm_guessed in _ALLOWED_CONTENT_TYPES:
+    if norm_guessed not in _ALLOWED_CONTENT_TYPES:
+        return None
+    # This is a best-effort *guess* from the filename, not a caller-asserted
+    # declaration -- reaching this function at all means both the caller left
+    # content-type empty/octet-stream AND magic-byte sniffing already found no
+    # match (see the one call site). A mismatch here (e.g. "photo.png" whose
+    # bytes aren't actually a PNG) must fall through to the generic
+    # MIME_OCTET_STREAM default at that call site, not hard-reject an upload
+    # the caller correctly declared as octet-stream/unspecified in the first
+    # place. `_is_dangerous_content` already ran before any of this, so this
+    # isn't a security check being weakened -- it was only ever a naming hint.
+    try:
         _verify_magic_bytes_for_type(header, norm_guessed)
-        return norm_guessed
-    return None
+    except FileValidationError:
+        return None
+    return norm_guessed
 
 
 def validate_file_content(

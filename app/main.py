@@ -1,5 +1,6 @@
 import json as _json
 import logging
+from collections.abc import Coroutine
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,6 +11,7 @@ from app.config import settings
 from app.middleware import RequestIDLogFilter, RequestIDMiddleware
 from app.routers import (
     auth,
+    batch,
     health,
     management,
     playback,
@@ -17,6 +19,7 @@ from app.routers import (
     qr,
     tasks,
     upload,
+    visibility,
     webhooks,
 )
 from app.services.metadata import close_metadata_store, get_metadata_store
@@ -59,6 +62,16 @@ for _uvicorn_logger in ("uvicorn", "uvicorn.access", "uvicorn.error"):
 logger = logging.getLogger(__name__)
 
 
+async def _safe_shutdown(name: str, coro: Coroutine[object, object, object]) -> None:
+    """Run one shutdown step in isolation: a failure closing one pooled
+    client (e.g. an already-broken asyncpg pool) must not prevent the rest
+    from running and leaking their own resources."""
+    try:
+        await coro
+    except Exception:
+        logger.exception("Failed to close %s cleanly during shutdown", name)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Not fatal (see Settings.public_images_unservable), but silent breakage is
@@ -67,7 +80,7 @@ async def lifespan(app: FastAPI):
     if settings.public_images_unservable:
         logger.warning(
             "STORAGE_BACKEND=%s has no *_PUBLIC_BASE_URL: imgproxy cannot fetch image "
-            "sources, so thumbnail_url/direct_url on public records will not resolve. "
+            "sources, so thumbnail_url on public records will not resolve. "
             "Set one unless this deployment stores private media only.",
             settings.STORAGE_BACKEND,
         )
@@ -81,12 +94,14 @@ async def lifespan(app: FastAPI):
     store = await get_metadata_store()
     await store.connect()
     yield
-    # Release pooled storage + metadata clients held by the web process.
-    await close_metadata_store()
-    await close_storage()
-    await health.close_redis()
+    # Release pooled storage + metadata clients held by the web process. Each
+    # step is isolated via _safe_shutdown (see above) -- a failure in one must
+    # not skip the rest and leak whatever comes after it.
+    await _safe_shutdown("metadata store", close_metadata_store())
+    await _safe_shutdown("storage backend", close_storage())
+    await _safe_shutdown("health-check redis", health.close_redis())
     if not broker.is_worker_process:
-        await broker.shutdown()
+        await _safe_shutdown("broker", broker.shutdown())
 
 
 # Tag order here is display order in the docs -- Swagger UI preserves the
@@ -200,7 +215,12 @@ app.add_middleware(RequestIDMiddleware)
 app.include_router(auth.router)
 app.include_router(upload.router)
 app.include_router(tasks.router)
+# batch MUST come before management: /files/batch is a literal path that
+# management's /files/{file_id} would otherwise shadow (Starlette matches
+# routes in registration order, not by static-vs-dynamic specificity).
+app.include_router(batch.router)
 app.include_router(management.router)
+app.include_router(visibility.router)
 app.include_router(playback.router)
 app.include_router(posters.router)
 app.include_router(webhooks.router)

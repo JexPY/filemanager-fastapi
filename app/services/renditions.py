@@ -4,22 +4,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+MIME_WEBP = "image/webp"
+FORMAT_WEBP = "webp"
+
 
 @dataclass(frozen=True)
 class RenditionSpec:
     """Specification for a materialized rendition.
 
     Format and dimensions are intrinsic properties of the rendition,
-    independent of the parent object's type or extension.
+    independent of the parent object's type or extension. ``crop`` picks the
+    libvips resize strategy: True center-crops to exactly width x height
+    (right for square, avatar-shaped content); False fits *within* the
+    width x height box preserving aspect ratio, so a landscape photo keeps its
+    full frame instead of losing its edges to a square crop.
     """
 
     name: str
     suffix: str
     width: int
     height: int
-    format: str = "webp"
-    mime_type: str = "image/webp"
+    format: str = FORMAT_WEBP
+    mime_type: str = MIME_WEBP
     quality: int = 80
+    crop: bool = True
+    # libwebp's compression-effort search, 0 (fastest) to 6 (slowest, smallest
+    # file). 6 is the right choice for the *primary* encode (a one-time cost
+    # for the asset people actually view/embed) but the wrong default for a
+    # materialized rendition: these are accelerators generated synchronously
+    # on every upload, and effort=6 on a real photo -- not the tiny test
+    # fixtures -- is genuinely slow (libwebp's own benchmarks put 4->6 at
+    # roughly 2-4x slower for a low-single-digit-percent size gain). 4 trades
+    # a little file size for a large, worthwhile speed win here.
+    effort: int = 4
 
 
 RENDITION_SPECS: dict[str, RenditionSpec] = {
@@ -28,9 +45,11 @@ RENDITION_SPECS: dict[str, RenditionSpec] = {
         suffix="t300",
         width=300,
         height=300,
-        format="webp",
-        mime_type="image/webp",
+        format=FORMAT_WEBP,
+        mime_type=MIME_WEBP,
         quality=80,
+        crop=True,
+        effort=4,
     ),
 }
 
@@ -79,22 +98,39 @@ def derive_rendition_key(parent_storage_key: str, rend_name: str) -> str:
     return f"{prefix}/{file_part}" if prefix else file_part
 
 
-def derive_thumbnail_url(storage_key: str, renditions: dict[str, str] | None = None) -> str:
-    """Derive the canonical thumbnail URL for an image.
+def _derive_rendition_public_url(
+    rendition_name: str,
+    fallback_processing_options: str,
+    storage_key: str,
+    renditions: dict[str, str] | None,
+) -> str:
+    """Shared resolution for every materialized rendition's public URL.
 
-    If a materialized thumbnail rendition exists:
+    If the rendition was materialized (present in `renditions`):
     - On object storage with a public base URL, emits the direct CDN object URL.
     - Otherwise (local or no public base URL), emits signed imgproxy with 'rs:auto'.
 
-    If no materialized rendition exists (pre-existing records):
-    - Falls back to signed imgproxy with 'rs:fill:300:300:0/g:no'.
+    If it was not materialized (pre-existing records from before a given
+    rendition spec existed), falls back to a live signed imgproxy transform of
+    the *parent* object using `fallback_processing_options`.
     """
     from app.services.imgproxy import signed_image_url
     from app.services.storage import has_public_base_url, public_object_url
 
-    thumb_key = renditions.get("thumbnail") if renditions else None
-    if thumb_key:
+    spec = get_rendition_spec(rendition_name)
+    fmt = spec.format if spec else "webp"
+    rend_key = renditions.get(rendition_name) if renditions else None
+    if rend_key:
         if has_public_base_url():
-            return public_object_url(thumb_key)
-        return signed_image_url(thumb_key, processing_options="rs:auto")
-    return signed_image_url(storage_key, processing_options="rs:fill:300:300:0/g:no")
+            return public_object_url(rend_key)
+        return signed_image_url(rend_key, processing_options="rs:auto", format=fmt)
+    return signed_image_url(storage_key, processing_options=fallback_processing_options, format=fmt)
+
+
+def derive_thumbnail_url(storage_key: str, renditions: dict[str, str] | None = None) -> str:
+    """Derive the canonical 300x300 thumbnail URL for an image (materialized
+    object when available, else a live imgproxy fallback -- see
+    `_derive_rendition_public_url`)."""
+    return _derive_rendition_public_url(
+        "thumbnail", "rs:fill:300:300:0/g:no", storage_key, renditions
+    )

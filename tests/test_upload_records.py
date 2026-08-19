@@ -99,17 +99,34 @@ async def test_upload_image_custom_imgproxy_url(
         headers={"Authorization": "Bearer test-token"},
         files={"file": ("tiny.png", png, "image/png")},
         data={
-            "imgproxy_width": 1024,
-            "imgproxy_height": 768,
-            "imgproxy_fit": "fill",
-            "imgproxy_format": "webp",
+            "width": 1024,
+            "height": 768,
+            "fit": "fill",
+            "format": "webp",
         },
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert "imgproxy_custom_url" in body
-    assert "/rs:fill:1024:768/" in body["imgproxy_custom_url"]
-    assert body["imgproxy_custom_url"].endswith(".webp")
+    assert "custom_url" in body
+    assert "/rs:fill:1024:768/" in body["custom_url"]
+    assert body["custom_url"].endswith(".webp")
+
+
+async def test_upload_image_no_custom_url_for_a_no_op_format_request(
+    client: httpx.AsyncClient,
+) -> None:
+    """format="webp" alone (no width/height/fit) is not a real customization --
+    every processed image is already stored as webp, so this avoids a pointless
+    extra URL."""
+    png = fixture_bytes("tiny.png")
+    resp = await client.post(
+        "/upload/image",
+        headers={"Authorization": "Bearer test-token"},
+        files={"file": ("tiny.png", png, "image/png")},
+        data={"fit": "auto", "format": "webp"},
+    )
+    assert resp.status_code == 200
+    assert "custom_url" not in resp.json()
 
 
 async def test_to_public_url_is_the_canonical_route_for_every_kind(
@@ -148,22 +165,34 @@ async def test_to_public_url_is_the_canonical_route_for_every_kind(
         status="ready",
         visibility="public",
     )
-    video_with_poster = await fake_metadata.set_poster(video.id, "poster_abc")
+    # A real poster record -- poster_storage_key is resolved fresh from the
+    # linked row (mirroring Postgres's LEFT JOIN), not persisted at link time,
+    # so set_poster needs an id that actually exists to produce a poster_url.
+    poster = await fake_metadata.create(
+        owner=TEST_OWNER,
+        kind="image",
+        storage_key="posters/test_to_public.webp",
+        content_type="image/webp",
+        size_bytes=10,
+        status="ready",
+        visibility="public",
+    )
+    video_with_poster = await fake_metadata.set_poster(video.id, poster.id)
     assert video_with_poster is not None
     video_data = video_with_poster.to_public()
     # Identical canonical shape to the image above -- that is the point.
     assert video_data["url"].endswith(f"/files/{video.id}/download")
     assert "/rs:auto/" in video_data["poster_url"]
     assert "/files/" not in video_data["poster_url"]
-    assert video_data["poster_upload_id"] == "poster_abc"
+    assert video_data["poster_upload_id"] == poster.id
 
 
 async def test_to_public_withholds_accelerator_urls_from_private_records(
     fake_metadata: InMemoryMetadataStore,
 ) -> None:
-    """A private record gets the canonical route and nothing else.
+    """A private record gets the canonical download route and nothing else.
 
-    `thumbnail_url`/`direct_url` bypass the app entirely, so emitting either for
+    `thumbnail_url` bypasses the app entirely, so emitting it for
     a private record would hand out a permanent, unauthenticated way to read it.
     """
     private = await fake_metadata.create(
@@ -179,4 +208,3 @@ async def test_to_public_withholds_accelerator_urls_from_private_records(
 
     assert data["url"].endswith(f"/files/{private.id}/download")
     assert "thumbnail_url" not in data
-    assert "direct_url" not in data

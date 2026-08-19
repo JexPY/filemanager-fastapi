@@ -33,8 +33,9 @@ async def test_image_upload_generates_and_stores_thumbnail_rendition(
     fake_storage: InMemoryStorageBackend,
     fake_metadata: InMemoryMetadataStore,
 ) -> None:
+    # With ?thumbnail=true, generates thumbnail
     resp = await client.post(
-        "/upload/image",
+        "/upload/image?thumbnail=true",
         headers=auth_headers,
         files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
     )
@@ -50,10 +51,22 @@ async def test_image_upload_generates_and_stores_thumbnail_rendition(
     assert thumb_key.startswith("images/")
     assert thumb_key.endswith("_t300.webp")
 
-    # Both main image and thumbnail object exist in storage
+    # Main image and thumbnail objects exist in storage
     assert record.storage_key in fake_storage.objects
     assert thumb_key in fake_storage.objects
     assert fake_storage.objects[thumb_key][:4] == b"RIFF"
+
+    # Default upload (thumbnail=False) does not generate a rendition
+    resp_default = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        files={"file": ("tiny2.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp_default.status_code == 200
+    body_default = resp_default.json()
+    record_default = await fake_metadata.get(body_default["id"], OWNER)
+    assert record_default is not None
+    assert record_default.renditions == {}
 
 
 async def test_to_public_emits_direct_cdn_thumbnail_when_public_base_url_set(
@@ -78,7 +91,7 @@ async def test_to_public_emits_direct_cdn_thumbnail_when_public_base_url_set(
         renditions={"thumbnail": "images/abc_t300.webp"},
     )
     public_view = rec.to_public()
-    assert public_view["direct_url"] == "https://cdn.example.com/images/abc.webp"
+    assert public_view["url"] == "https://cdn.example.com/images/abc.webp"
     assert public_view["thumbnail_url"] == "https://cdn.example.com/images/abc_t300.webp"
 
     # 2. Pre-existing record without renditions (backward compatibility fallback)
@@ -93,7 +106,7 @@ async def test_to_public_emits_direct_cdn_thumbnail_when_public_base_url_set(
         renditions=None,
     )
     old_public_view = old_rec.to_public()
-    assert old_public_view["direct_url"] == "https://cdn.example.com/images/old.webp"
+    assert old_public_view["url"] == "https://cdn.example.com/images/old.webp"
     assert "/rs:fill:300:300:0/g:no/" in old_public_view["thumbnail_url"]
 
 
@@ -115,7 +128,7 @@ async def test_private_image_withholds_accelerators_and_serves_rendition_via_dow
 
     # Accelerators withheld in to_public()
     public_view = rec.to_public()
-    assert "direct_url" not in public_view
+    assert public_view["url"].endswith(f"/files/{rec.id}/download")
     assert "thumbnail_url" not in public_view
 
     # Authorized download with ?rendition=thumb
@@ -321,13 +334,13 @@ async def test_upload_and_record_thumbnail_urls_are_byte_identical(
 ) -> None:
     """R1: The upload response and the record view must return byte-identical thumbnail URLs."""
     resp = await client.post(
-        "/upload/image",
+        "/upload/image?thumbnail=true",
         headers=auth_headers,
         files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
     )
     assert resp.status_code == 200
     body = resp.json()
-    upload_thumb_url = body["imgproxy_thumbnail_url"]
+    upload_thumb_url = body["thumbnail_url"]
 
     # Fetch via GET /files/{id}
     rec_resp = await client.get(f"/files/{body['id']}", headers=auth_headers)
@@ -338,6 +351,39 @@ async def test_upload_and_record_thumbnail_urls_are_byte_identical(
     assert upload_thumb_url == record_thumb_url, (
         f"Thumbnail URLs must match byte-for-byte: {upload_thumb_url!r} != {record_thumb_url!r}"
     )
+
+
+async def test_upload_response_carries_url_without_a_followup_get(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2: on a public-base-url-configured backend, POST /upload/image alone
+    (no follow-up GET /files/{id}) must be enough to render the image: the
+    full-size direct url and the thumbnail."""
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "s3")
+    monkeypatch.setattr(settings, "S3_PUBLIC_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setattr(
+        storage_module, "_storage", InMemoryStorageBackend(base_url="https://cdn.example.com")
+    )
+
+    resp = await client.post(
+        "/upload/image?thumbnail=true",
+        headers=auth_headers,
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["url"].startswith("https://cdn.example.com/images/")
+    assert body["url"].endswith(".webp")
+    assert body["thumbnail_url"].startswith("https://cdn.example.com/images/")
+    assert body["thumbnail_url"].endswith("_t300.webp")
+
+    # Matches GET /files/{id} exactly -- no separate resolution path.
+    record_view = (await client.get(f"/files/{body['id']}", headers=auth_headers)).json()
+    assert record_view["url"] == body["url"]
+    assert record_view["thumbnail_url"] == body["thumbnail_url"]
 
 
 def test_derive_rendition_key_format_independent_of_parent() -> None:
@@ -390,15 +436,15 @@ async def test_private_image_upload_withholds_imgproxy_urls(
     two views of the same record disagree.
     """
     private = await client.post(
-        "/upload/image",
+        "/upload/image?thumbnail=true",
         headers=auth_headers,
         files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
         data={"visibility": "private"},
     )
     assert private.status_code == 200
     body = private.json()
-    assert "imgproxy_thumbnail_url" not in body
-    assert "imgproxy_custom_url" not in body
+    assert "custom_url" not in body
+    assert "thumbnail_url" not in body
     assert body["id"]
 
     # The record view agrees, and the app route is still the way in.
@@ -406,11 +452,13 @@ async def test_private_image_upload_withholds_imgproxy_urls(
     assert "thumbnail_url" not in record
     assert record["url"].endswith(f"/files/{body['id']}/download")
 
-    # A public upload is unaffected.
+    # A public upload is unaffected, and carries the thumbnail URL when requested
     public = await client.post(
-        "/upload/image",
+        "/upload/image?thumbnail=true",
         headers=auth_headers,
         files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
         data={"visibility": "public"},
     )
-    assert "imgproxy_thumbnail_url" in public.json()
+    public_body = public.json()
+    assert "thumbnail_url" in public_body
+    assert public_body["thumbnail_url"].endswith(".webp")

@@ -105,11 +105,18 @@ class StorageBackend(ABC):
         silently drops the original filename)."""
         pass
 
-    def local_path(self, key: str) -> str | None:
+    async def local_path(self, key: str) -> str | None:  # NOSONAR
         """The object's path on a filesystem the caller shares, if any
-        (LocalStorage), else None. Lets a co-located worker hand ffmpeg the path
-        directly instead of downloading the bytes into RAM. Object stores have no
-        shared filesystem -> None."""
+        (LocalStorage) *and the object actually exists there*, else None.
+        Lets a co-located worker hand ffmpeg the path directly instead of
+        downloading the bytes into RAM. Object stores have no shared
+        filesystem -> always None.
+
+        Async (unlike most of this ABC's cheap accessors) because
+        LocalStorage's override has to stat() the file to answer "does it
+        exist", and that syscall must not block the event loop -- the one
+        caller (`_resolve_ffmpeg_input`) already awaits everything else on
+        this path (presigned_get_url is async too), so this costs nothing."""
         return None
 
     async def upload_from_path(self, path: str, key: str, content_type: str) -> StorageObject:
@@ -157,15 +164,25 @@ class LocalStorage(StorageBackend):
         safe_key = key.lstrip("/")
         return f"{self._base}/{safe_key}" if self._base else safe_key
 
-    def local_path(self, key: str) -> str:
+    async def local_path(self, key: str) -> str | None:
         """The object's on-disk path, through the same traversal guard as
-        read/write. A co-located worker (sharing the media volume) hands this
-        straight to ffmpeg, so the bytes never round-trip through its memory."""
-        return str(self._resolve(key))
+        read/write -- but only if it's actually there. A co-located worker
+        (sharing the media volume) hands this straight to ffmpeg, so the
+        bytes never round-trip through its memory; a path to a nonexistent
+        file would otherwise be handed to ffmpeg as-is and fail with an
+        unrelated, confusing ffmpeg error instead of a clean StorageError
+        (the caller falls back to presigned_get_url, and -- local having
+        none -- surfaces a clear "no input source" failure instead)."""
+        target = self._resolve(key)
+        if not await asyncio.to_thread(target.is_file):
+            return None
+        return str(target)
 
     async def upload(self, data: bytes, key: str, content_type: str) -> StorageObject:
         target = self._resolve(key)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        # mkdir() is a blocking syscall -- offload it, same as delete()'s
+        # unlink() below (every other blocking call on this class already is).
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
         async with aiofiles.open(target, "wb") as f:
             await f.write(data)
         return StorageObject(
@@ -176,7 +193,7 @@ class LocalStorage(StorageBackend):
         # Stream the staged temp file into place a chunk at a time; never load the
         # whole (possibly hundreds-of-MB) object into memory.
         target = self._resolve(key)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
         size = 0
         async with aiofiles.open(path, "rb") as src, aiofiles.open(target, "wb") as dst:
             while chunk := await src.read(1024 * 1024):
@@ -195,14 +212,18 @@ class LocalStorage(StorageBackend):
             raise StorageNotFound(f"Object not found: {key!r}") from exc
 
     async def delete(self, key: str) -> None:
-        # Idempotent: deleting a missing object is not an error.
-        self._resolve(key).unlink(missing_ok=True)
+        # Idempotent: deleting a missing object is not an error. unlink() is a
+        # blocking syscall -- offload it so it never stalls the event loop
+        # (this runs on every DELETE /files/{id}, rendition cleanup, and
+        # visibility-rotation cleanup, unlike every other method on this class,
+        # which already goes through aiofiles).
+        await asyncio.to_thread(self._resolve(key).unlink, missing_ok=True)
 
     async def copy(self, src_key: str, dst_key: str) -> None:
         src, dst = self._resolve(src_key), self._resolve(dst_key)
-        if not src.is_file():
+        if not await asyncio.to_thread(src.is_file):
             raise StorageNotFound(f"Object not found: {src_key!r}")
-        dst.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(dst.parent.mkdir, parents=True, exist_ok=True)
         # shutil does the copy in C and off the event loop; never read the whole
         # object into this process just to write it back out.
         await asyncio.to_thread(shutil.copyfile, src, dst)

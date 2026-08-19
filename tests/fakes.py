@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from urllib.parse import quote
@@ -56,12 +57,13 @@ class InMemoryStorageBackend(StorageBackend):
     def public_url(self, key: str) -> str:
         return f"{self._base_url}/{key}"
 
-    def local_path(self, key: str) -> str | None:
+    async def local_path(self, key: str) -> str | None:
         # Model the local backend: hand back a real on-disk path (materialized
         # from the stored bytes on first use) so a co-located worker can read
         # bytes in place, mirroring LocalStorage. Object-store backends
         # (presign_capable) have no shared filesystem -> None, so the worker's
-        # resolver falls through to presigned_get_url instead.
+        # resolver falls through to presigned_get_url instead. `key not in
+        # self.objects` mirrors LocalStorage's own existence check.
         if self._presign_capable or key not in self.objects:
             return None
         path = self._materialized.get(key)
@@ -124,6 +126,26 @@ class InMemoryMetadataStore(MetadataStore):
     async def ping(self) -> bool:
         return True
 
+    def _joined(self, record: UploadRecord) -> UploadRecord:
+        """Resolve `poster_storage_key` fresh from the current poster row,
+        mirroring PostgresMetadataStore's `LEFT JOIN uploads p ON
+        u.poster_upload_id = p.id` -- it's a *join*, computed on read, never a
+        persisted column, so `set_poster` must not snapshot it once and
+        `self.records` must never carry a stale copy. Apply only at the same
+        call sites the real store's `_JOIN_COLUMNS` queries use (`get`,
+        `get_by_task_id`, `list`, `get_many`, `find_ready_by_hash`,
+        `find_active_video_by_hash`, `get_by_id`, `set_poster` (via
+        `get_by_id` in Postgres), `get_by_share_token`) -- the others
+        (`create`, `delete`, `mark_ready`, `mark_failed`, `mark_webhook`,
+        `set_visibility`, `set_share_token`, `clear_share_token`) use plain
+        `_COLUMNS` in Postgres and genuinely don't carry poster info on their
+        return value either.
+        """
+        if record.poster_upload_id is None:
+            return record
+        poster = self.records.get(record.poster_upload_id)
+        return replace(record, poster_storage_key=poster.storage_key if poster else None)
+
     async def create(
         self,
         *,
@@ -184,33 +206,63 @@ class InMemoryMetadataStore(MetadataStore):
 
     async def get(self, upload_id: str, owner: str) -> UploadRecord | None:
         record = self.records.get(upload_id)
-        return record if record is not None and record.owner == owner else None
+        if record is None or record.owner != owner:
+            return None
+        return self._joined(record)
 
     async def get_by_task_id(self, task_id: str, owner: str) -> UploadRecord | None:
         for i in reversed(self._order):
             record = self.records[i]
             if record.task_id == task_id and record.owner == owner:
-                return record
+                return self._joined(record)
         return None
 
     async def list(
-        self, owner: str, *, kind: str | None = None, limit: int = 50, offset: int = 0
+        self,
+        owner: str,
+        *,
+        kind: str | None = None,
+        status: str | None = None,
+        visibility: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[UploadRecord]:
         matches = [
-            self.records[i]
+            self._joined(self.records[i])
             for i in reversed(self._order)
-            if self.records[i].owner == owner and (kind is None or self.records[i].kind == kind)
+            if self.records[i].owner == owner
+            and (kind is None or self.records[i].kind == kind)
+            and (status is None or self.records[i].status == status)
+            and (visibility is None or self.records[i].visibility == visibility)
         ]
         return matches[offset : offset + limit]
 
-    async def count(self, owner: str, *, kind: str | None = None) -> int:
+    async def count(
+        self,
+        owner: str,
+        *,
+        kind: str | None = None,
+        status: str | None = None,
+        visibility: str | None = None,
+    ) -> int:
         return len(
             [
                 r
                 for r in self.records.values()
-                if r.owner == owner and (kind is None or r.kind == kind)
+                if r.owner == owner
+                and (kind is None or r.kind == kind)
+                and (status is None or r.status == status)
+                and (visibility is None or r.visibility == visibility)
             ]
         )
+
+    async def get_many(self, owner: str, upload_ids: Sequence[str]) -> Sequence[UploadRecord]:
+        wanted = set(upload_ids)
+        return [
+            self._joined(self.records[i])
+            for i in reversed(self._order)
+            if i in wanted and self.records[i].owner == owner
+        ]
 
     async def delete(self, upload_id: str, owner: str | None = None) -> UploadRecord | None:
         record = self.records.get(upload_id)
@@ -228,7 +280,7 @@ class InMemoryMetadataStore(MetadataStore):
                 and record.content_hash == content_hash
                 and record.status == STATUS_READY
             ):
-                return record
+                return self._joined(record)
         return None
 
     async def find_active_video_by_hash(self, owner: str, content_hash: str) -> UploadRecord | None:
@@ -240,7 +292,7 @@ class InMemoryMetadataStore(MetadataStore):
                 and record.kind == KIND_VIDEO
                 and record.status in (STATUS_READY, STATUS_PROCESSING)
             ):
-                return record
+                return self._joined(record)
         return None
 
     async def mark_ready(
@@ -282,22 +334,21 @@ class InMemoryMetadataStore(MetadataStore):
         return updated
 
     async def get_by_id(self, upload_id: str) -> UploadRecord | None:
-        return self.records.get(upload_id)
+        record = self.records.get(upload_id)
+        return self._joined(record) if record is not None else None
 
     async def set_poster(self, video_id: str, poster_upload_id: str) -> UploadRecord | None:
         record = self.records.get(video_id)
         if record is None:
             return None
-        poster = self.records.get(poster_upload_id)
-        poster_storage_key = poster.storage_key if poster else None
-        updated = replace(
-            record,
-            poster_upload_id=poster_upload_id,
-            poster_storage_key=poster_storage_key,
-            updated_at=datetime.now(UTC),
-        )
+        # poster_storage_key is never persisted here (real Postgres has no
+        # such column either) -- only poster_upload_id is stored, and
+        # `_joined` resolves the key fresh on every read, same as the real
+        # store's LEFT JOIN. Mirrors PostgresMetadataStore.set_poster, which
+        # updates the FK column then re-fetches via the joined get_by_id.
+        updated = replace(record, poster_upload_id=poster_upload_id, updated_at=datetime.now(UTC))
         self.records[video_id] = updated
-        return updated
+        return self._joined(updated)
 
     async def mark_webhook(
         self,
@@ -334,7 +385,12 @@ class InMemoryMetadataStore(MetadataStore):
         updated = replace(
             record,
             visibility=visibility,
-            storage_key=storage_key or record.storage_key,
+            # `is not None`, not `or` -- matches the real SQL's
+            # `storage_key = COALESCE($4, storage_key)`, which only treats a
+            # NULL parameter as "keep the old value" (an explicit empty
+            # string would overwrite it). `renditions` right below already
+            # gets this right; `storage_key` didn't.
+            storage_key=storage_key if storage_key is not None else record.storage_key,
             renditions=renditions if renditions is not None else record.renditions,
             updated_at=datetime.now(UTC),
         )
@@ -361,7 +417,7 @@ class InMemoryMetadataStore(MetadataStore):
         for i in reversed(self._order):
             record = self.records[i]
             if record.share_token == token:
-                return record
+                return self._joined(record)
         return None
 
     async def aclose(self) -> None:

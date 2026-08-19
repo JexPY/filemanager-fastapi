@@ -13,7 +13,8 @@ from app.config import settings
 from app.services.file_validation import MIME_OCTET_STREAM, get_content_disposition_type
 from app.services.imgproxy import signed_image_url
 from app.services.renditions import derive_thumbnail_url
-from app.services.storage import StorageError, get_storage
+from app.services.storage import StorageError, get_storage, has_public_base_url, public_object_url
+from app.urls import public_url
 
 # 499 is nginx's non-standard "client closed request" code, which is what the
 # edge proxy in front of this app already logs for an abandoned upload. Starlette
@@ -22,6 +23,8 @@ from app.services.storage import StorageError, get_storage
 # path meant to return 499. Define it here instead of guessing a nearby standard
 # code, so the abort stays distinguishable from a real client or server error.
 HTTP_499_CLIENT_CLOSED_REQUEST = 499
+
+_CSP_DEFAULT_NONE = "default-src 'none';"
 
 
 async def _read_capped(file: UploadFile, request: Request, max_bytes: int) -> bytes:
@@ -119,6 +122,8 @@ def _xaccel_response(
     _assert_safe_media_key(storage_key)
     response = Response(media_type=media_type)
     response.headers["X-Accel-Redirect"] = f"/internal-media/{storage_key}"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Content-Security-Policy"] = _CSP_DEFAULT_NONE
     if filename:
         safe_name = _sanitize_content_disposition_filename(filename)
         disp_type = get_content_disposition_type(media_type)
@@ -161,6 +166,8 @@ def _object_xaccel_response(target_url: str, media_type: str = MIME_OCTET_STREAM
     response = Response(media_type=media_type)
     response.headers["X-Accel-Redirect"] = "/internal-object/"
     response.headers["X-Object-Target"] = target_url
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Content-Security-Policy"] = _CSP_DEFAULT_NONE
     # Deliberately no Content-Disposition here. The signed upstream URL already
     # carries one as a response-header override, and nginx passes the upstream's
     # headers through -- setting it on both sides emitted the header twice
@@ -187,7 +194,9 @@ def _local_file_response(
         disp_type = get_content_disposition_type(media_type)
         headers = {"Content-Disposition": f'{disp_type}; filename="{safe_name}"'}
     else:
-        headers = None
+        headers = {}
+    headers["X-Content-Type-Options"] = "nosniff"
+    headers["Content-Security-Policy"] = _CSP_DEFAULT_NONE
     return FileResponse(path, media_type=media_type, headers=headers)
 
 
@@ -271,28 +280,43 @@ def _image_response(
     the two views of the same record disagreed. A private upload is readable
     through `GET /files/{id}/download?rendition=thumb`.
     """
+    if visibility == "public" and has_public_base_url():
+        main_url = public_object_url(storage_key)
+    else:
+        main_url = public_url(f"/files/{record_id}/download")
+
     response = {
         "status": "success",
         "id": record_id,
         "size_bytes": size_bytes,
         "size_mb": round(size_bytes / (1024 * 1024), 2) if size_bytes else None,
         "dimensions": {"width": width, "height": height},
+        "url": main_url,
     }
     if visibility != "public":
         return response
 
-    response["imgproxy_thumbnail_url"] = derive_thumbnail_url(storage_key, renditions)
+    if renditions and "thumbnail" in renditions:
+        response["thumbnail_url"] = derive_thumbnail_url(storage_key, renditions)
 
-    if custom_width or custom_height or custom_format or custom_fit != "auto":
-        cw = custom_width or 0
-        ch = custom_height or 0
-        if cw == 0 and ch == 0:
-            processing_options = f"rs:{custom_fit}"
-        else:
-            processing_options = f"rs:{custom_fit}:{cw}:{ch}"
+    # A processed image is *always* stored as webp (image_vips.py's
+    # validate_and_strip_image encodes to .webp unconditionally), so
+    # custom_format="webp" with no width/height/fit is not a customization at
+    # all -- it's a no-op imgproxy round trip that re-fetches and re-encodes
+    # the already-webp original for zero actual change. A client (or, as
+    # observed, Swagger UI's "Try it out" form) that leaves width/height
+    # blank but still sends the form's own default format=webp used to
+    # trigger this branch and get a redundant custom URL for nothing.
+    requests_format_change = custom_format is not None and custom_format != "webp"
+    if not (custom_width or custom_height or requests_format_change or custom_fit != "auto"):
+        return response
 
-        response["imgproxy_custom_url"] = signed_image_url(
-            storage_key, processing_options=processing_options, format=custom_format
-        )
+    cw = custom_width or 0
+    ch = custom_height or 0
+    processing_options = f"rs:{custom_fit}" if not (cw or ch) else f"rs:{custom_fit}:{cw}:{ch}"
+
+    response["custom_url"] = signed_image_url(
+        storage_key, processing_options=processing_options, format=custom_format or "webp"
+    )
 
     return response

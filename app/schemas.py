@@ -46,16 +46,23 @@ class ImageUploadResponse(BaseModel):
         description="Stored size in megabytes, rounded to 2dp (null for a 0-byte object)",
     )
     dimensions: ImageDimensions
-    imgproxy_thumbnail_url: str | None = Field(
+    url: str | None = Field(
         default=None,
-        description="Signed imgproxy URL: a 300x300 fill thumbnail. **Public uploads only** — "
-        "an imgproxy URL carries no ownership check and never expires, so a `private` upload "
-        "omits it and is readable solely through GET /files/{id}/download?rendition=thumb.",
+        description="The URL to view/download the full-size image: direct CDN URL on object "
+        "storage with a public base URL configured, or GET /files/{id}/download on local/private.",
     )
-    imgproxy_custom_url: str | None = Field(
+    thumbnail_url: str | None = Field(
         default=None,
-        description="Signed imgproxy URL for the requested custom width/height/fit/format; "
-        "present only when custom transform parameters were supplied on a public upload",
+        description="Same value and resolution as GET /files/{id}'s thumbnail_url: the "
+        "materialized 300x300 fill thumbnail's direct object/CDN URL, or a signed imgproxy "
+        "URL (with extension) when no public base URL is configured. Present when thumbnail "
+        "is requested on public uploads.",
+    )
+    custom_url: str | None = Field(
+        default=None,
+        description="Signed imgproxy URL (with extension) for the requested custom "
+        "width/height/fit/format; present only when custom transform parameters were "
+        "supplied on a public upload",
     )
 
 
@@ -159,18 +166,9 @@ class FileRecord(BaseModel):
     url: str | None = Field(
         default=None,
         description=(
-            "The canonical URL, same shape for every kind: GET /files/{id}/download. "
-            "Permanent and backend-agnostic -- unaffected by a storage-backend switch, a "
-            "CDN change, or a visibility flip -- and the only URL here that resolves for a "
-            "private record. Present once status='ready'. Persist this and the id, nothing else."
-        ),
-    )
-    direct_url: str | None = Field(
-        default=None,
-        description=(
-            "The object's public/CDN URL: no redirect hop, no imgproxy. An accelerator for "
-            "LCP-sensitive embedding, present only for a public record on an object-store "
-            "backend with a *_PUBLIC_BASE_URL configured."
+            "The URL to view/download the file: direct CDN URL on object storage with a "
+            "public base URL configured, or canonical GET /files/{id}/download on local "
+            "storage or private records. Present once status='ready'."
         ),
     )
     thumbnail_url: str | None = Field(
@@ -178,12 +176,15 @@ class FileRecord(BaseModel):
         description=(
             "Public URL for a 300x300 fill thumbnail. On object stores with a public base URL "
             "configured, this is a direct CDN/object read of the materialized rendition; "
-            "otherwise signed imgproxy URL. Public images only."
+            "otherwise signed imgproxy URL (with extension). Public images only."
         ),
     )
     poster_url: str | None = Field(
         default=None,
-        description="Signed imgproxy URL for the video's poster image. Public records only.",
+        description=(
+            "Public URL for the video's poster image: direct CDN URL when a public base URL "
+            "is configured, otherwise signed imgproxy URL. Public records only."
+        ),
     )
     created_at: str = Field(description="ISO-8601 timestamp")
     updated_at: str = Field(description="ISO-8601 timestamp")
@@ -198,6 +199,30 @@ class FileListResponse(BaseModel):
     )
     limit: int
     offset: int
+
+
+class FileBatchRequest(BaseModel):
+    """Request body for ``POST /files/batch``."""
+
+    ids: list[str] = Field(
+        min_length=1,
+        max_length=200,
+        description="List of upload record ids. Up to 200 per request.",
+    )
+
+
+class FileBatchResponse(BaseModel):
+    """Returned by ``POST /files/batch``.
+
+    One round trip for many records instead of one ``GET /files/{id}`` per id
+    -- the shape a listing page (many photos across many parent records)
+    actually needs. An id that doesn't exist or belongs to another owner is
+    silently omitted, not an error (existence never leaks, same as every
+    other owner-scoped route); order is not guaranteed to match the
+    requested ids.
+    """
+
+    files: list[FileRecord]
 
 
 # ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ async def generate_poster(
     file_id: Annotated[str, Path(max_length=64)],
     response: Response,
     owner: Annotated[str, Depends(verify_token)],
-    at_seconds: Annotated[float | None, Form(ge=0.0)] = None,
+    poster_seconds: Annotated[float | None, Form(ge=0.0)] = None,
 ):
     """Generate a poster (thumbnail) image for one of the caller's *ready*
     videos, on request. Owner-scoped. Idempotent on the happy path: if a poster
@@ -32,7 +32,7 @@ async def generate_poster(
     a poster task is enqueued (202) and the client polls GET /files/{file_id}
     until `poster_upload_id` is set (then GET /files/{poster_id} for the image).
 
-    `at_seconds` optionally picks the frame timestamp; the default is ~10% into
+    `poster_seconds` optionally picks the frame timestamp; the default is ~10% into
     the clip (avoiding a black lead-in frame). Two simultaneous requests can each
     generate a poster (best-effort, like the upload-idempotency paths); the last
     link wins and the loser is a harmless standalone image row.
@@ -63,7 +63,7 @@ async def generate_poster(
             return {"status": "ready", "video_id": file_id, "poster": existing.to_public()}
 
     try:
-        task = await generate_poster_task.kiq(upload_id=file_id, at_seconds=at_seconds)
+        task = await generate_poster_task.kiq(upload_id=file_id, at_seconds=poster_seconds)
     except Exception as exc:
         logger.exception("Failed to enqueue poster generation task")
         raise HTTPException(

@@ -45,6 +45,17 @@ def test_sign_url_is_path_only_when_base_url_unset(monkeypatch: pytest.MonkeyPat
 def test_generate_signed_url_base64_encodes_source_url() -> None:
     result = generate_signed_url("http://storage.example/images/abc.webp", "rs:auto")
     assert "/rs:auto/" in result
+    assert result.endswith(".webp")
+
+    # Explicit format overrides source URL extension
+    png_result = generate_signed_url(
+        "http://storage.example/images/abc.webp", "rs:auto", format="png"
+    )
+    assert png_result.endswith(".png")
+
+    # Unrecognized or missing extension defaults to webp
+    default_result = generate_signed_url("http://storage.example/images/noext", "rs:auto")
+    assert default_result.endswith(".webp")
 
 
 @pytest.mark.parametrize("field_name", ["IMGPROXY_KEY", "IMGPROXY_SALT"])

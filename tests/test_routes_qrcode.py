@@ -16,10 +16,10 @@ async def test_valid_qrcode_returns_png(
     assert resp.headers["content-type"] == "image/png"
     assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
 
-    # Verify opaque background (3 bands sRGB, no alpha channel)
+    # Verify opaque background (no alpha channel, 1 band grayscale or 3 bands sRGB)
     image = pyvips.Image.new_from_buffer(resp.content, "")
     assert not image.hasalpha()
-    assert image.bands == 3
+    assert image.bands in (1, 3)
 
 
 async def test_oversized_content_is_rejected(
@@ -55,6 +55,19 @@ async def test_qrcode_with_logo(client: httpx.AsyncClient, auth_headers: dict[st
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "image/png"
     assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+async def test_qrcode_with_empty_logo_field(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    resp = await client.post(
+        "/generate/qrcode",
+        data={"content": "https://example.com"},
+        files={"logo": ("", b"", "")},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"
 
 
 async def test_qrcode_with_oversized_logo_returns_413(
@@ -234,3 +247,86 @@ async def test_qrcode_epc_valid_and_validation(
     )
     assert resp_bad.status_code == 400
     assert resp_bad.json()["detail"] == "Invalid SEPA IBAN format"
+
+
+async def test_qrcode_svg_format_without_logo(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    resp = await client.post(
+        "/generate/qrcode",
+        data={"content": "https://example.com", "format": "svg"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/svg+xml"
+    content_str = resp.content.decode("utf-8")
+    assert "<svg" in content_str
+    assert "</svg>" in content_str
+
+
+async def test_qrcode_svg_format_with_logo(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    resp = await client.post(
+        "/generate/qrcode",
+        data={"content": "https://example.com", "format": "svg"},
+        files={"logo": ("logo.png", fixture_bytes("tiny.png"), "image/png")},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/svg+xml"
+    content_str = resp.content.decode("utf-8")
+    assert "<svg" in content_str
+    assert "<rect" in content_str
+    assert "<image" in content_str
+    assert "data:image/png;base64," in content_str
+
+
+async def test_qrcode_vcard_svg_format(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    resp = await client.post(
+        "/generate/qrcode/vcard",
+        data={
+            "name": "Doe;Jane",
+            "email": "jane@example.com",
+            "format": "svg",
+        },
+        files={"logo": ("logo.png", fixture_bytes("tiny.png"), "image/png")},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/svg+xml"
+    assert "<svg" in resp.content.decode("utf-8")
+
+
+async def test_qrcode_invalid_format_rejected(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    resp = await client.post(
+        "/generate/qrcode",
+        data={"content": "https://example.com", "format": "unsupported_fmt"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+    assert "Invalid format" in resp.json()["detail"]
+
+
+def test_logo_backing_geometry_is_consistent_and_centered() -> None:
+    """Locks the shared geometry formula (now the single source used by all
+    three logo-placement paths -- the PNG raster overlay, the SVG overlay,
+    and generate_qr_image's own thumbnail-sizing pre-calc; previously each
+    computed it independently, so a future formula tweak applied to only one
+    copy could desync the logo's size/placement between output formats)."""
+    from app.services.qr_generator import _LOGO_MAX_FRACTION, _logo_backing_geometry
+
+    num_modules, scale = 41, 10
+    target_modules, backing_px, x_px, y_px = _logo_backing_geometry(num_modules, scale)
+
+    assert target_modules % 2 == 1  # snapped to odd, so it centers on the grid
+    assert target_modules >= 3
+    assert target_modules <= int(num_modules * _LOGO_MAX_FRACTION) + 1
+    assert backing_px == target_modules * scale
+    start_module = (num_modules - target_modules) // 2
+    assert x_px == start_module * scale
+    assert y_px == start_module * scale
