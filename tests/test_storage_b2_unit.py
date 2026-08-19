@@ -141,7 +141,9 @@ async def test_presigned_get_url_targets_the_b2_endpoint(b2_settings: None) -> N
     url = await backend.presigned_get_url("videos/v.mp4", expires_in=120)
     await backend.aclose()
 
-    assert "backblazeb2.com" in urlparse(url).netloc
+    # Exact host, not a substring: a presign that pointed at
+    # "backblazeb2.com.evil.example" would satisfy a containment check.
+    assert urlparse(url).netloc == "s3.us-west-004.backblazeb2.com"
 
 
 async def test_presigned_get_url_signs_the_response_header_overrides(b2_settings: None) -> None:
