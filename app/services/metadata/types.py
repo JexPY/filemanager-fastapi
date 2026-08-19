@@ -73,6 +73,34 @@ class UploadRecord:
     poster_storage_key: str | None = None
     renditions: dict[str, str] | None = None
 
+    def _populate_thumbnail_url(self, data: dict[str, Any]) -> None:
+        """Static thumbnail URL for a public, ready image record."""
+        if self.kind != KIND_IMAGE:
+            return
+
+        from app.services.renditions import derive_thumbnail_url
+
+        if self.renditions and "thumbnail" in self.renditions:
+            data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, self.renditions)
+        elif self.renditions is None:
+            data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, None)
+
+    def _populate_poster_url(self, data: dict[str, Any], poster_storage_key: str | None) -> None:
+        """Static poster URL for a public, ready video record."""
+        if not self.poster_upload_id:
+            return
+
+        pkey = poster_storage_key or self.poster_storage_key
+        if not pkey:
+            return
+
+        from app.services.storage import has_public_base_url, public_object_url
+
+        if has_public_base_url():
+            data["poster_url"] = public_object_url(pkey)
+        else:
+            data["poster_url"] = _build_imgproxy_url(pkey)
+
     def _populate_ready_urls(self, data: dict[str, Any], poster_storage_key: str | None) -> None:
         """Helper to populate playback URLs for a ready record."""
         from app.services.storage import has_public_base_url, public_object_url
@@ -86,21 +114,8 @@ class UploadRecord:
         if self.visibility != VISIBILITY_PUBLIC:
             return
 
-        if self.kind == KIND_IMAGE:
-            from app.services.renditions import derive_thumbnail_url
-
-            if self.renditions and "thumbnail" in self.renditions:
-                data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, self.renditions)
-            elif self.renditions is None:
-                data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, None)
-
-        if self.poster_upload_id:
-            pkey = poster_storage_key or self.poster_storage_key
-            if pkey:
-                if has_public_base_url():
-                    data["poster_url"] = public_object_url(pkey)
-                else:
-                    data["poster_url"] = _build_imgproxy_url(pkey)
+        self._populate_thumbnail_url(data)
+        self._populate_poster_url(data, poster_storage_key)
 
     def to_public(self, poster_storage_key: str | None = None) -> dict[str, Any]:
         """Owner-safe JSON view for API responses (no cross-tenant fields)."""
