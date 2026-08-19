@@ -24,7 +24,8 @@ receive an immediate task ID while an asynchronous worker transcodes it via FFmp
 poster frames, and dispatches HMAC-signed webhooks upon completion. **Upload generic files**
 (PDFs, audio, archives) through a strict allow-list with magic-byte verification.
 **Generate QR codes** inline as PNG. Storage is pluggable across local filesystem volumes,
-S3-compatible object storage (AWS S3, Cloudflare R2, Garage), and Google Cloud Storage.
+S3-compatible object storage (AWS S3, Cloudflare R2, Garage), Google Cloud Storage, and
+Backblaze B2.
 
 Everything runs containerized in Docker. `docker compose up --build` provisions the full stack.
 
@@ -76,7 +77,7 @@ The service binds behind NGINX at **`http://localhost:9000`** (Swagger UI at
 `http://localhost:9000/docs`). A one-shot `migrate` container automatically applies
 Alembic database migrations and exits before the API and worker services accept traffic.
 
-> When using `STORAGE_BACKEND=s3` or `gcp`, set the corresponding `*_PUBLIC_BASE_URL`
+> When using `STORAGE_BACKEND=s3`, `gcp` or `b2`, set the corresponding `*_PUBLIC_BASE_URL`
 > and `IMGPROXY_ALLOWED_SOURCES`. Without a public base URL, imgproxy cannot resolve
 > object URLs for dynamic resizing of public media.
 
@@ -592,17 +593,42 @@ curl -X POST -H "Authorization: Bearer $MASTER_TOKEN" \
 
 ## Storage backends
 
-Selected via `STORAGE_BACKEND` (`local`, `s3`, or `gcp`).
+Selected via `STORAGE_BACKEND` (`local`, `s3`, `gcp`, or `b2`).
 
-| Feature | `local` | `s3` (AWS S3 / Cloudflare R2 / Garage) | `gcp` (Google Cloud Storage) |
-|---|---|---|---|
-| Storage Target | `LOCAL_STORAGE_DIR` volume | `S3_BUCKET` | `GCS_BUCKET` |
-| imgproxy Source URL | `local://` on shared mount | Public CDN/Bucket URL | Public CDN/Bucket URL |
-| Public Playback | NGINX `X-Accel-Redirect` (sendfile) | 302 Redirect to public/CDN URL | 302 Redirect to public/CDN URL |
-| Private Playback | NGINX `X-Accel-Redirect` (sendfile) | NGINX stream (proxied signed URL) | NGINX stream (proxied signed URL) |
-| Public Direct URL | N/A (served via NGINX) | `S3_PUBLIC_BASE_URL` when set | `GCS_PUBLIC_BASE_URL` when set |
-| Worker FFmpeg Input | Local path (zero-copy) | Presigned URL (HTTPS range stream) | Presigned URL (HTTPS range stream) |
-| Verification | End-to-end integration tests | End-to-end integration against Garage | Unit tests with mocked GCP client |
+| Feature | `local` | `s3` (AWS S3 / Cloudflare R2 / Garage) | `gcp` (Google Cloud Storage) | `b2` (Backblaze B2) |
+|---|---|---|---|---|
+| Storage Target | `LOCAL_STORAGE_DIR` volume | `S3_BUCKET` | `GCS_BUCKET` | `B2_BUCKET` |
+| imgproxy Source URL | `local://` on shared mount | Public CDN/Bucket URL | Public CDN/Bucket URL | Public CDN/Bucket URL |
+| Public Playback | NGINX `X-Accel-Redirect` (sendfile) | 302 Redirect to public/CDN URL | 302 Redirect to public/CDN URL | 302 Redirect to public/CDN URL |
+| Private Playback | NGINX `X-Accel-Redirect` (sendfile) | NGINX stream (proxied signed URL) | NGINX stream (proxied signed URL) | NGINX stream (proxied signed URL) |
+| Public Direct URL | N/A (served via NGINX) | `S3_PUBLIC_BASE_URL` when set | `GCS_PUBLIC_BASE_URL` when set | `B2_PUBLIC_BASE_URL` when set |
+| Worker FFmpeg Input | Local path (zero-copy) | Presigned URL (HTTPS range stream) | Presigned URL (HTTPS range stream) | Presigned URL (HTTPS range stream) |
+| Verification | End-to-end integration tests | End-to-end integration against Garage | Unit tests with mocked GCP client | Unit tests + the shared S3 path against Garage; no live B2 account |
+
+### Backblaze B2
+
+`b2` talks to B2's **S3-compatible API**, not the B2 native API. That is what makes
+SigV4 presigned GETs (and therefore private playback with working Range) available,
+so `b2` behaves identically to `s3` on every serving path. Internally `B2Storage`
+*is* `S3Storage` with its own settings and two client-config knobs
+(`request_checksum_calculation` / `response_checksum_validation` pinned to
+`when_required`, since botocore's `when_supported` default attaches an AWS-specific
+CRC32 trailer B2 does not model).
+
+Credentials live in their own `B2_*` namespace rather than sharing `AWS_*`, and
+unlike `s3` they are **mandatory** — B2 has no equivalent of boto's ambient
+credential chain, so a blank key is rejected at startup instead of surfacing as an
+opaque 403 on the first upload.
+
+```ini
+STORAGE_BACKEND=b2
+B2_BUCKET=my-media
+B2_KEY_ID=0123456789abcdef01234567
+B2_APPLICATION_KEY=K004...
+B2_REGION=us-west-004
+# B2_ENDPOINT_URL is optional -- derived as https://s3.{B2_REGION}.backblazeb2.com
+# B2_PUBLIC_BASE_URL=https://cdn.example.com
+```
 
 Storage key structures:
 - Images: `images/<uuid>.webp`, `images/<uuid>_t300.webp`
@@ -710,7 +736,7 @@ Refer to [`.env-example`](.env-example) for an annotated starter template.
 | Variable | Default | Purpose |
 |---|---|---|
 | `FILE_MANAGER_BEARER_TOKENS` | *None* | Comma-separated list of `secret` or `label:secret`. **Required.** |
-| `STORAGE_BACKEND` | `local` | Active storage provider: `local`, `s3`, or `gcp`. |
+| `STORAGE_BACKEND` | `local` | Active storage provider: `local`, `s3`, `gcp`, or `b2`. |
 | `DATABASE_URL` | *None* | PostgreSQL connection string for metadata store. |
 | `REDIS_URL` | `redis://redis:6379/0` | Redis broker and result backend URL. |
 | `PUBLIC_BASE_URL` | *None* | External service origin for generating absolute URLs. |
@@ -729,6 +755,11 @@ Refer to [`.env-example`](.env-example) for an annotated starter template.
 | `GCS_BUCKET` | *None* | GCS bucket name. **Required when STORAGE_BACKEND=gcp.** |
 | `GCS_PUBLIC_BASE_URL` | *None* | Public CDN or custom domain for GCS bucket. |
 | `GCP_PROJECT` / `GCP_SERVICE_ACCOUNT_FILE` | *None* | GCP service account credentials. |
+| `B2_BUCKET` | *None* | Backblaze B2 bucket name. **Required when STORAGE_BACKEND=b2.** |
+| `B2_KEY_ID` / `B2_APPLICATION_KEY` | *None* | B2 application key pair. **Both required when STORAGE_BACKEND=b2** (no ambient credential chain). |
+| `B2_REGION` | *None* | B2 region, e.g. `us-west-004`. **Required when STORAGE_BACKEND=b2**; derives the endpoint and binds into the SigV4 scope. |
+| `B2_ENDPOINT_URL` | *derived* | Overrides `https://s3.{B2_REGION}.backblazeb2.com`. |
+| `B2_PUBLIC_BASE_URL` | *None* | Public CDN or custom domain for the B2 bucket. |
 
 ### imgproxy & NGINX Settings
 

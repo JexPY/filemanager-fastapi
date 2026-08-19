@@ -19,13 +19,13 @@ This project is built to handle massive scale efficiently by heavily leveraging 
    - `imgproxy` handles the heavy CPU lifting of image resizing. It is hidden behind NGINX.
 4. **Worker Layer (TaskIQ):**
    - Runs asynchronously to process (compress) videos via FFmpeg without blocking the web API.
-5. **Storage Layer (AWS S3, GCP, etc.):**
+5. **Storage Layer (AWS S3, GCP, Backblaze B2, etc.):**
    - The absolute source of truth. Decoupled from your server's disk space.
 
 ### Mandatory NGINX in Production
-No matter which storage backend you use (`local`, `s3`, `gcp`), **NGINX is absolutely mandatory in production.**
+No matter which storage backend you use (`local`, `s3`, `gcp`, `b2`), **NGINX is absolutely mandatory in production.**
 - If using `local` storage, NGINX is required to stream video bytes via `X-Accel-Redirect`.
-- If using `s3` or `gcp`, NGINX is required to act as the Origin Shield for `imgproxy`. 
+- If using `s3`, `gcp` or `b2`, NGINX is required to act as the Origin Shield for `imgproxy`. 
 Do not expose the API (`port 9001`) or `imgproxy` (`port 8080`) directly to the internet. Route all traffic through NGINX (`port 9000` internally, usually bound to `80` or `443` externally).
 
 ---

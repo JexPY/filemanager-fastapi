@@ -11,7 +11,7 @@ from typing import Any
 import aiohttp
 import pytest
 
-import app.services.storage as storage_module
+import app.services.storage.gcs as storage_gcs
 from app.config import settings
 from app.services.storage import GCSStorage, StorageError
 
@@ -119,7 +119,7 @@ async def test_presigned_get_url_signs_locally_and_returns_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "GCS_BUCKET", "test-bucket")
-    monkeypatch.setattr(storage_module, "Bucket", _FakeSignBucket)
+    monkeypatch.setattr(storage_gcs, "Bucket", _FakeSignBucket)
     backend = GCSStorage()
     backend._client = object()  # bypass _get_client()'s network build
 
@@ -134,7 +134,7 @@ async def test_presigned_get_url_clamps_expiration_to_7_days(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "GCS_BUCKET", "test-bucket")
-    monkeypatch.setattr(storage_module, "Bucket", _FakeSignBucket)
+    monkeypatch.setattr(storage_gcs, "Bucket", _FakeSignBucket)
     backend = GCSStorage()
     backend._client = object()
 
@@ -158,7 +158,7 @@ async def test_presigned_get_url_wraps_signing_failure(
             return _BoomBlob()
 
     monkeypatch.setattr(settings, "GCS_BUCKET", "test-bucket")
-    monkeypatch.setattr(storage_module, "Bucket", _BoomBucket)
+    monkeypatch.setattr(storage_gcs, "Bucket", _BoomBucket)
     backend = GCSStorage()
     backend._client = object()
 

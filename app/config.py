@@ -3,7 +3,30 @@ import hashlib
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ALLOWED_STORAGE_BACKENDS = {"local", "s3", "gcp"}
+ALLOWED_STORAGE_BACKENDS = {"local", "s3", "gcp", "b2"}
+
+# Which setting holds the "a client can fetch this object directly" base URL, per
+# backend. `local` is deliberately absent: its media volume is reachable only
+# through nginx's internal X-Accel location, so it can never produce a directly
+# fetchable URL and every consumer must fall back to /files/{id}/download. Adding
+# a future object store means adding one line here rather than a third arm to two
+# separate if/elif chains (this map backs both `public_images_unservable` below
+# and `storage.has_public_base_url()`).
+PUBLIC_BASE_URL_FIELDS = {
+    "s3": "S3_PUBLIC_BASE_URL",
+    "gcp": "GCS_PUBLIC_BASE_URL",
+    "b2": "B2_PUBLIC_BASE_URL",
+}
+
+# Settings that must be non-empty for a given STORAGE_BACKEND, checked at import
+# so a misconfiguration kills the process instead of 502-ing the first upload.
+# `b2` lists its credentials as well as its bucket because B2 has no ambient
+# credential chain to fall back on -- see the B2_* field comments below.
+REQUIRED_BACKEND_FIELDS: dict[str, tuple[str, ...]] = {
+    "s3": ("S3_BUCKET",),
+    "gcp": ("GCS_BUCKET",),
+    "b2": ("B2_BUCKET", "B2_KEY_ID", "B2_APPLICATION_KEY", "B2_REGION"),
+}
 
 
 def _derive_owner(secret: str) -> str:
@@ -21,7 +44,7 @@ class Settings(BaseSettings):
     # video's record on compression completion.
     DATABASE_URL: str = Field(default="")
 
-    # Storage backend selection: "local" | "s3" | "gcp"
+    # Storage backend selection: "local" | "s3" | "gcp" | "b2"
     STORAGE_BACKEND: str = Field(default="local")
     LOCAL_STORAGE_DIR: str = Field(default="/data/media")
     # Base URL prepended to object keys returned by the local backend.
@@ -46,6 +69,28 @@ class Settings(BaseSettings):
     # STORAGE_BACKEND from local to gcp without also touching env vars would
     # silently reuse whatever base URL had been set for local dev.
     GCS_PUBLIC_BASE_URL: str = Field(default="")
+
+    # Storage Backblaze B2 (used when STORAGE_BACKEND=b2). Reached through B2's
+    # S3-compatible API, so the wire protocol is SigV4 exactly like S3 -- but the
+    # credentials live in their own namespace rather than sharing AWS_*, so
+    # switching STORAGE_BACKEND cannot silently reuse the other store's keys.
+    B2_BUCKET: str = Field(default="")
+    # From the B2 console's "Application Keys": keyID -> access key id,
+    # applicationKey -> secret. Both REQUIRED for this backend: B2 has no
+    # equivalent of boto's ambient credential chain, so a blank value is a
+    # misconfiguration, not "resolve it from the environment".
+    B2_KEY_ID: str = Field(default="")
+    B2_APPLICATION_KEY: str = Field(default="")
+    # e.g. "us-west-004" -- shown in the console as part of the bucket's S3
+    # endpoint. Required: it is both how the endpoint below is derived and what
+    # SigV4 binds into the credential scope, so a wrong value fails to sign.
+    B2_REGION: str = Field(default="")
+    # Optional explicit override; derived as https://s3.{B2_REGION}.backblazeb2.com
+    # when blank. Set it only to point at something else (a proxy, a test double).
+    B2_ENDPOINT_URL: str = Field(default="")
+    # Optional CDN / custom domain in front of the bucket (fronting B2 with a CDN
+    # is the usual shape, since B2's own egress to one is free).
+    B2_PUBLIC_BASE_URL: str = Field(default="")
 
     # Imgproxy Config (must be hex encoded)
     IMGPROXY_KEY: str = Field(default="")
@@ -198,10 +243,11 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_backend_requirements(self) -> Settings:
         # Fail fast at startup rather than surfacing a confusing error on first upload.
-        if self.STORAGE_BACKEND == "s3" and not self.S3_BUCKET:
-            raise ValueError("STORAGE_BACKEND='s3' requires S3_BUCKET to be set")
-        if self.STORAGE_BACKEND == "gcp" and not self.GCS_BUCKET:
-            raise ValueError("STORAGE_BACKEND='gcp' requires GCS_BUCKET to be set")
+        for field_name in REQUIRED_BACKEND_FIELDS.get(self.STORAGE_BACKEND, ()):
+            if not getattr(self, field_name):
+                raise ValueError(
+                    f"STORAGE_BACKEND={self.STORAGE_BACKEND!r} requires {field_name} to be set"
+                )
         if not self.valid_tokens:
             # Otherwise the service boots successfully and then silently 401s
             # every single request forever -- fail at startup instead.
@@ -258,6 +304,18 @@ class Settings(BaseSettings):
         )
 
     @property
+    def active_public_base_url(self) -> str:
+        """The active backend's directly-fetchable base URL, or "" when it has none.
+
+        The single source of truth for "can a client fetch this object without
+        going through us" -- `storage.has_public_base_url()` is just this, coerced
+        to bool. `local` (and any backend absent from PUBLIC_BASE_URL_FIELDS)
+        returns "" by construction rather than by a special case.
+        """
+        field_name = PUBLIC_BASE_URL_FIELDS.get(self.STORAGE_BACKEND)
+        return getattr(self, field_name) if field_name else ""
+
+    @property
     def public_images_unservable(self) -> bool:
         """True when imgproxy has no fetchable address for a *public* record.
 
@@ -272,11 +330,9 @@ class Settings(BaseSettings):
         the documented Garage s3-dev flow unbootable -- Garage has no anonymous
         access at all, so no public base URL can exist for it.
         """
-        if self.STORAGE_BACKEND == "s3":
-            return not self.S3_PUBLIC_BASE_URL
-        if self.STORAGE_BACKEND == "gcp":
-            return not self.GCS_PUBLIC_BASE_URL
-        return False
+        if self.STORAGE_BACKEND not in PUBLIC_BASE_URL_FIELDS:
+            return False
+        return not self.active_public_base_url
 
     @property
     def webhooks_enabled(self) -> bool:
