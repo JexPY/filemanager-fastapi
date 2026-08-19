@@ -73,6 +73,35 @@ class UploadRecord:
     poster_storage_key: str | None = None
     renditions: dict[str, str] | None = None
 
+    def _populate_ready_urls(self, data: dict[str, Any], poster_storage_key: str | None) -> None:
+        """Helper to populate playback URLs for a ready record."""
+        from app.services.storage import has_public_base_url, public_object_url
+        from app.urls import public_url
+
+        if self.visibility == VISIBILITY_PUBLIC and has_public_base_url():
+            data["url"] = public_object_url(self.storage_key)
+        else:
+            data["url"] = public_url(f"/files/{self.id}/download")
+
+        if self.visibility != VISIBILITY_PUBLIC:
+            return
+
+        if self.kind == KIND_IMAGE:
+            from app.services.renditions import derive_thumbnail_url
+
+            if self.renditions and "thumbnail" in self.renditions:
+                data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, self.renditions)
+            elif self.renditions is None:
+                data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, None)
+
+        if self.poster_upload_id:
+            pkey = poster_storage_key or self.poster_storage_key
+            if pkey:
+                if has_public_base_url():
+                    data["poster_url"] = public_object_url(pkey)
+                else:
+                    data["poster_url"] = _build_imgproxy_url(pkey)
+
     def to_public(self, poster_storage_key: str | None = None) -> dict[str, Any]:
         """Owner-safe JSON view for API responses (no cross-tenant fields)."""
         data = {
@@ -95,44 +124,12 @@ class UploadRecord:
             "webhook_updated_at": (
                 self.webhook_updated_at.isoformat() if self.webhook_updated_at else None
             ),
-            # `visibility` is safe to expose; `share_token` is a secret capability
-            # and is deliberately omitted here -- it's returned only by the
-            # share-mint endpoint, never in listings/webhooks/GET /files/{id}.
             "visibility": self.visibility,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
 
         if self.status == STATUS_READY:
-            from app.services.storage import has_public_base_url, public_object_url
-            from app.urls import public_url
-
-            # Unified `url`: On public records with a public CDN base URL configured,
-            # emits the direct CDN object URL (zero-hop, direct edge read).
-            # Otherwise (local storage or private records), emits the canonical
-            # app download route /files/{id}/download.
-            if self.visibility == VISIBILITY_PUBLIC and has_public_base_url():
-                data["url"] = public_object_url(self.storage_key)
-            else:
-                data["url"] = public_url(f"/files/{self.id}/download")
-
-            if self.visibility == VISIBILITY_PUBLIC:
-                if self.kind == KIND_IMAGE:
-                    from app.services.renditions import derive_thumbnail_url
-
-                    if self.renditions and "thumbnail" in self.renditions:
-                        data["thumbnail_url"] = derive_thumbnail_url(
-                            self.storage_key, self.renditions
-                        )
-                    elif self.renditions is None:
-                        data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, None)
-
-                if self.poster_upload_id:
-                    pkey = poster_storage_key or self.poster_storage_key
-                    if pkey:
-                        if has_public_base_url():
-                            data["poster_url"] = public_object_url(pkey)
-                        else:
-                            data["poster_url"] = _build_imgproxy_url(pkey)
+            self._populate_ready_urls(data, poster_storage_key)
 
         return data

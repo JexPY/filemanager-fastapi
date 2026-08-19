@@ -105,7 +105,7 @@ class StorageBackend(ABC):
         silently drops the original filename)."""
         pass
 
-    async def local_path(self, key: str) -> str | None:
+    async def local_path(self, key: str) -> str | None:  # NOSONAR
         """The object's path on a filesystem the caller shares, if any
         (LocalStorage) *and the object actually exists there*, else None.
         Lets a co-located worker hand ffmpeg the path directly instead of

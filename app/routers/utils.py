@@ -24,6 +24,8 @@ from app.urls import public_url
 # code, so the abort stays distinguishable from a real client or server error.
 HTTP_499_CLIENT_CLOSED_REQUEST = 499
 
+_CSP_DEFAULT_NONE = "default-src 'none';"
+
 
 async def _read_capped(file: UploadFile, request: Request, max_bytes: int) -> bytes:
     """Read an upload into memory, aborting safely if it exceeds max_bytes. Used
@@ -121,7 +123,7 @@ def _xaccel_response(
     response = Response(media_type=media_type)
     response.headers["X-Accel-Redirect"] = f"/internal-media/{storage_key}"
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Content-Security-Policy"] = "default-src 'none';"
+    response.headers["Content-Security-Policy"] = _CSP_DEFAULT_NONE
     if filename:
         safe_name = _sanitize_content_disposition_filename(filename)
         disp_type = get_content_disposition_type(media_type)
@@ -165,7 +167,7 @@ def _object_xaccel_response(target_url: str, media_type: str = MIME_OCTET_STREAM
     response.headers["X-Accel-Redirect"] = "/internal-object/"
     response.headers["X-Object-Target"] = target_url
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Content-Security-Policy"] = "default-src 'none';"
+    response.headers["Content-Security-Policy"] = _CSP_DEFAULT_NONE
     # Deliberately no Content-Disposition here. The signed upstream URL already
     # carries one as a response-header override, and nginx passes the upstream's
     # headers through -- setting it on both sides emitted the header twice
@@ -194,7 +196,7 @@ def _local_file_response(
     else:
         headers = {}
     headers["X-Content-Type-Options"] = "nosniff"
-    headers["Content-Security-Policy"] = "default-src 'none';"
+    headers["Content-Security-Policy"] = _CSP_DEFAULT_NONE
     return FileResponse(path, media_type=media_type, headers=headers)
 
 
@@ -306,16 +308,15 @@ def _image_response(
     # blank but still sends the form's own default format=webp used to
     # trigger this branch and get a redundant custom URL for nothing.
     requests_format_change = custom_format is not None and custom_format != "webp"
-    if custom_width or custom_height or requests_format_change or custom_fit != "auto":
-        cw = custom_width or 0
-        ch = custom_height or 0
-        if cw == 0 and ch == 0:
-            processing_options = f"rs:{custom_fit}"
-        else:
-            processing_options = f"rs:{custom_fit}:{cw}:{ch}"
+    if not (custom_width or custom_height or requests_format_change or custom_fit != "auto"):
+        return response
 
-        response["custom_url"] = signed_image_url(
-            storage_key, processing_options=processing_options, format=custom_format or "webp"
-        )
+    cw = custom_width or 0
+    ch = custom_height or 0
+    processing_options = f"rs:{custom_fit}" if not (cw or ch) else f"rs:{custom_fit}:{cw}:{ch}"
+
+    response["custom_url"] = signed_image_url(
+        storage_key, processing_options=processing_options, format=custom_format or "webp"
+    )
 
     return response

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+MIME_WEBP = "image/webp"
+FORMAT_WEBP = "webp"
+
 
 @dataclass(frozen=True)
 class RenditionSpec:
@@ -21,8 +24,8 @@ class RenditionSpec:
     suffix: str
     width: int
     height: int
-    format: str = "webp"
-    mime_type: str = "image/webp"
+    format: str = FORMAT_WEBP
+    mime_type: str = MIME_WEBP
     quality: int = 80
     crop: bool = True
     # libwebp's compression-effort search, 0 (fastest) to 6 (slowest, smallest
@@ -42,8 +45,8 @@ RENDITION_SPECS: dict[str, RenditionSpec] = {
         suffix="t300",
         width=300,
         height=300,
-        format="webp",
-        mime_type="image/webp",
+        format=FORMAT_WEBP,
+        mime_type=MIME_WEBP,
         quality=80,
         crop=True,
         effort=4,
