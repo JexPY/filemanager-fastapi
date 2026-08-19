@@ -91,7 +91,7 @@ async def test_to_public_emits_direct_cdn_thumbnail_when_public_base_url_set(
         renditions={"thumbnail": "images/abc_t300.webp"},
     )
     public_view = rec.to_public()
-    assert public_view["direct_url"] == "https://cdn.example.com/images/abc.webp"
+    assert public_view["url"] == "https://cdn.example.com/images/abc.webp"
     assert public_view["thumbnail_url"] == "https://cdn.example.com/images/abc_t300.webp"
 
     # 2. Pre-existing record without renditions (backward compatibility fallback)
@@ -106,7 +106,7 @@ async def test_to_public_emits_direct_cdn_thumbnail_when_public_base_url_set(
         renditions=None,
     )
     old_public_view = old_rec.to_public()
-    assert old_public_view["direct_url"] == "https://cdn.example.com/images/old.webp"
+    assert old_public_view["url"] == "https://cdn.example.com/images/old.webp"
     assert "/rs:fill:300:300:0/g:no/" in old_public_view["thumbnail_url"]
 
 
@@ -128,7 +128,7 @@ async def test_private_image_withholds_accelerators_and_serves_rendition_via_dow
 
     # Accelerators withheld in to_public()
     public_view = rec.to_public()
-    assert "direct_url" not in public_view
+    assert public_view["url"].endswith(f"/files/{rec.id}/download")
     assert "thumbnail_url" not in public_view
 
     # Authorized download with ?rendition=thumb
@@ -353,14 +353,14 @@ async def test_upload_and_record_thumbnail_urls_are_byte_identical(
     )
 
 
-async def test_upload_response_carries_direct_url_without_a_followup_get(
+async def test_upload_response_carries_url_without_a_followup_get(
     client: httpx.AsyncClient,
     auth_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """R2: on a public-base-url-configured backend, POST /upload/image alone
     (no follow-up GET /files/{id}) must be enough to render the image: the
-    full-size direct_url and the thumbnail."""
+    full-size direct url and the thumbnail."""
     monkeypatch.setattr(settings, "STORAGE_BACKEND", "s3")
     monkeypatch.setattr(settings, "S3_PUBLIC_BASE_URL", "https://cdn.example.com")
     monkeypatch.setattr(
@@ -375,14 +375,14 @@ async def test_upload_response_carries_direct_url_without_a_followup_get(
     assert resp.status_code == 200
     body = resp.json()
 
-    assert body["direct_url"].startswith("https://cdn.example.com/images/")
-    assert body["direct_url"].endswith(".webp")
+    assert body["url"].startswith("https://cdn.example.com/images/")
+    assert body["url"].endswith(".webp")
     assert body["thumbnail_url"].startswith("https://cdn.example.com/images/")
     assert body["thumbnail_url"].endswith("_t300.webp")
 
     # Matches GET /files/{id} exactly -- no separate resolution path.
     record_view = (await client.get(f"/files/{body['id']}", headers=auth_headers)).json()
-    assert record_view["direct_url"] == body["direct_url"]
+    assert record_view["url"] == body["url"]
     assert record_view["thumbnail_url"] == body["thumbnail_url"]
 
 
@@ -444,7 +444,6 @@ async def test_private_image_upload_withholds_imgproxy_urls(
     assert private.status_code == 200
     body = private.json()
     assert "custom_url" not in body
-    assert "direct_url" not in body
     assert "thumbnail_url" not in body
     assert body["id"]
 

@@ -215,7 +215,7 @@ async def test_route_passes_at_seconds(
     video_id = await _ready_video(fake_metadata, "videos/t_compressed.mp4")
 
     resp = await client.post(
-        f"/files/{video_id}/poster", headers=auth_headers, data={"at_seconds": "1.5"}
+        f"/files/{video_id}/poster", headers=auth_headers, data={"poster_seconds": "1.5"}
     )
 
     assert resp.status_code == 202
@@ -328,17 +328,14 @@ async def test_delete_video_cascades_to_poster(
     assert "posters/p.webp" not in fake_storage.objects
 
 
-# --- poster_direct_url -------------------------------------------------
+# --- poster_url (unified) -------------------------------------------------
 
 
-async def test_video_record_carries_poster_direct_url_when_public_base_url_set(
+async def test_video_record_carries_direct_poster_url_when_public_base_url_set(
     fake_metadata: InMemoryMetadataStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """poster_url is always a live imgproxy fetch; poster_direct_url is a
-    static companion pointing straight at the poster's own stored object, so
-    a caller that skips dynamic/imgproxy resizing entirely still has a way to
-    render a video's poster without a second GET for the poster record."""
+    """When a public base URL is set, poster_url resolves directly to the CDN object URL."""
     monkeypatch.setattr(settings, "STORAGE_BACKEND", "s3")
     monkeypatch.setattr(settings, "S3_PUBLIC_BASE_URL", "https://cdn.example.com")
     monkeypatch.setattr(
@@ -362,16 +359,14 @@ async def test_video_record_carries_poster_direct_url_when_public_base_url_set(
     assert video is not None
     public_view = video.to_public()
 
-    assert public_view["poster_url"]  # still emitted, unchanged behavior
-    assert public_view["poster_direct_url"] == "https://cdn.example.com/posters/p1.webp"
+    assert public_view["poster_url"] == "https://cdn.example.com/posters/p1.webp"
 
 
-async def test_poster_direct_url_absent_without_public_base_url(
+async def test_poster_url_falls_back_to_imgproxy_without_public_base_url(
     fake_metadata: InMemoryMetadataStore,
 ) -> None:
-    """Without a configured public base URL (e.g. local backend), there is no
-    static object URL to hand out -- poster_url (imgproxy) is still the only
-    way to fetch the poster, and poster_direct_url is simply omitted."""
+    """Without a configured public base URL (e.g. local backend), poster_url
+    falls back to signed imgproxy."""
     poster = await fake_metadata.create(
         owner=OWNER,
         kind=KIND_IMAGE,
@@ -389,7 +384,8 @@ async def test_poster_direct_url_absent_without_public_base_url(
     assert video is not None
     public_view = video.to_public()
 
-    assert "poster_direct_url" not in public_view
+    assert "/rs:auto/" in public_view["poster_url"]
+    assert public_view["poster_url"].endswith(".webp")
 
 
 async def test_poster_url_omitted_not_broken_when_poster_row_is_gone(
@@ -399,8 +395,8 @@ async def test_poster_url_omitted_not_broken_when_poster_row_is_gone(
     poster was deleted independently, or -- in Postgres -- the LEFT JOIN
     simply doesn't find it). The fallback here used to be
     `self.poster_upload_id` itself: a bare record id, not a storage key,
-    which built a dead/404 poster_url instead of just omitting it. Both
-    poster_url and poster_direct_url must be absent, not wrong."""
+    which built a dead/404 poster_url instead of just omitting it.
+    poster_url must be absent, not wrong."""
     video_id = await _ready_video(fake_metadata, "videos/dangling_compressed.mp4")
     await fake_metadata.set_visibility(video_id, OWNER, "public")
     # Link to a poster id that was never created.
@@ -412,4 +408,3 @@ async def test_poster_url_omitted_not_broken_when_poster_row_is_gone(
 
     assert public_view["poster_upload_id"] == "does-not-exist"
     assert "poster_url" not in public_view
-    assert "poster_direct_url" not in public_view

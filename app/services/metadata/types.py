@@ -107,22 +107,16 @@ class UploadRecord:
             from app.services.storage import has_public_base_url, public_object_url
             from app.urls import public_url
 
-            # ONE canonical URL, same for every kind. It is permanent and
-            # backend-agnostic: switching STORAGE_BACKEND, moving behind a CDN,
-            # or flipping visibility all leave it untouched, and it is the only
-            # URL here that resolves for a private record. Consumers should
-            # persist the record id and this URL, nothing else.
-            data["url"] = public_url(f"/files/{self.id}/download")
+            # Unified `url`: On public records with a public CDN base URL configured,
+            # emits the direct CDN object URL (zero-hop, direct edge read).
+            # Otherwise (local storage or private records), emits the canonical
+            # app download route /files/{id}/download.
+            if self.visibility == VISIBILITY_PUBLIC and has_public_base_url():
+                data["url"] = public_object_url(self.storage_key)
+            else:
+                data["url"] = public_url(f"/files/{self.id}/download")
 
-            # Everything below is an *accelerator*, not the address of record:
-            # a direct, no-redirect URL for LCP-sensitive embedding, and imgproxy
-            # renditions. All of it is public-only, because both forms are
-            # unexpiring bearer URLs with no ownership check -- a private record
-            # is reachable solely through the app route above.
             if self.visibility == VISIBILITY_PUBLIC:
-                if has_public_base_url():
-                    data["direct_url"] = public_object_url(self.storage_key)
-
                 if self.kind == KIND_IMAGE:
                     from app.services.renditions import derive_thumbnail_url
 
@@ -134,21 +128,11 @@ class UploadRecord:
                         data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, None)
 
                 if self.poster_upload_id:
-                    # `pkey` is a *storage key*, never the bare poster record
-                    # id -- falling back to `self.poster_upload_id` here used
-                    # to build a URL that treated a record id as if it were an
-                    # object key, producing a dead/404 poster_url instead of
-                    # simply omitting it. If neither source has the real key
-                    # (the LEFT JOIN didn't resolve it), omit both fields.
                     pkey = poster_storage_key or self.poster_storage_key
                     if pkey:
-                        data["poster_url"] = _build_imgproxy_url(pkey)
-                        # A static companion to poster_url: posters are their
-                        # own image record, so their plain object URL is a
-                        # direct CDN/bucket read -- no imgproxy involved, no
-                        # live encode, unlike poster_url above (always a live
-                        # imgproxy fetch).
                         if has_public_base_url():
-                            data["poster_direct_url"] = public_object_url(pkey)
+                            data["poster_url"] = public_object_url(pkey)
+                        else:
+                            data["poster_url"] = _build_imgproxy_url(pkey)
 
         return data

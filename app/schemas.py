@@ -48,14 +48,8 @@ class ImageUploadResponse(BaseModel):
     dimensions: ImageDimensions
     url: str | None = Field(
         default=None,
-        description="The canonical download URL: GET /files/{id}/download",
-    )
-    direct_url: str | None = Field(
-        default=None,
-        description="The stored object's plain object/CDN URL (full size, no crop, no "
-        "imgproxy) -- present immediately on upload so a caller doesn't need a follow-up "
-        "GET /files/{id} just to render something. Public uploads on an object-store "
-        "backend with a public base URL configured only.",
+        description="The URL to view/download the full-size image: direct CDN URL on object "
+        "storage with a public base URL configured, or GET /files/{id}/download on local/private.",
     )
     thumbnail_url: str | None = Field(
         default=None,
@@ -172,18 +166,9 @@ class FileRecord(BaseModel):
     url: str | None = Field(
         default=None,
         description=(
-            "The canonical URL, same shape for every kind: GET /files/{id}/download. "
-            "Permanent and backend-agnostic -- unaffected by a storage-backend switch, a "
-            "CDN change, or a visibility flip -- and the only URL here that resolves for a "
-            "private record. Present once status='ready'. Persist this and the id, nothing else."
-        ),
-    )
-    direct_url: str | None = Field(
-        default=None,
-        description=(
-            "The object's public/CDN URL: no redirect hop, no imgproxy. An accelerator for "
-            "LCP-sensitive embedding, present only for a public record on an object-store "
-            "backend with a *_PUBLIC_BASE_URL configured."
+            "The URL to view/download the file: direct CDN URL on object storage with a "
+            "public base URL configured, or canonical GET /files/{id}/download on local "
+            "storage or private records. Present once status='ready'."
         ),
     )
     thumbnail_url: str | None = Field(
@@ -196,14 +181,9 @@ class FileRecord(BaseModel):
     )
     poster_url: str | None = Field(
         default=None,
-        description="Signed imgproxy URL for the video's poster image. Public records only.",
-    )
-    poster_direct_url: str | None = Field(
-        default=None,
         description=(
-            "The poster's plain object/CDN URL -- no imgproxy, no live encode, unlike "
-            "poster_url. Present only on an object-store backend with a public base URL "
-            "configured, for a public record with a poster."
+            "Public URL for the video's poster image: direct CDN URL when a public base URL "
+            "is configured, otherwise signed imgproxy URL. Public records only."
         ),
     )
     created_at: str = Field(description="ISO-8601 timestamp")
@@ -221,8 +201,18 @@ class FileListResponse(BaseModel):
     offset: int
 
 
+class FileBatchRequest(BaseModel):
+    """Request body for ``POST /files/batch``."""
+    
+    ids: list[str] = Field(
+        min_length=1, 
+        max_length=200, 
+        description="List of upload record ids. Up to 200 per request."
+    )
+
+
 class FileBatchResponse(BaseModel):
-    """Returned by ``GET /files/batch``.
+    """Returned by ``POST /files/batch``.
 
     One round trip for many records instead of one ``GET /files/{id}`` per id
     -- the shape a listing page (many photos across many parent records)

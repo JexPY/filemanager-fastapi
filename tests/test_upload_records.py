@@ -190,9 +190,9 @@ async def test_to_public_url_is_the_canonical_route_for_every_kind(
 async def test_to_public_withholds_accelerator_urls_from_private_records(
     fake_metadata: InMemoryMetadataStore,
 ) -> None:
-    """A private record gets the canonical route and nothing else.
+    """A private record gets the canonical download route and nothing else.
 
-    `thumbnail_url`/`direct_url` bypass the app entirely, so emitting either for
+    `thumbnail_url` bypasses the app entirely, so emitting it for
     a private record would hand out a permanent, unauthenticated way to read it.
     """
     private = await fake_metadata.create(
@@ -208,4 +208,3 @@ async def test_to_public_withholds_accelerator_urls_from_private_records(
 
     assert data["url"].endswith(f"/files/{private.id}/download")
     assert "thumbnail_url" not in data
-    assert "direct_url" not in data

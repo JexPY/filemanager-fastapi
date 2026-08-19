@@ -80,7 +80,7 @@ async def lifespan(app: FastAPI):
     if settings.public_images_unservable:
         logger.warning(
             "STORAGE_BACKEND=%s has no *_PUBLIC_BASE_URL: imgproxy cannot fetch image "
-            "sources, so thumbnail_url/direct_url on public records will not resolve. "
+            "sources, so thumbnail_url on public records will not resolve. "
             "Set one unless this deployment stores private media only.",
             settings.STORAGE_BACKEND,
         )

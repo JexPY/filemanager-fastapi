@@ -175,10 +175,9 @@ async def set_file_visibility(
     """Set a record's visibility (`private` | `public`). Owner-scoped (404, not
     403, for anything that isn't the caller's, so existence never leaks).
 
-    Applies to every kind. `public` makes /files/{id}/download fetchable without
-    a token and lets the record carry the accelerator URLs (direct_url,
-    thumbnail_url); `private` restricts /download to the owner or a per-file
-    read grant, and withholds every URL that would bypass the app.
+    Applies to every kind. `public` makes the record accessible via direct CDN url or
+    tokenless /files/{id}/download and carries thumbnail_url; `private` restricts
+    /download to the owner or a per-file read grant, and withholds accelerator URLs.
     """
     # A bad `visibility` value is rejected by the _VisibilityBody Literal before
     # reaching here (422), so no manual value check is needed.

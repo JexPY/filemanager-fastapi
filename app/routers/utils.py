@@ -120,6 +120,8 @@ def _xaccel_response(
     _assert_safe_media_key(storage_key)
     response = Response(media_type=media_type)
     response.headers["X-Accel-Redirect"] = f"/internal-media/{storage_key}"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Content-Security-Policy"] = "default-src 'none';"
     if filename:
         safe_name = _sanitize_content_disposition_filename(filename)
         disp_type = get_content_disposition_type(media_type)
@@ -162,6 +164,8 @@ def _object_xaccel_response(target_url: str, media_type: str = MIME_OCTET_STREAM
     response = Response(media_type=media_type)
     response.headers["X-Accel-Redirect"] = "/internal-object/"
     response.headers["X-Object-Target"] = target_url
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Content-Security-Policy"] = "default-src 'none';"
     # Deliberately no Content-Disposition here. The signed upstream URL already
     # carries one as a response-header override, and nginx passes the upstream's
     # headers through -- setting it on both sides emitted the header twice
@@ -188,7 +192,9 @@ def _local_file_response(
         disp_type = get_content_disposition_type(media_type)
         headers = {"Content-Disposition": f'{disp_type}; filename="{safe_name}"'}
     else:
-        headers = None
+        headers = {}
+    headers["X-Content-Type-Options"] = "nosniff"
+    headers["Content-Security-Policy"] = "default-src 'none';"
     return FileResponse(path, media_type=media_type, headers=headers)
 
 
@@ -272,19 +278,21 @@ def _image_response(
     the two views of the same record disagreed. A private upload is readable
     through `GET /files/{id}/download?rendition=thumb`.
     """
+    if visibility == "public" and has_public_base_url():
+        main_url = public_object_url(storage_key)
+    else:
+        main_url = public_url(f"/files/{record_id}/download")
+
     response = {
         "status": "success",
         "id": record_id,
         "size_bytes": size_bytes,
         "size_mb": round(size_bytes / (1024 * 1024), 2) if size_bytes else None,
         "dimensions": {"width": width, "height": height},
-        "url": public_url(f"/files/{record_id}/download"),
+        "url": main_url,
     }
     if visibility != "public":
         return response
-
-    if has_public_base_url():
-        response["direct_url"] = public_object_url(storage_key)
 
     if renditions and "thumbnail" in renditions:
         response["thumbnail_url"] = derive_thumbnail_url(storage_key, renditions)

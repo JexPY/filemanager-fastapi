@@ -41,8 +41,8 @@ async def test_batch_returns_only_the_requested_owners_records(
     b = await _image(fake_metadata, OWNER, "images/b.webp")
     foreign = await _image(fake_metadata, OTHER_OWNER, "images/foreign.webp")
 
-    resp = await client.get(
-        "/files/batch", headers=auth_headers, params={"ids": [a, b, foreign, "does-not-exist"]}
+    resp = await client.post(
+        "/files/batch", headers=auth_headers, json={"ids": [a, b, foreign, "does-not-exist"]}
     )
 
     assert resp.status_code == 200
@@ -59,13 +59,13 @@ async def test_batch_with_no_matches_returns_empty_list_not_an_error(
     auth_headers: dict[str, str],
     fake_metadata: InMemoryMetadataStore,
 ) -> None:
-    resp = await client.get("/files/batch", headers=auth_headers, params={"ids": ["nope-1"]})
+    resp = await client.post("/files/batch", headers=auth_headers, json={"ids": ["nope-1"]})
     assert resp.status_code == 200
     assert resp.json()["files"] == []
 
 
 async def test_batch_requires_auth(client: httpx.AsyncClient) -> None:
-    resp = await client.get("/files/batch", params={"ids": ["whatever"]})
+    resp = await client.post("/files/batch", json={"ids": ["whatever"]})
     assert resp.status_code == 401
 
 
@@ -73,7 +73,7 @@ async def test_batch_rejects_more_than_200_ids(
     client: httpx.AsyncClient, auth_headers: dict[str, str]
 ) -> None:
     ids = [f"id-{i}" for i in range(201)]
-    resp = await client.get("/files/batch", headers=auth_headers, params={"ids": ids})
+    resp = await client.post("/files/batch", headers=auth_headers, json={"ids": ids})
     assert resp.status_code == 422
 
 
@@ -88,7 +88,7 @@ async def test_batch_route_is_not_shadowed_by_file_id_route(
     route and returning the batch-list shape."""
     known = await _image(fake_metadata, OWNER, "images/known.webp")
 
-    resp = await client.get("/files/batch", headers=auth_headers, params={"ids": [known]})
+    resp = await client.post("/files/batch", headers=auth_headers, json={"ids": [known]})
 
     assert resp.status_code == 200
     assert "files" in resp.json()

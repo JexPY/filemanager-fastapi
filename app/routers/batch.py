@@ -14,7 +14,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.routers.auth import verify_token
-from app.schemas import FileBatchResponse
+from app.schemas import FileBatchRequest, FileBatchResponse
 from app.services.metadata import MetadataError, get_metadata_store
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ _STORE_UNAVAILABLE_DETAIL = "Metadata store unavailable"
 _MAX_BATCH_IDS = 200
 
 
-@router.get(
+@router.post(
     "/files/batch",
     tags=["Files"],
     summary="Get multiple files by id",
@@ -33,23 +33,14 @@ _MAX_BATCH_IDS = 200
 )
 async def get_files_batch(
     owner: Annotated[str, Depends(verify_token)],
-    ids: Annotated[
-        list[str],
-        Query(
-            min_length=1,
-            max_length=_MAX_BATCH_IDS,
-            description=(
-                f"Repeat the param per id, e.g. ?ids=a&ids=b. Up to {_MAX_BATCH_IDS} per request."
-            ),
-        ),
-    ],
+    request: FileBatchRequest,
 ):
     """Owner-scoped lookup of many records by id in one call.
 
     Unknown ids and ids owned by someone else are silently dropped from the
     result rather than 404ing the whole request -- existence never leaks,
     same as every other owner-scoped route. Order is not guaranteed to match
-    `ids`; sort by id yourself if you need a stable order.
+    the requested `ids`; sort by id yourself if you need a stable order.
 
     **Registered before** ``GET /files/{file_id}`` in `app.main` on purpose:
     Starlette matches routes in registration order, and `{file_id}` would
@@ -57,7 +48,7 @@ async def get_files_batch(
     """
     store = await get_metadata_store()
     try:
-        records = await store.get_many(owner, ids)
+        records = await store.get_many(owner, request.ids)
     except MetadataError as exc:
         logger.exception("Failed to batch-load uploads")
         raise HTTPException(

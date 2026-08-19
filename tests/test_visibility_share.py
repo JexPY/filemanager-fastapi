@@ -101,7 +101,6 @@ async def test_patch_visibility_applies_to_any_kind(
     body = resp.json()
     assert body["visibility"] == "private"
     assert "thumbnail_url" not in body
-    assert "direct_url" not in body
     assert body["url"].endswith(f"/files/{image.id}/download")
 
 
