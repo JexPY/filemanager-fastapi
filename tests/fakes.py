@@ -218,41 +218,41 @@ class InMemoryMetadataStore(MetadataStore):
         return None
 
     async def list(
-        self, 
-        owner: str, 
-        *, 
-        kind: str | None = None, 
+        self,
+        owner: str,
+        *,
+        kind: str | None = None,
         status: str | None = None,
         visibility: str | None = None,
-        limit: int = 50, 
-        offset: int = 0
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[UploadRecord]:
         matches = [
             self._joined(self.records[i])
             for i in reversed(self._order)
-            if self.records[i].owner == owner 
-               and (kind is None or self.records[i].kind == kind)
-               and (status is None or self.records[i].status == status)
-               and (visibility is None or self.records[i].visibility == visibility)
+            if self.records[i].owner == owner
+            and (kind is None or self.records[i].kind == kind)
+            and (status is None or self.records[i].status == status)
+            and (visibility is None or self.records[i].visibility == visibility)
         ]
         return matches[offset : offset + limit]
 
     async def count(
-        self, 
-        owner: str, 
-        *, 
+        self,
+        owner: str,
+        *,
         kind: str | None = None,
         status: str | None = None,
-        visibility: str | None = None
+        visibility: str | None = None,
     ) -> int:
         return len(
             [
                 r
                 for r in self.records.values()
-                if r.owner == owner 
-                   and (kind is None or r.kind == kind)
-                   and (status is None or r.status == status)
-                   and (visibility is None or r.visibility == visibility)
+                if r.owner == owner
+                and (kind is None or r.kind == kind)
+                and (status is None or r.status == status)
+                and (visibility is None or r.visibility == visibility)
             ]
         )
 

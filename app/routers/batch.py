@@ -11,7 +11,7 @@ parent records) into one request.
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.routers.auth import verify_token
 from app.schemas import FileBatchRequest, FileBatchResponse

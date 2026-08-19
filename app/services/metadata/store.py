@@ -62,28 +62,28 @@ class MetadataStore(ABC):
 
     @abstractmethod
     async def list(
-        self, 
-        owner: str, 
-        *, 
-        kind: str | None = None, 
+        self,
+        owner: str,
+        *,
+        kind: str | None = None,
         status: str | None = None,
         visibility: str | None = None,
-        limit: int = 50, 
-        offset: int = 0
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[UploadRecord]: ...
 
     @abstractmethod
     async def count(
-        self, 
-        owner: str, 
-        *, 
+        self,
+        owner: str,
+        *,
         kind: str | None = None,
         status: str | None = None,
-        visibility: str | None = None
+        visibility: str | None = None,
     ) -> int:
-        """Total records for this owner (optionally filtered by `kind`, `status`, `visibility`), ignoring
-        limit/offset -- the `total_count` a paginated `GET /files` reports so a
-        client can size its pager without walking every page."""
+        """Total records for this owner (optionally filtered by `kind`, `status`,
+        `visibility`), ignoring limit/offset -- the `total_count` a paginated
+        `GET /files` reports so a client can size its pager without walking every page."""
 
     @abstractmethod
     async def get_many(self, owner: str, upload_ids: Sequence[str]) -> Sequence[UploadRecord]:

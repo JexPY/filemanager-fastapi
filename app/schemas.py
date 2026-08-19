@@ -203,11 +203,11 @@ class FileListResponse(BaseModel):
 
 class FileBatchRequest(BaseModel):
     """Request body for ``POST /files/batch``."""
-    
+
     ids: list[str] = Field(
-        min_length=1, 
-        max_length=200, 
-        description="List of upload record ids. Up to 200 per request."
+        min_length=1,
+        max_length=200,
+        description="List of upload record ids. Up to 200 per request.",
     )
 
 

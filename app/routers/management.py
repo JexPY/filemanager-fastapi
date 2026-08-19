@@ -35,23 +35,34 @@ async def list_files(
     owner: Annotated[str, Depends(verify_token)],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
-    kind: Annotated[str | None, Query(description="Filter by kind (e.g., 'image', 'video', 'file')")] = None,
-    status_filter: Annotated[str | None, Query(alias="status", description="Filter by status (e.g., 'ready', 'processing', 'failed')")] = None,
-    visibility: Annotated[str | None, Query(description="Filter by visibility ('public' or 'private')")] = None,
+    kind: Annotated[
+        str | None, Query(description="Filter by kind (e.g., 'image', 'video', 'file')")
+    ] = None,
+    status_filter: Annotated[
+        str | None,
+        Query(
+            alias="status", description="Filter by status (e.g., 'ready', 'processing', 'failed')"
+        ),
+    ] = None,
+    visibility: Annotated[
+        str | None, Query(description="Filter by visibility ('public' or 'private')")
+    ] = None,
 ):
     """List the caller's uploads, newest first. Owner-scoped: a token only ever
     sees its own records."""
     store = await get_metadata_store()
     try:
         records = await store.list(
-            owner, 
-            kind=kind, 
-            status=status_filter, 
-            visibility=visibility, 
-            limit=limit, 
-            offset=offset
+            owner,
+            kind=kind,
+            status=status_filter,
+            visibility=visibility,
+            limit=limit,
+            offset=offset,
         )
-        total_count = await store.count(owner, kind=kind, status=status_filter, visibility=visibility)
+        total_count = await store.count(
+            owner, kind=kind, status=status_filter, visibility=visibility
+        )
     except MetadataError as exc:
         logger.exception("Failed to list uploads")
         raise HTTPException(

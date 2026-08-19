@@ -251,14 +251,14 @@ class PostgresMetadataStore(MetadataStore):
         return _row_to_record(row) if row is not None else None
 
     async def list(
-        self, 
-        owner: str, 
-        *, 
-        kind: str | None = None, 
+        self,
+        owner: str,
+        *,
+        kind: str | None = None,
         status: str | None = None,
         visibility: str | None = None,
-        limit: int = 50, 
-        offset: int = 0
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[UploadRecord]:
         rows = await self._fetch(
             f"SELECT {_JOIN_COLUMNS} FROM uploads u "
@@ -284,12 +284,12 @@ class PostgresMetadataStore(MetadataStore):
         return [_row_to_record(row) for row in rows]
 
     async def count(
-        self, 
-        owner: str, 
-        *, 
+        self,
+        owner: str,
+        *,
         kind: str | None = None,
         status: str | None = None,
-        visibility: str | None = None
+        visibility: str | None = None,
     ) -> int:
         val = await self._fetchval(
             "SELECT COUNT(*) FROM uploads WHERE owner = $1 "
