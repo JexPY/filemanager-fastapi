@@ -108,6 +108,18 @@ class Settings(BaseSettings):
     # prefixes its own origin.
     PUBLIC_BASE_URL: str = Field(default="")
 
+    # Browser origins allowed to call this service cross-origin, comma-separated
+    # (e.g. "https://fixcar.ge,https://www.fixcar.ge"). Required for the
+    # direct-to-service upload pattern: a consuming site's JavaScript POSTs the
+    # file here and must be able to *read the response* to learn the record id.
+    # Note the failure mode this exists to prevent -- a multipart POST carrying
+    # its credential as `?token=` is a CORS-*simple* request, so without this the
+    # upload still succeeds and stores the object, but the browser blocks the
+    # response and the caller never learns the id: a silent orphan on every
+    # upload. Blank => no CORS middleware at all (pure backend-to-backend
+    # deployments are unaffected). No wildcard support on purpose.
+    CORS_ALLOWED_ORIGINS: str = Field(default="")
+
     # Auth
     FILE_MANAGER_BEARER_TOKENS: str = Field(default="")
 
@@ -302,6 +314,18 @@ class Settings(BaseSettings):
         return frozenset(
             h.strip().lower() for h in self.WEBHOOK_ALLOWED_HOSTS.split(",") if h.strip()
         )
+
+    @property
+    def parsed_cors_origins(self) -> list[str]:
+        """Browser origins permitted to call this service cross-origin.
+
+        A list rather than a set: Starlette's CORSMiddleware stores what it is
+        given and matches an incoming Origin against it, so a stable, ordered
+        value keeps the configuration reproducible. Origins are compared
+        verbatim by the browser and by Starlette, so a trailing slash is
+        stripped but case is otherwise left alone.
+        """
+        return [o.strip().rstrip("/") for o in self.CORS_ALLOWED_ORIGINS.split(",") if o.strip()]
 
     @property
     def active_public_base_url(self) -> str:

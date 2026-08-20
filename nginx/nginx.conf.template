@@ -39,9 +39,25 @@ http {
 
     proxy_cache_path /tmp/nginx_cache keys_zone=img_cache:10m max_size=5g inactive=24h use_temp_path=off;
 
-    # Per-IP upload throttle: 2 requests/second with a burst of 5.
-    # Applies only to the upload routes; read/list/health are unrestricted.
-    limit_req_zone $binary_remote_addr zone=upload_limit:10m rate=2r/s;
+    # Recover the real client IP when this proxy itself sits behind another one
+    # (a TLS terminator / ingress such as Traefik). Without this every request
+    # arrives carrying the *upstream proxy's* address, so the per-IP throttle
+    # below collapses into a single global bucket shared by every user -- they
+    # would rate-limit each other.
+    #
+    # NGINX_TRUSTED_PROXY_CIDR defaults to 127.0.0.1/32, i.e. effectively off:
+    # X-Forwarded-For is attacker-controlled, and trusting it from an untrusted
+    # source is a rate-limit bypass. Widen it to the edge proxy's address/subnet
+    # only, never 0.0.0.0/0.
+    set_real_ip_from ${NGINX_TRUSTED_PROXY_CIDR};
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    # Per-IP upload throttle, applied only to the upload routes; read/list/health
+    # are unrestricted. Tunable at deploy time because the right value depends on
+    # the client: a gallery upload should use POST /upload/images (one request
+    # carrying many files, one token spent) rather than N single-file requests.
+    limit_req_zone $binary_remote_addr zone=upload_limit:10m rate=${NGINX_UPLOAD_RATE};
 
     upstream api {
         server api:80;
@@ -119,8 +135,17 @@ http {
 
         # Rate-limit upload endpoints specifically.
         location ~ ^/upload/(images?|video|file)$ {
-            limit_req zone=upload_limit burst=5 nodelay;
+            limit_req zone=upload_limit burst=${NGINX_UPLOAD_BURST} nodelay;
             limit_req_status 429;
+
+            # A throttled or oversized upload is rejected by nginx and never
+            # reaches the app, so it would carry none of the app's CORS headers
+            # -- a browser then reports an opaque network failure instead of the
+            # actual 429/413, and the frontend cannot tell "slow down and retry"
+            # from "the service is down". Route both through named locations that
+            # re-attach the headers.
+            error_page 429 = @cors_rate_limited;
+            error_page 413 = @cors_too_large;
 
             proxy_pass         http://api;
             proxy_http_version 1.1;
@@ -132,6 +157,25 @@ http {
             # Don't buffer the entire upload body (up to 2 GB for video) before
             # forwarding to the API.
             proxy_request_buffering off;
+        }
+
+        # CORS-readable versions of the two errors nginx raises by itself on the
+        # upload routes. Echoing $http_origin rather than matching an allow-list
+        # is safe *here specifically*: the response has an empty body, carries no
+        # credentials, and reveals only a status code the caller just provoked.
+        # It also cannot produce a duplicate Access-Control-Allow-Origin (which
+        # browsers reject outright) because these responses never reach the app,
+        # so the app's own CORS middleware never runs for them.
+        location @cors_rate_limited {
+            add_header 'Access-Control-Allow-Origin' $http_origin always;
+            add_header 'Vary' 'Origin' always;
+            return 429;
+        }
+
+        location @cors_too_large {
+            add_header 'Access-Control-Allow-Origin' $http_origin always;
+            add_header 'Vary' 'Origin' always;
+            return 413;
         }
 
         location / {

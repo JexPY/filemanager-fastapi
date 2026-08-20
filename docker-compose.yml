@@ -27,7 +27,16 @@ services:
     environment:
       - ENABLE_IMGPROXY_CACHE=${ENABLE_IMGPROXY_CACHE:-true}
       - NGINX_MAX_BODY_SIZE=${NGINX_MAX_BODY_SIZE:-2000m}
-    command: /bin/sh -c "envsubst '$${ENABLE_IMGPROXY_CACHE} $${NGINX_MAX_BODY_SIZE}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"
+      # Whose X-Forwarded-For to believe. Defaults to a no-op; widen it to the
+      # edge proxy (Traefik/LB) only when one actually fronts this nginx --
+      # trusting the header from anywhere else is a rate-limit bypass.
+      - NGINX_TRUSTED_PROXY_CIDR=${NGINX_TRUSTED_PROXY_CIDR:-127.0.0.1/32}
+      - NGINX_UPLOAD_RATE=${NGINX_UPLOAD_RATE:-2r/s}
+      - NGINX_UPLOAD_BURST=${NGINX_UPLOAD_BURST:-5}
+    # NOTE: envsubst only substitutes the variables named here. A var added to
+    # the template but forgotten in this list renders as literal `${NAME}` text,
+    # which nginx then rejects (or worse, silently misreads) at startup.
+    command: /bin/sh -c "envsubst '$${ENABLE_IMGPROXY_CACHE} $${NGINX_MAX_BODY_SIZE} $${NGINX_TRUSTED_PROXY_CIDR} $${NGINX_UPLOAD_RATE} $${NGINX_UPLOAD_BURST}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"
     volumes:
       - ./nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
       # Read-only: nginx serves bytes but never writes the media volume.
