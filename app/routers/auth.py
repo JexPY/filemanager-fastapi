@@ -8,11 +8,25 @@ single dual-auth path (`resolve_principal`):
   This is the backend-to-backend secret, and the *only* credential allowed to
   mint capability JWTs (``POST /upload/presign``).
 * **Capability JWTs** -- short-lived HS256 tokens signed with ``JWT_SECRET_KEY``
-  carrying ``sub`` (owner id), ``exp`` (strictly enforced) and ``scopes`` (at
-  least one of ``upload:image`` / ``upload:video``). A trusted backend mints one
-  (directly, since the secret is shared, or via ``/upload/presign``) and hands
-  it to an untrusted frontend, which then uploads *straight to this service* --
-  the file bytes never round-trip the backend.
+  carrying ``sub`` (owner id), ``exp`` (strictly enforced) and ``scopes``. A
+  trusted backend mints one (directly, since the secret is shared, or via
+  ``/upload/presign``) and hands it to an untrusted frontend, which then uploads
+  *straight to this service* -- the file bytes never round-trip the backend.
+
+The scopes form a deliberate ladder from broadest to narrowest, and each rung is
+handed to a *less* trusted party than the one above it:
+
+===================================  ======================================
+credential                           may
+===================================  ======================================
+static master token                  everything (backend-to-backend)
+``manage:files`` JWT                 every owner-scoped route
+``upload:image``/``video``/``file``  only the matching ``/upload/*`` verb
+``read:file`` JWT (+ ``file``)       bytes of exactly one named record
+===================================  ======================================
+
+The load-bearing property is that the bottom two rungs -- the ones that reach a
+browser -- grant no owner access at all. See ``Principal.grants_owner_access``.
 
 The token may arrive in the ``Authorization: Bearer <token>`` header or, for
 clients that cannot set headers (plain ``<form>`` POSTs, third-party uploader
@@ -52,9 +66,14 @@ SCOPE_UPLOAD_FILE = "upload:file"
 # after running its own permission check, so that user can fetch exactly one
 # private record. Deliberately NOT owner-equivalent -- see `grants_owner_access`.
 SCOPE_READ_FILE = "read:file"
+# Owner-level control of a tenant's records (list, get, batch, patch, delete,
+# share, tasks, posters, redelivery, QR). This is the *backend's* capability, not
+# a browser's: it is deliberately not implied by an upload scope, because an
+# upload token is handed to untrusted frontend JavaScript.
+SCOPE_MANAGE_FILES = "manage:files"
 _UPLOAD_SCOPES = frozenset({SCOPE_UPLOAD_IMAGE, SCOPE_UPLOAD_VIDEO, SCOPE_UPLOAD_FILE})
 # A JWT is only a principal at all if it grants one of these.
-_PRINCIPAL_SCOPES = _UPLOAD_SCOPES | {SCOPE_READ_FILE}
+_PRINCIPAL_SCOPES = _UPLOAD_SCOPES | {SCOPE_READ_FILE, SCOPE_MANAGE_FILES}
 
 
 @dataclass(frozen=True)
@@ -76,15 +95,23 @@ class Principal:
     @property
     def grants_owner_access(self) -> bool:
         """Whether this credential may act as its owner on the owner-scoped
-        routes (list, get, patch, delete, share, poster, redeliver, tasks).
+        routes (list, get, batch, patch, delete, share, poster, redeliver,
+        tasks, QR).
 
-        A static master token always may. A capability JWT may only if it carries
-        an upload scope -- a bare ``read:file`` token must not, because it is
-        handed to an *end user* to fetch one file. If it were owner-equivalent,
-        that user could list or delete every other record belonging to the
-        tenant that minted it.
+        A static master token always may -- that is the backend-to-backend
+        secret. A capability JWT may only if it explicitly carries
+        ``manage:files``.
+
+        An upload scope deliberately does **not** grant this. Upload tokens are
+        minted for *untrusted frontend JavaScript* so the bytes never round-trip
+        the consuming backend, and a common deployment gives every end user a
+        token under one shared tenant ``sub``. If an upload scope were
+        owner-equivalent, any such browser token could list, re-share, or delete
+        every record that tenant owns -- so the credential handed out most
+        widely would carry the broadest authority. ``read:file`` is excluded for
+        the same reason, one step narrower still.
         """
-        return self.scopes is None or bool(self.scopes & _UPLOAD_SCOPES)
+        return self.scopes is None or SCOPE_MANAGE_FILES in self.scopes
 
 
 def may_read_record(principal: Principal | None, *, record_owner: str, record_id: str) -> bool:
@@ -95,7 +122,12 @@ def may_read_record(principal: Principal | None, *, record_owner: str, record_id
 
     * a ``read:file`` token bound to this exact id -- and whose ``sub`` still
       matches the record's owner, so an id leaking across tenants is not enough;
-    * the owner themselves, via a static token or an upload-scoped JWT.
+    * the owner themselves, via a static token or a ``manage:files`` JWT.
+
+    Note what is absent: an upload-scoped JWT reads nothing. A browser that may
+    write a file has no business reading arbitrary *other* private records of
+    the same tenant -- if it needs one, the consuming backend mints a
+    ``read:file`` grant for exactly that record.
     """
     if principal is None:
         return False
@@ -208,17 +240,17 @@ def verify_token(
     and owner semantics are identical to the static-only implementation, so
     every existing ``owner: str = Depends(verify_token)`` route is unaffected.
 
-    A bare ``read:file`` token is rejected with 403: it is a per-file read grant
-    minted for an end user, and every route guarded by this dependency is
-    owner-scoped (listing, deletion, share minting, ...). Letting one through
-    here would turn a single-file read capability into full control of that
-    owner's records.
+    Every route guarded by this dependency is owner-scoped (listing, deletion,
+    share minting, ...), so a JWT must carry ``manage:files`` explicitly. Upload
+    and ``read:file`` tokens are rejected with 403: both are minted for an
+    untrusted browser, and letting either through would turn a narrow write-one
+    / read-one capability into full control of that owner's records.
     """
     principal = _authenticate(request, credentials)
     if not principal.grants_owner_access:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="This token grants read access to a single file only",
+            detail=f"Token is missing a required scope ({SCOPE_MANAGE_FILES})",
         )
     return principal.owner
 

@@ -17,6 +17,7 @@ import pytest
 
 from app.config import settings
 from app.routers.auth import (
+    SCOPE_MANAGE_FILES,
     SCOPE_READ_FILE,
     SCOPE_UPLOAD_FILE,
     SCOPE_UPLOAD_IMAGE,
@@ -89,15 +90,38 @@ def test_read_scope_is_not_owner_equivalent(jwt_env: None) -> None:
     assert read_only is not None
     assert read_only.grants_owner_access is False
 
-    # Both other credential shapes remain owner-equivalent.
-    assert resolve_principal(_mint(scopes=[SCOPE_UPLOAD_IMAGE])).grants_owner_access is True  # type: ignore[union-attr]
+    # Only the two *backend* credentials are owner-equivalent.
+    assert resolve_principal(_mint(scopes=[SCOPE_MANAGE_FILES])).grants_owner_access is True  # type: ignore[union-attr]
     assert resolve_principal(STATIC).grants_owner_access is True  # type: ignore[union-attr]
+
+
+def test_upload_scope_is_not_owner_equivalent(jwt_env: None) -> None:
+    """The same guard, for the credential that actually reaches a browser.
+
+    Upload tokens are handed to untrusted frontend JavaScript, commonly with
+    every end user sharing one tenant `sub`. If an upload scope implied owner
+    access, the most widely distributed credential would also be the broadest --
+    any user could list, re-share, or delete the whole tenant's media.
+    """
+    for scope in (SCOPE_UPLOAD_IMAGE, SCOPE_UPLOAD_VIDEO, SCOPE_UPLOAD_FILE):
+        uploader = resolve_principal(_mint(scopes=[scope]))
+        assert uploader is not None
+        assert uploader.grants_owner_access is False
+
+
+def test_manage_scope_combines_with_upload_scopes(jwt_env: None) -> None:
+    """A token may legitimately carry both; the scopes are independent."""
+    both = resolve_principal(_mint(scopes=[SCOPE_UPLOAD_IMAGE, SCOPE_MANAGE_FILES]))
+    assert both is not None
+    assert both.grants_owner_access is True
+    assert both.has_scope(SCOPE_UPLOAD_IMAGE) is True
 
 
 def test_may_read_record_ladder(jwt_env: None) -> None:
     """The pure access ladder, without HTTP."""
     bound = resolve_principal(_mint(sub="owner-a", scopes=[SCOPE_READ_FILE], file="rec-1"))
     uploader = resolve_principal(_mint(sub="owner-a", scopes=[SCOPE_UPLOAD_IMAGE]))
+    manager = resolve_principal(_mint(sub="owner-a", scopes=[SCOPE_MANAGE_FILES]))
 
     assert may_read_record(bound, record_owner="owner-a", record_id="rec-1") is True
     # Bound to one record: a different id is refused even for the same owner.
@@ -105,8 +129,12 @@ def test_may_read_record_ladder(jwt_env: None) -> None:
     # And it cannot be replayed across tenants even if an id leaks.
     assert may_read_record(bound, record_owner="owner-b", record_id="rec-1") is False
 
-    assert may_read_record(uploader, record_owner="owner-a", record_id="rec-2") is True
-    assert may_read_record(uploader, record_owner="owner-b", record_id="rec-2") is False
+    # A manage token reads any of its own owner's records, but only its own.
+    assert may_read_record(manager, record_owner="owner-a", record_id="rec-2") is True
+    assert may_read_record(manager, record_owner="owner-b", record_id="rec-2") is False
+
+    # An upload token reads nothing: writing a file grants no read over others.
+    assert may_read_record(uploader, record_owner="owner-a", record_id="rec-2") is False
     assert may_read_record(None, record_owner="owner-a", record_id="rec-1") is False
 
 
@@ -208,15 +236,47 @@ async def test_expired_jwt_upload_is_401(client: httpx.AsyncClient, jwt_env: Non
     assert resp.status_code == 401
 
 
-async def test_jwt_authenticates_on_a_plain_verify_token_route(
+async def test_manage_jwt_authenticates_on_a_plain_verify_token_route(
     client: httpx.AsyncClient, jwt_env: None
 ) -> None:
     # GET /files uses verify_token (not a scope-gated dependency); a JWT owner
-    # should authenticate and see its own (empty) listing.
-    token = _mint(sub="tenant-list", scopes=[SCOPE_UPLOAD_IMAGE])
+    # holding manage:files should authenticate and see its own (empty) listing.
+    token = _mint(sub="tenant-list", scopes=[SCOPE_MANAGE_FILES])
     resp = await client.get("/files", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     assert resp.json()["files"] == []
+
+
+async def test_upload_jwt_is_rejected_by_owner_scoped_routes(
+    client: httpx.AsyncClient, jwt_env: None
+) -> None:
+    """The blast-radius guard, end to end.
+
+    An upload token lives in a browser. Under the common shape where every end
+    user shares one tenant `sub`, each of these routes would otherwise expose or
+    destroy the entire tenant's media on behalf of any one user.
+    """
+    token = _mint(sub="tenant-1", scopes=[SCOPE_UPLOAD_IMAGE])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    assert (await client.get("/files", headers=headers)).status_code == 403
+    assert (await client.get("/files/some-id", headers=headers)).status_code == 403
+    assert (await client.delete("/files/some-id", headers=headers)).status_code == 403
+    assert (await client.post("/files/some-id/share", headers=headers)).status_code == 403
+    assert (
+        await client.post("/files/batch", headers=headers, json={"ids": ["a"]})
+    ).status_code == 403
+
+
+async def test_upload_jwt_can_still_upload(client: httpx.AsyncClient, jwt_env: None) -> None:
+    """Narrowing owner access must not break the thing the token exists for."""
+    token = _mint(sub="tenant-1", scopes=[SCOPE_UPLOAD_IMAGE])
+    resp = await client.post(
+        "/upload/image",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp.status_code == 200
 
 
 # --- POST /upload/presign ----------------------------------------------------

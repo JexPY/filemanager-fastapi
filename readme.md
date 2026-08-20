@@ -558,10 +558,18 @@ Signed with `JWT_SECRET_KEY` using HMAC-SHA256 (`HS256`). JWTs enforce expiratio
 
 | Scope | Allowed Operations | Security Constraints |
 |---|---|---|
-| `upload:image` | `POST /upload/image`, `POST /upload/images` | Owner-equivalent on other owner-scoped routes |
-| `upload:video` | `POST /upload/video` | Owner-equivalent on other owner-scoped routes |
-| `upload:file` | `POST /upload/file` | Owner-equivalent on other owner-scoped routes |
-| `read:file` | `GET /files/{id}/download` for **one specific file** | Requires matching `file` claim; strictly forbidden on owner-scoped routes (returns 403) |
+| `manage:files` | Every owner-scoped route: list, get, batch, patch, delete, share, tasks, posters, redelivery, QR | The backend's capability. Not implied by any other scope |
+| `upload:image` | `POST /upload/image`, `POST /upload/images` | Upload only — forbidden on owner-scoped routes (403) |
+| `upload:video` | `POST /upload/video` | Upload only — forbidden on owner-scoped routes (403) |
+| `upload:file` | `POST /upload/file` | Upload only — forbidden on owner-scoped routes (403) |
+| `read:file` | `GET /files/{id}/download` for **one specific file** | Requires matching `file` claim; forbidden on owner-scoped routes (403) |
+
+The scopes form a ladder, and each rung below `manage:files` is handed to a *less* trusted
+party. Upload and `read:file` tokens are minted for **untrusted browser JavaScript** — often
+with every end user sharing one tenant `sub` — so neither grants owner access. If they did,
+the credential distributed most widely would also carry the broadest authority: any one user
+could list, re-share, or delete the entire tenant's media. A backend needing owner access
+uses its static master token, or mints itself a `manage:files` JWT.
 
 #### Single-File `read:file` Token Format
 Your main application backend can mint scoped tokens directly for end-user media playback:
@@ -740,6 +748,7 @@ Refer to [`.env-example`](.env-example) for an annotated starter template.
 | `DATABASE_URL` | *None* | PostgreSQL connection string for metadata store. |
 | `REDIS_URL` | `redis://redis:6379/0` | Redis broker and result backend URL. |
 | `PUBLIC_BASE_URL` | *None* | External service origin for generating absolute URLs. |
+| `CORS_ALLOWED_ORIGINS` | *None* | Comma-separated browser origins allowed to call the API cross-origin. Required for direct browser uploads — without it the upload succeeds but the browser blocks the response, so the caller never learns the record id. Blank disables the middleware entirely. |
 
 ### Storage Settings
 

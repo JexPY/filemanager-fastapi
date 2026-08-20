@@ -4,6 +4,7 @@ from collections.abc import Coroutine
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from taskiq_fastapi import populate_dependency_context
 
 from app.broker import broker
@@ -210,7 +211,44 @@ deletion is explicit and irreversible.
     },
 )
 
+
+def configure_cors(target: FastAPI) -> bool:
+    """Mount CORS on `target` if any origins are configured; report whether it was.
+
+    Call this *after* every other `add_middleware`: Starlette builds the stack so
+    the most recently added middleware wraps everything before it, and CORS has to
+    be outermost. That way a 4xx/5xx raised anywhere inside (an auth 401, a
+    validation 422) still comes back with the headers, so the browser surfaces the
+    real status instead of an opaque network error.
+
+    With no origins configured nothing is mounted at all, so a pure
+    backend-to-backend deployment keeps byte-identical responses.
+
+    `allow_credentials=False` is deliberate, not an oversight: every credential
+    this service accepts rides an `Authorization` header or a `?token=` query
+    param, never a cookie. There is nothing for the browser to attach
+    automatically, and therefore no cookie-CSRF surface to defend.
+
+    Kept as a function rather than inline module code so it is callable against a
+    throwaway app in tests -- the module-level `app` is built once at import, long
+    before any test can monkeypatch `settings`.
+    """
+    origins = settings.parsed_cors_origins
+    if not origins:
+        return False
+    target.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+        max_age=600,
+    )
+    return True
+
+
 app.add_middleware(RequestIDMiddleware)
+configure_cors(app)
 
 app.include_router(auth.router)
 app.include_router(upload.router)
