@@ -1,4 +1,4 @@
-"""S3 backend against a live S3-compatible server (the `garage` compose service).
+"""S3-compatible backends against a live server (the `garage` compose service).
 
 The sibling `test_storage_s3_unit.py` covers URL construction and client-side
 signing without a network. This module covers what only a real server can: that
@@ -6,6 +6,10 @@ boto3's managed transfer actually completes a *multipart* upload, that a
 presigned SigV4 GET is honoured when fetched over plain HTTP, and that HTTP
 Range works on the resulting URL -- the three properties video playback on the
 `s3` backend depends on.
+
+Every test runs twice, once through `S3Storage` and once through `B2Storage`,
+since B2 rides the same code path with two checksum knobs flipped. Garage is the
+target in both cases -- this says nothing about Backblaze's own service.
 
 Start the fixture with `docker compose --profile s3-dev up -d garage garage-init`.
 Without it these tests skip; set `S3_INTEGRATION_REQUIRED=1` (CI does) to turn
@@ -25,7 +29,7 @@ import httpx
 import pytest
 
 from app.config import settings
-from app.services.storage import S3Storage, StorageError
+from app.services.storage import B2Storage, S3Storage, StorageError
 
 pytestmark = pytest.mark.s3_integration
 
@@ -71,10 +75,7 @@ def _require_live_endpoint() -> None:
     pytest.skip(message)
 
 
-@pytest.fixture
-async def s3(
-    _require_live_endpoint: None, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[S3Storage]:
+def _configure_s3(monkeypatch: pytest.MonkeyPatch) -> S3Storage:
     monkeypatch.setattr(settings, "S3_BUCKET", BUCKET)
     monkeypatch.setattr(settings, "S3_ENDPOINT_URL", ENDPOINT_URL)
     # Blank so _object_url() exercises the endpoint (path-style) branch, which
@@ -83,7 +84,39 @@ async def s3(
     monkeypatch.setattr(settings, "AWS_ACCESS_KEY_ID", ACCESS_KEY)
     monkeypatch.setattr(settings, "AWS_SECRET_ACCESS_KEY", SECRET_KEY)
     monkeypatch.setattr(settings, "AWS_REGION", REGION)
-    backend = S3Storage()
+    return S3Storage()
+
+
+def _configure_b2(monkeypatch: pytest.MonkeyPatch) -> S3Storage:
+    monkeypatch.setattr(settings, "B2_BUCKET", BUCKET)
+    # B2's real endpoint is derived from the region; pointing it at Garage is
+    # exactly what the override exists for.
+    monkeypatch.setattr(settings, "B2_ENDPOINT_URL", ENDPOINT_URL)
+    monkeypatch.setattr(settings, "B2_PUBLIC_BASE_URL", "")
+    monkeypatch.setattr(settings, "B2_KEY_ID", ACCESS_KEY)
+    monkeypatch.setattr(settings, "B2_APPLICATION_KEY", SECRET_KEY)
+    monkeypatch.setattr(settings, "B2_REGION", REGION)
+    return B2Storage()
+
+
+_BACKEND_BUILDERS = {"s3": _configure_s3, "b2": _configure_b2}
+
+
+@pytest.fixture(params=list(_BACKEND_BUILDERS))
+async def s3(
+    request: pytest.FixtureRequest,
+    _require_live_endpoint: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[S3Storage]:
+    """Every test in this module runs against both S3-compatible backends.
+
+    `B2Storage` is `S3Storage` with different settings feeding it and two
+    checksum knobs flipped, so running the same live suite through both is what
+    proves those knobs did not break the shared code path. It proves nothing
+    about Backblaze's own service -- there is no live B2 account here; the target
+    is Garage in both cases.
+    """
+    backend = _BACKEND_BUILDERS[request.param](monkeypatch)
     try:
         yield backend
     finally:

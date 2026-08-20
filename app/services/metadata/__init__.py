@@ -6,7 +6,7 @@ re-upload. One row per uploaded object (see the ``uploads`` schema below);
 images land ``ready`` immediately, videos start ``processing`` and are flipped
 to ``ready``/``failed`` by the worker when compression finishes.
 
-Mirrors ``app/services/storage.py``'s design deliberately: an abstract
+Mirrors ``app/services/storage``'s design deliberately: an abstract
 ``MetadataStore`` with a real (Postgres/asyncpg) implementation and an
 in-memory fake for tests, plus a per-process singleton driven by
 ``get_metadata_store()`` / ``close_metadata_store()`` and wired into the same
