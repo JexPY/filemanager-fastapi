@@ -421,15 +421,20 @@ record returns **404 Not Found**.
 | Method | Endpoint | Auth Scope | Description & Behavior |
 |---|---|---|---|
 | `POST` | `/upload/image` | `upload:image` | Synchronous. Strips metadata, encodes WebP, materializes 300x300 thumbnail. Idempotent per owner. |
-| `POST` | `/upload/images` | `upload:image` | Bulk upload (max 10 files / 50 MB total, concurrency 4). Failed individual files are skipped without failing the batch. |
+| `POST` | `/upload/images` | `upload:image` | Bulk upload (max 10 files / 50 MB aggregate total, concurrency 4). Guarantees exact 1:1 index alignment with discriminated items (`success` or `error` with machine-readable `code`). Returns `{succeeded, failed, total, items}`. |
 | `POST` | `/upload/video` | `upload:video` | Streams to disk, stages raw video, enqueues transcoding. Returns 202 Accepted. |
 | `POST` | `/upload/file` | `upload:file` | Generic ingest (PDF, audio, archives, documents). Validated via magic bytes; stored immediately at `status='ready'`. |
 | `POST` | `/upload/presign` | Master token | Mints short-lived capability JWTs and pre-authenticated direct upload URLs for `image`, `video`, or `file`. |
 
 #### Image Ingestion Parameters
 - **Query parameters:** `thumbnail` (boolean, default `false`: whether to generate and return a 300x300 thumbnail).
-- **Form fields:** `file`, `optimization` (`size`|`balanced`|`quality`), `visibility` (`public`|`private`), `width`, `height`, `fit`, `format`.
+- **Form fields:** `file` (or `files` for bulk), `optimization` (`size`|`balanced`|`quality`), `visibility` (`public`|`private`), `width`, `height`, `fit`, `format`.
 - **Accepted formats:** PNG, JPEG, GIF, WebP, HEIC (detected via magic bytes). SVG is rejected to prevent SSRF and XML entity expansion attacks.
+- **Bulk Image Upload Contract (`POST /upload/images`):**
+  - **1:1 Index Alignment:** `items` array always contains an entry for every uploaded file in exact positional order (`len(items) == len(files)`).
+  - **Per-item Discrimination:** Each element is either `status: "success"` (carrying `id`, `url`, `thumbnail_url`, `original_filename`, etc.) or `status: "error"` (carrying `code`: `"too_large"` | `"batch_too_large"` | `"invalid_image"` | `"processing_failed"`, `message`, `original_filename`; error items never carry `id`).
+  - **Counters:** Returns explicit `succeeded`, `failed`, and `total` counters (e.g. `{ "succeeded": 2, "failed": 1, "total": 3, "items": [...] }`).
+  - **Idempotency & Filenames:** The upload response echoes the current request's sanitized `original_filename` for client tile mapping; the persisted `UploadRecord` in the database preserves the first-writer's filename under idempotency deduplication.
 - **Optimization profiles:**
   - `size`: WebP quality 65, max dimension 1280 px.
   - `balanced` (default): WebP quality 85, max dimension 1920 px.
@@ -520,6 +525,7 @@ does not rotate keys.
 | `POST` | `/generate/qrcode/mecard` | Bearer | Compact contact format. |
 | `POST` | `/generate/qrcode/geo` | Bearer | Geographic coordinates (`latitude`, `longitude`). |
 | `POST` | `/generate/qrcode/epc` | Bearer | SEPA EPC payment barcode (validates IBAN format). |
+| `GET` | `/whoami` | Bearer | Returns the caller's resolved owner identity (`{"owner": "<owner>"}`). Requires master token or `manage:files`. |
 | `GET` | `/healthz` | None | Liveness probe (returns 200 OK when web process is responding). |
 | `GET` | `/readyz` | None | Readiness probe. Validates live round-trips to Redis and PostgreSQL, plus storage initialization (returns 503 on dependency failure). |
 
@@ -785,6 +791,7 @@ Refer to [`.env-example`](.env-example) for an annotated starter template.
 | Variable | Default | Purpose |
 |---|---|---|
 | `MAX_IMAGE_UPLOAD_BYTES` | 25 MiB | Maximum payload size for image uploads. |
+| `MAX_BULK_UPLOAD_TOTAL_BYTES` | 50 MiB | Aggregate memory budget per bulk image upload request. |
 | `MAX_VIDEO_UPLOAD_BYTES` | 2000 MiB | Maximum payload size for video uploads. |
 | `MAX_FILE_UPLOAD_BYTES` | 100 MiB | Maximum payload size for `/upload/file`. |
 | `MAX_IMAGE_PIXELS` | 50,000,000 | Decompression-bomb limit checked prior to full decode. |

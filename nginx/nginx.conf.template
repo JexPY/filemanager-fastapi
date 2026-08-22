@@ -133,17 +133,66 @@ http {
             proxy_set_header X-Forwarded-Proto $scheme;
         }
 
-        # Rate-limit upload endpoints specifically.
-        location ~ ^/upload/(images?|video|file)$ {
+        # Rate-limit upload endpoints specifically, with tight client_max_body_size per endpoint.
+        location = /upload/image {
+            client_max_body_size 30m;
             limit_req zone=upload_limit burst=${NGINX_UPLOAD_BURST} nodelay;
             limit_req_status 429;
 
-            # A throttled or oversized upload is rejected by nginx and never
-            # reaches the app, so it would carry none of the app's CORS headers
-            # -- a browser then reports an opaque network failure instead of the
-            # actual 429/413, and the frontend cannot tell "slow down and retry"
-            # from "the service is down". Route both through named locations that
-            # re-attach the headers.
+            error_page 429 = @cors_rate_limited;
+            error_page 413 = @cors_too_large;
+
+            proxy_pass         http://api;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+
+            proxy_request_buffering off;
+        }
+
+        location = /upload/images {
+            client_max_body_size 60m;
+            limit_req zone=upload_limit burst=${NGINX_UPLOAD_BURST} nodelay;
+            limit_req_status 429;
+
+            error_page 429 = @cors_rate_limited;
+            error_page 413 = @cors_too_large;
+
+            proxy_pass         http://api;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+
+            proxy_request_buffering off;
+        }
+
+        location = /upload/file {
+            client_max_body_size 110m;
+            limit_req zone=upload_limit burst=${NGINX_UPLOAD_BURST} nodelay;
+            limit_req_status 429;
+
+            error_page 429 = @cors_rate_limited;
+            error_page 413 = @cors_too_large;
+
+            proxy_pass         http://api;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+
+            proxy_request_buffering off;
+        }
+
+        location = /upload/video {
+            client_max_body_size ${NGINX_MAX_BODY_SIZE};
+            limit_req zone=upload_limit burst=${NGINX_UPLOAD_BURST} nodelay;
+            limit_req_status 429;
+
             error_page 429 = @cors_rate_limited;
             error_page 413 = @cors_too_large;
 

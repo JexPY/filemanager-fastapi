@@ -19,7 +19,7 @@ exactly, including that the datetime columns arrive as pre-formatted ISO-8601
 it is a secret capability returned only by the share-mint endpoint.
 """
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -40,6 +40,9 @@ class ImageUploadResponse(BaseModel):
 
     status: str = Field(description="Always 'success' for a completed image upload")
     id: str = Field(description="The upload record id (use with /files/{id})")
+    original_filename: str | None = Field(
+        default=None, description="Original upload filename if provided"
+    )
     size_bytes: int | None = Field(default=None, description="Stored (WebP) object size in bytes")
     size_mb: float | None = Field(
         default=None,
@@ -66,11 +69,71 @@ class ImageUploadResponse(BaseModel):
     )
 
 
+class BulkImageUploadItemSuccess(BaseModel):
+    """A successfully uploaded image in a bulk upload batch."""
+
+    status: Literal["success"] = Field(
+        default="success", description="Status indicator: 'success' for successfully uploaded image"
+    )
+    id: str = Field(description="The upload record id (use with /files/{id})")
+    original_filename: str | None = Field(
+        default=None, description="Original upload filename if provided"
+    )
+    size_bytes: int | None = Field(default=None, description="Stored (WebP) object size in bytes")
+    size_mb: float | None = Field(
+        default=None,
+        description="Stored size in megabytes, rounded to 2dp (null for a 0-byte object)",
+    )
+    dimensions: ImageDimensions
+    url: str | None = Field(
+        default=None,
+        description="The URL to view/download the full-size image: direct CDN URL on object "
+        "storage with a public base URL configured, or GET /files/{id}/download on local/private.",
+    )
+    thumbnail_url: str | None = Field(
+        default=None,
+        description="Same value and resolution as GET /files/{id}'s thumbnail_url: the "
+        "materialized 300x300 fill thumbnail's direct object/CDN URL, or a signed imgproxy "
+        "URL (with extension) when no public base URL is configured. Present when thumbnail "
+        "is requested on public uploads.",
+    )
+    custom_url: str | None = Field(
+        default=None,
+        description="Signed imgproxy URL (with extension) for the requested custom "
+        "width/height/fit/format; present only when custom transform parameters were "
+        "supplied on a public upload",
+    )
+
+
+class BulkImageUploadItemError(BaseModel):
+    """A failed image item in a bulk upload batch."""
+
+    status: Literal["error"] = Field(
+        default="error", description="Status indicator: 'error' for failed image"
+    )
+    code: Literal["too_large", "batch_too_large", "invalid_image", "processing_failed"] = Field(
+        description="Machine-readable error code"
+    )
+    message: str = Field(description="Human-readable error explanation for debugging")
+    original_filename: str | None = Field(
+        default=None, description="Original upload filename if provided"
+    )
+
+
+BulkImageUploadItem = Annotated[
+    BulkImageUploadItemSuccess | BulkImageUploadItemError, Field(discriminator="status")
+]
+
+
 class BulkImageUploadResponse(BaseModel):
     """Returned by ``POST /upload/images``."""
 
-    count: int = Field(description="Number of successfully uploaded images")
-    items: list[ImageUploadResponse]
+    succeeded: int = Field(description="Number of successfully uploaded images in the batch")
+    failed: int = Field(description="Number of failed images in the batch")
+    total: int = Field(description="Total number of files evaluated in the batch")
+    items: list[BulkImageUploadItem] = Field(
+        description="Per-file results in exact 1-to-1 correspondence with the uploaded files array"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +369,12 @@ class WebhookRedeliverResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # System / health
 # ---------------------------------------------------------------------------
+
+
+class WhoAmIResponse(BaseModel):
+    """Returned by ``GET /whoami``."""
+
+    owner: str = Field(description="The authenticated tenant/owner identity")
 
 
 class HealthResponse(BaseModel):

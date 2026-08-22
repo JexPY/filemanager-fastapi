@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.requests import Request
 
+import app.services.metadata as metadata_module
 from app.config import Settings, _derive_owner, settings
+from app.main import app, lifespan
 from app.routers.auth import verify_token
+from tests.fakes import InMemoryMetadataStore
 
 
 def _creds(token: str) -> HTTPAuthorizationCredentials:
@@ -71,3 +76,22 @@ def test_verify_token_rejects_wrong_and_missing(monkeypatch: pytest.MonkeyPatch)
     with pytest.raises(HTTPException) as missing:
         verify_token(req_empty, None)
     assert missing.value.status_code == 401
+
+
+async def test_unlabelled_token_emits_startup_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = InMemoryMetadataStore()
+    monkeypatch.setattr(metadata_module, "_store", store)
+    monkeypatch.setattr(settings, "FILE_MANAGER_BEARER_TOKENS", "baresecret")
+
+    with caplog.at_level(logging.WARNING):
+        async with lifespan(app):
+            pass
+
+    derived = _derive_owner("baresecret")
+    expected_msg = (
+        f"Unlabelled bearer token in FILE_MANAGER_BEARER_TOKENS fell back to "
+        f"derived owner '{derived}'"
+    )
+    assert any(expected_msg in rec.message for rec in caplog.records)

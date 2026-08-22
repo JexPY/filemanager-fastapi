@@ -9,7 +9,10 @@ first, see app.main).
 
 from __future__ import annotations
 
+import logging
+
 import httpx
+import pytest
 
 from app.config import _derive_owner
 from app.services.metadata import KIND_IMAGE, STATUS_READY
@@ -92,3 +95,28 @@ async def test_batch_route_is_not_shadowed_by_file_id_route(
 
     assert resp.status_code == 200
     assert "files" in resp.json()
+
+
+async def test_batch_partial_miss_logs_warning(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    a = await _image(fake_metadata, OWNER, "images/a.webp")
+
+    with caplog.at_level(logging.WARNING):
+        resp = await client.post(
+            "/files/batch",
+            headers=auth_headers,
+            json={"ids": [a, "missing-1", "missing-2"]},
+        )
+    assert resp.status_code == 200
+    assert len(resp.json()["files"]) == 1
+    assert resp.json()["files"][0]["id"] == a
+
+    warning_logs = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any(
+        f"Batch lookup partial miss: owner={OWNER} requested=3 returned=1" in rec.message
+        for rec in warning_logs
+    )

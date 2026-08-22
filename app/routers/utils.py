@@ -4,6 +4,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import aiofiles
 from fastapi import HTTPException, Request, UploadFile, status
@@ -248,6 +249,20 @@ async def resolve_playback(
     return RedirectResponse(url=signed, status_code=status.HTTP_302_FOUND)
 
 
+def _sanitize_filename(filename: str | None, max_length: int = 255) -> str | None:
+    """Sanitize client-provided filename by extracting the basename, stripping
+    null bytes/control characters, and truncating to max_length."""
+    if not filename:
+        return None
+    cleaned = "".join(c for c in filename if c.isprintable() and c != "\x00").strip()
+    if not cleaned:
+        return None
+    base = os.path.basename(cleaned)
+    if not base or base in (".", ".."):
+        return None
+    return base[:max_length]
+
+
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -264,6 +279,7 @@ def _image_response(
     custom_fit: str = "auto",
     custom_format: str | None = None,
     visibility: str = "public",
+    original_filename: str | None = None,
 ) -> dict:
     """Shape the POST /upload/image response.
 
@@ -285,7 +301,7 @@ def _image_response(
     else:
         main_url = public_url(f"/files/{record_id}/download")
 
-    response = {
+    response: dict[str, Any] = {
         "status": "success",
         "id": record_id,
         "size_bytes": size_bytes,
@@ -293,6 +309,9 @@ def _image_response(
         "dimensions": {"width": width, "height": height},
         "url": main_url,
     }
+    if original_filename is not None:
+        response["original_filename"] = original_filename
+
     if visibility != "public":
         return response
 

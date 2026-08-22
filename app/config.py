@@ -137,6 +137,7 @@ class Settings(BaseSettings):
 
     # Upload limits (bytes)
     MAX_IMAGE_UPLOAD_BYTES: int = Field(default=25 * 1024 * 1024)
+    MAX_BULK_UPLOAD_TOTAL_BYTES: int = Field(default=50 * 1024 * 1024)
     MAX_VIDEO_UPLOAD_BYTES: int = Field(default=2000 * 1024 * 1024)
     MAX_FILE_UPLOAD_BYTES: int = Field(default=100 * 1024 * 1024)
     # Decompression-bomb guard: reject images decoding to more than this
