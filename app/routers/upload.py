@@ -538,10 +538,8 @@ async def _read_bulk_files(
                 {
                     "status": "error",
                     "code": "batch_too_large",
-                    "message": (
-                        "Bulk upload batch exceeds aggregate size limit "
-                        f"({settings.MAX_BULK_UPLOAD_TOTAL_BYTES} bytes)"
-                    ),
+                    "message": "Bulk upload batch exceeds aggregate size limit "
+                    f"({settings.MAX_BULK_UPLOAD_TOTAL_BYTES} bytes)",
                     "original_filename": sanitized_name,
                 }
             )
@@ -557,10 +555,8 @@ async def _read_bulk_files(
                     {
                         "status": "error",
                         "code": "too_large",
-                        "message": (
-                            "File exceeds maximum allowed size "
-                            f"({settings.MAX_IMAGE_UPLOAD_BYTES} bytes)"
-                        ),
+                        "message": "File exceeds maximum allowed size "
+                        f"({settings.MAX_IMAGE_UPLOAD_BYTES} bytes)",
                         "original_filename": sanitized_name,
                     }
                 )
