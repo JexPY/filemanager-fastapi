@@ -21,13 +21,18 @@ from app.routers.auth import verify_token
 from app.schemas import FileRecord
 from app.services.metadata import (
     VISIBILITY_PRIVATE,
-    VISIBILITY_PUBLIC,
     MetadataError,
     UploadRecord,
     get_metadata_store,
 )
 from app.services.renditions import derive_rendition_key
-from app.services.storage import StorageError, StorageNotFound, copy_file, delete_file
+from app.services.storage import (
+    StorageError,
+    StorageNotFound,
+    copy_file,
+    delete_file,
+    storage_prefix,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -39,6 +44,19 @@ _STORAGE_UNAVAILABLE_DETAIL = "Storage backend unavailable"
 
 class _VisibilityBody(BaseModel):
     visibility: Literal["public", "private"]
+
+
+def _derive_rotated_key(old_key: str, new_visibility: str) -> str:
+    prefix, _, name = old_key.rpartition("/")
+    suffix = name.partition(".")[2]
+    new_filename = f"{uuid.uuid4().hex}{'.' + suffix if suffix else ''}"
+
+    new_prefix = (
+        storage_prefix(prefix, new_visibility)
+        if prefix
+        else ("private" if new_visibility == VISIBILITY_PRIVATE else "")
+    )
+    return f"{new_prefix}/{new_filename}" if new_prefix else new_filename
 
 
 async def _rotate_renditions(record: UploadRecord, new_key: str) -> dict[str, str] | None:
@@ -70,33 +88,26 @@ async def _rotate_renditions(record: UploadRecord, new_key: str) -> dict[str, st
     return new_renditions
 
 
-async def _rotate_key_if_going_private(
+async def _rotate_key_on_visibility_change(
     record: UploadRecord, new_visibility: str
 ) -> tuple[str | None, dict[str, str] | None]:
-    """Copy a record's object (and any renditions) to fresh keys when it turns
-    private; else (None, None).
+    """Copy a record's object (and any renditions) to fresh keys when its
+    visibility changes; else (None, None).
 
-    Making a record private has to invalidate what is already *out there*, not
-    just stop advertising it. While public it may have been fetched through a
-    CDN and embedded in rendered HTML, and neither can be recalled. Rotating the
-    key kills every one of those in a single step: the object URL changes, and
-    because an imgproxy URL signs its source, every rendition URL changes with
-    it. Marking the row private without rotating would leave the old bytes
-    served from a warm cache indefinitely.
-
-    Only public -> private rotates. The reverse direction has nothing cached to
-    invalidate, so it would be a pointless copy.
+    Changing visibility moves the asset across the private/ boundary:
+    - Turning private moves the object under `private/` with a fresh key,
+      invalidating any previously cached CDN URLs.
+    - Turning public moves the object out of `private/` so it is fetchable
+      via public CDN / object routes.
 
     The old objects are deleted only after the row is re-pointed (by the caller),
     so a failure here leaves the record on its original key and is retryable.
     Returns (new_key, new_renditions), or (None, None) when no rotation is needed.
     """
-    if new_visibility != VISIBILITY_PRIVATE or record.visibility != VISIBILITY_PUBLIC:
+    if new_visibility == record.visibility:
         return None, None
 
-    prefix, _, name = record.storage_key.rpartition("/")
-    suffix = name.partition(".")[2]
-    new_key = f"{prefix}/{uuid.uuid4().hex}{'.' + suffix if suffix else ''}"
+    new_key = _derive_rotated_key(record.storage_key, new_visibility)
     try:
         await copy_file(record.storage_key, new_key)
     except StorageNotFound:
@@ -126,8 +137,8 @@ async def _delete_old_objects_after_rotation(record: UploadRecord) -> None:
         await delete_file(record.storage_key)
     except StorageError:
         logger.error(
-            "Rotated %s to a private key but could not delete the old object %s; "
-            "its public URL stays fetchable until that object is removed",
+            "Rotated %s to a fresh key but could not delete the old object %s; "
+            "it stays in storage until manually removed",
             record.id,
             record.storage_key,
         )
@@ -137,7 +148,7 @@ async def _delete_old_objects_after_rotation(record: UploadRecord) -> None:
                 await delete_file(old_rend_key)
             except StorageError:
                 logger.error(
-                    "Rotated %s to a private key but could not delete old rendition %s",
+                    "Rotated %s to a fresh key but could not delete old rendition %s",
                     record.id,
                     old_rend_key,
                 )
@@ -146,7 +157,7 @@ async def _delete_old_objects_after_rotation(record: UploadRecord) -> None:
 async def _cleanup_rotated_objects(
     rotated_key: str | None, rotated_renditions: dict[str, str] | None
 ) -> None:
-    """Best-effort cleanup of objects `_rotate_key_if_going_private` already
+    """Best-effort cleanup of objects `_rotate_key_on_visibility_change` already
     copied to fresh keys, for when the metadata update meant to re-point the
     row at them never lands (raised, or found the row gone) -- otherwise
     those copies are orphaned in storage forever, referenced by no row."""
@@ -192,7 +203,9 @@ async def set_file_visibility(
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
 
-    rotated_key, rotated_renditions = await _rotate_key_if_going_private(record, body.visibility)
+    rotated_key, rotated_renditions = await _rotate_key_on_visibility_change(
+        record, body.visibility
+    )
 
     try:
         updated = await store.set_visibility(
@@ -234,13 +247,13 @@ async def _cascade_visibility_to_poster(poster_id: str, owner: str, visibility: 
     failure here must never fail the parent PATCH. That's exactly why the
     rotated-copy cleanup below can't be skipped: without it, a failure that
     the caller silently swallows would *also* silently orphan whatever
-    `_rotate_key_if_going_private` already copied to storage.
+    `_rotate_key_on_visibility_change` already copied to storage.
     """
     store = await get_metadata_store()
     poster = await store.get(poster_id, owner)
     if poster is None or poster.visibility == visibility:
         return
-    rotated_key, rotated_renditions = await _rotate_key_if_going_private(poster, visibility)
+    rotated_key, rotated_renditions = await _rotate_key_on_visibility_change(poster, visibility)
     try:
         updated = await store.set_visibility(
             poster_id, owner, visibility, rotated_key, renditions=rotated_renditions

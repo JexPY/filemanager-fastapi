@@ -40,6 +40,13 @@ class ImageUploadResponse(BaseModel):
 
     status: str = Field(description="Always 'success' for a completed image upload")
     id: str = Field(description="The upload record id (use with /files/{id})")
+    storage_key: str | None = Field(
+        default=None, description="Storage key of the uploaded image (public ready images only)"
+    )
+    renditions: dict[str, str] | None = Field(
+        default=None,
+        description="Storage keys for materialized renditions (public ready images only)",
+    )
     original_filename: str | None = Field(
         default=None, description="Original upload filename if provided"
     )
@@ -76,6 +83,13 @@ class BulkImageUploadItemSuccess(BaseModel):
         default="success", description="Status indicator: 'success' for successfully uploaded image"
     )
     id: str = Field(description="The upload record id (use with /files/{id})")
+    storage_key: str | None = Field(
+        default=None, description="Storage key of the uploaded image (public ready images only)"
+    )
+    renditions: dict[str, str] | None = Field(
+        default=None,
+        description="Storage keys for materialized renditions (public ready images only)",
+    )
     original_filename: str | None = Field(
         default=None, description="Original upload filename if provided"
     )
@@ -200,13 +214,21 @@ class FileUploadResponse(BaseModel):
 class FileRecord(BaseModel):
     """One upload record, exactly as ``UploadRecord.to_public()`` serializes it.
 
-    ``url`` / ``poster_url`` are present only for a ``ready`` record (rendered via
-    ``response_model_exclude_unset``); the secret ``share_token`` is never here.
+    ``url`` / ``poster_url`` / ``storage_key`` / ``renditions`` are present only for a
+    ``public`` and ``ready`` record (rendered via ``response_model_exclude_unset``);
+    the secret ``share_token`` is never here.
     """
 
     id: str
     kind: str = Field(description="'image' | 'video' | 'file'")
     status: str = Field(description="'processing' | 'ready' | 'failed'")
+    storage_key: str | None = Field(
+        default=None, description="Object storage key for the file (public ready records only)"
+    )
+    renditions: dict[str, str] | None = Field(
+        default=None,
+        description="Storage keys for materialized renditions (public ready images only)",
+    )
     content_type: str
     size_bytes: int
     width: int | None = None

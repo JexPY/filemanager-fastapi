@@ -76,7 +76,7 @@ async def test_successful_compression_uploads_output_marks_ready_and_deletes_raw
     record = await fake_metadata.get(upload_id, OWNER)
     assert record is not None
     assert record.status == STATUS_READY
-    assert record.storage_key.startswith("videos/")
+    assert record.storage_key.startswith("private/videos/")
     assert record.storage_key in fake_storage.objects
     # tiny.mp4 is 2s, well under the 60s default cap -> not truncated, and the
     # probed input duration is persisted on the row.

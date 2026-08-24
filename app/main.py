@@ -95,6 +95,15 @@ async def lifespan(app: FastAPI):
                 "verifiable tenant identities.",
                 derived,
             )
+    if (
+        settings.IMAGE_RENDITION_MODE == "on_demand"
+        and settings.ENABLE_IMGPROXY_CACHE.strip().lower() != "true"
+    ):
+        logger.warning(
+            "IMAGE_RENDITION_MODE=on_demand but ENABLE_IMGPROXY_CACHE is disabled: "
+            "imgproxy will serve responsive image widths without NGINX origin shielding "
+            "(proxy_cache_lock)."
+        )
     # Initialize TaskIQ context for dependencies
     if not broker.is_worker_process:
         await broker.startup()

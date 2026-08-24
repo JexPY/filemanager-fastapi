@@ -66,7 +66,7 @@ async def test_compress_video_task_automated_poster_extraction(
     assert poster is not None
     assert poster.kind == KIND_IMAGE
     assert poster.content_type == "image/webp"
-    assert poster.storage_key.startswith("posters/")
+    assert poster.storage_key.startswith("private/posters/")
     assert poster.storage_key in fake_storage.objects
 
     # Check video record linked to poster

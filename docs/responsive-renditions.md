@@ -1,164 +1,91 @@
-# Responsive image widths — open decision, not yet made
+# Responsive image widths & resolve-once serving
 
-Status: **undecided, nothing started.** This is a write-up of a design choice
-surfaced on 2026-08-20 while assessing filemanager-fastapi's responsive
-rendition design. It is not a bug and not a known-good plan — it is a fork in
-the road with two defensible branches, written down so the choice is made
-deliberately rather than by accident on the day someone needs a 960px-wide photo.
+Status: **Decided and implemented (2026-08-22).** Resolves the fork previously documented here.
 
-Read "Which branch?" before picking it up.
+## Decision Summary
 
-## The gap
+1. **Switchable mode, materialized by default:**
+   ```ini
+   IMAGE_RENDITION_MODE=materialize   # materialize | on_demand
+   ```
+   - `materialize` (**default**): extra responsive width renditions are encoded at upload via libvips, stored as distinct objects in storage, and served directly from CDN. `imgproxy` is off the request path.
+   - `on_demand`: no extra width objects are stored at upload; widths are generated dynamically by `imgproxy` at request time.
 
-`RENDITION_SPECS` in `app/services/renditions.py` currently holds **exactly one
-entry**: `thumbnail` — 300x300, `crop=True`, i.e. center-**cropped** to a
-square. The `medium` / `_m960` spec was deliberately removed earlier (see
-`CLAUDE.md`'s "Materialized image renditions" section: "`medium_url` / `_m960`
-was removed completely to simplify response shapes").
+2. **Aspect-preserving width specs:**
+   Alongside the square `thumbnail` (300×300, `crop=True`, suffix `t300`), three aspect-preserving width specs are registered in `app/services/renditions.py`:
+   - `w400` (width 400, suffix `w400`, `crop=False`)
+   - `w800` (width 800, suffix `w800`, `crop=False`)
+   - `w1600` (width 1600, suffix `w1600`, `crop=False`)
 
-So a consuming app asking for "this photo at 960px wide, aspect ratio intact"
-has, today, exactly two materialized options:
+3. **Width filtering rule (`≤ source width`):**
+   Only encode (in `materialize` mode) and only emit (in both modes) width specs that are `≤` the source image width. A 1600 entry from a 1280 source is neither encoded nor returned in `renditions`.
 
-1. the full-size primary `.webp` (up to 1280px or 1920px on the long edge,
-   depending on `optimization`), or
-2. a 300x300 square crop.
+4. **Public keys exposed for resolve-once rendering:**
+   `UploadRecord.to_public()` and image upload responses return `storage_key` and `renditions` dict containing object keys (not absolute URLs). Consumers store `id`, `storage_key`, and `renditions`, and construct URLs as `{MEDIA_BASE_URL}/{key}` without querying the API on page renders.
 
-Neither is a landscape 960px. For a thumbnail grid the square crop is right;
-for an SEO/LCP-driven page rendering a hero image through something like
-`next/image` with a responsive `srcset`, neither fits, and the page ends up
-shipping the full-size original to a 400px-wide phone viewport.
+---
 
-Note this is **not** a missing capability — `custom_url` already serves
-arbitrary dimensions via imgproxy (`app/routers/utils.py`, the
-`custom_width`/`custom_height`/`custom_fit`/`custom_format` branch). The
-question is which of the two existing mechanisms should carry responsive
-widths, because that choice has real cost either way.
+## Rationale & Design Context
 
-## The two branches
+### Why Materialize by Default
 
-### A. On-demand via imgproxy (`custom_url`)
+Images in this service are written once and read thousands of times. Synchronously paying encode CPU once at upload beats paying CPU on every request and avoids cold-cache stampedes on CDN purges. Serving directly from CDN object URLs keeps `imgproxy` off the hot path for all public image views.
 
-Run the `imgproxy` container and let clients request whatever width they need.
+`on_demand` remains fully supported via `IMAGE_RENDITION_MODE=on_demand`. Switching between modes is reversible with no migration: existing records keep resolving through their stored keys or imgproxy fallbacks.
 
-- **No extra storage**, no extra upload latency, any width on demand.
-- The nginx origin shield (`proxy_cache_lock` + `proxy_cache_valid 200 24h` in
-  `nginx/nginx.conf.template`) already exists for precisely this traffic shape,
-  and collapses a concurrent stampede on one URL into a single encode.
-- Costs one container, and puts a live encode on the serving path for a cold
-  cache. Note the caveat already recorded in `CLAUDE.md`'s renditions section:
-  `proxy_cache_lock` collapses concurrent requests for *the same* URL, but a
-  catalog-wide CDN purge is thousands of *distinct* URLs, each its own cache
-  key, each a genuine miss — and every miss is a real encode on the same box
-  that may also be running ffmpeg.
-- **Verified 2026-08-20:** with an object-store backend and a
-  `*_PUBLIC_BASE_URL` set, imgproxy is otherwise entirely off the hot path —
-  `url` and `thumbnail_url` resolve to direct CDN object URLs via
-  `public_object_url()` (`app/services/metadata/types.py`,
-  `app/services/renditions.py`). Choosing this branch is therefore a decision
-  to *start* depending on imgproxy at serve time, not merely to keep using it.
+### Width Specs Selection
 
-### B. Materialize more renditions (e.g. `_w960`, `_w1440`)
+Derived from real frontend responsive breakpoints and `sizes` attributes:
 
-Add entries to `RENDITION_SPECS` with `crop=False` so they fit within the box
-and preserve aspect ratio.
+| Surface | `sizes` | CSS px @1440 | @2× DPR | Selected Spec |
+|---|---|---|---|---|
+| Card (16:9) | `100vw / 50vw / 25vw` | ~360 | ~720 | `w400`, `w800` |
+| Gallery cover (4:3) | `100vw / 66vw` | ~950 | ~1900 | `w800`, `w1600` |
+| Gallery thumbs (square) | `33vw / 20vw` | ~288 | ~576 | `thumbnail` (300×300) |
+| Lightbox / Hero | `100vw` | ~1024 | ~2048 | `w1600`, primary original |
 
-- **Zero-hop CDN reads**, no imgproxy container, no serve-time encode, and the
-  existing plumbing already handles it end to end: key derivation
-  (`derive_rendition_key`), the `renditions` jsonb column, `DELETE` cascade,
-  visibility rotation, and `/files/{id}/download?rendition=...`.
-- Costs upload latency and storage on **every** image, forever, whether or not
-  that width is ever fetched. Measured on 2026-08-19 (see
-  `docs/concurrent-encoding.md` for the full baseline): a rendition encode is
-  **~39ms** (300x300) to **~61ms** (960px) on a 1920x1280 photo at
-  `optimization=balanced`, against a ~404ms total. Two more widths is roughly
-  **+100ms on every image upload** — a ~25% regression on a request that a
-  previous pass worked specifically to bring down.
-- Adding a `crop=False` spec is the first use of that flag in production;
-  `RenditionSpec.crop` exists and is honoured, but every current caller uses
-  `crop=True`. Verify the `crop=False` path actually produces the expected
-  fit-within-box result before relying on it.
+The primary optimized WebP object (1280 or 1920 on the long edge depending on `optimization`) forms the top of the `srcset`.
 
-## Which branch?
+### Resolution Fallback Architecture
 
-**Leaning A (imgproxy), for a photo-centric consumer product** — but this is a
-lean, not a decision, and it is explicitly the owner's call.
+`_derive_rendition_public_url` in `app/services/renditions.py` handles resolution:
+- When a rendition object exists in `renditions` and `*_PUBLIC_BASE_URL` is set: returns `{PUBLIC_BASE_URL}/{key}` directly.
+- When `renditions` is empty (e.g. `on_demand` mode or pre-existing legacy records): resolves to a signed `imgproxy` transform with matching resize options.
+- Private media routes through authenticated `/files/{id}/download?rendition=w400`.
 
-The reasoning: responsive `srcset` wants *several* widths, and branch B's cost
-is paid per-width, per-upload, unconditionally, in the synchronous request
-path. Three widths would roughly double upload latency to buy CDN hops that
-the origin shield largely eliminates anyway. Branch A's cost is paid per
-distinct width actually requested, once, then cached.
+---
 
-Branch B becomes the better answer if any of these hold:
-- the set of widths is small and fixed (one or two), and known up front;
-- the deployment wants to run as few containers as possible (imgproxy is a
-  whole extra service to operate, monitor, and keep pinned);
-- serve-time latency variance is unacceptable and every read must be a flat
-  object fetch;
-- the box is CPU-constrained and also running ffmpeg — in which case moving
-  encodes *off* the serving path and onto upload may be worth the latency.
+## Local Development vs. S3 Profile for the Key Model
 
-A hybrid is legitimate and probably the real answer at scale: materialize the
-one or two widths that dominate real traffic (the hero and the grid card),
-serve the long tail through `custom_url`.
+### Why `STORAGE_BACKEND=local` Returns 404 on Direct Key Reads
+In local development with `STORAGE_BACKEND=local`, NGINX configures only `internal;` locations (`/internal-media/` and `/internal-object/`) for zero-copy `X-Accel-Redirect` streaming. There is intentionally **no public static route** for stored objects. Consequently, making a direct HTTP request to `http://localhost:9000/images/<key>.webp` yields a `404 Not Found`.
 
-**Do not pick a branch from this document alone.** Decide it against a real
-consumer's actual layout — the breakpoints their frontend uses, and whether
-those widths are stable — not in the abstract.
+> [!CAUTION]
+> **Do not add a public static NGINX route for local object directories.**
+> Exposing the local media directory directly to HTTP clients would allow anyone with a key to bypass authentication for private records, defeating the access control guarantees.
 
-## Implementation sketch
+### Exercising the Direct-CDN Key Model Locally (Garage Profile)
+To test and exercise the resolve-once direct-CDN key model locally (joining a public base URL to a stored key like `http://filemanager-test.localhost:3902/images/<key>.webp` without authentication), use the `s3-dev` compose profile powered by Garage:
 
-### If branch A
+1. **Start the S3 dev services:**
+   ```bash
+   docker compose --profile s3-dev up -d garage garage-init
+   ```
 
-- Nothing to build in this service. `custom_url` already works; see
-  `_image_response` in `app/routers/utils.py` and the guard just above the
-  `signed_image_url` call, which deliberately suppresses a no-op
-  `format=webp`-with-no-dimensions round trip.
-- Deployment work only: run the `imgproxy` container, confirm
-  `IMGPROXY_BASE_URL` points at the nginx-fronted path (`/imgproxy/`, never
-  imgproxy directly — the cache lock is the whole point), and confirm
-  `IMGPROXY_ALLOWED_SOURCES` covers the bucket/CDN prefix.
-- Document the sanctioned widths for consumers so they don't invent arbitrary
-  ones — every distinct width is a distinct cache key, and unbounded widths
-  defeat the cache.
+2. **Configure `.env` for local S3 testing:**
+   ```ini
+   STORAGE_BACKEND=s3
+   S3_BUCKET=filemanager-test
+   S3_ENDPOINT_URL=http://garage:3900
+   S3_PUBLIC_BASE_URL=http://localhost:9002/filemanager-test
+   AWS_REGION=garage
+   AWS_ACCESS_KEY_ID=garageadmin
+   AWS_SECRET_ACCESS_KEY=garageadminsecretkey
+   ```
 
-### If branch B
+3. **Restart the API:**
+   ```bash
+   docker compose up -d api worker nginx
+   ```
 
-- Add specs to `RENDITION_SPECS` with `crop=False`. The rest is already
-  generic: `derive_rendition_key`, `_derive_rendition_public_url`, the
-  `renditions` jsonb column, and the `?rendition=` download path all key off
-  the spec registry rather than hardcoding `thumbnail`.
-- `_derive_rendition_public_url` currently resolves any materialized rendition
-  to a direct CDN URL when a public base URL is set, and falls back to signed
-  imgproxy otherwise — so pre-existing records (uploaded before the new spec
-  existed, with no `_w960` object) transparently fall back to a live imgproxy
-  transform. **That fallback means branch B does not remove the imgproxy
-  dependency unless every historical record is backfilled.** Decide explicitly
-  whether to backfill or accept the fallback.
-- Keep `generate_renditions=False` working — video poster generation reuses
-  `validate_and_strip_image` for a single frame → WebP encode and must not
-  start encoding new widths (this exact waste was fixed once already; see
-  `CLAUDE.md`'s reliability-fixes section).
-- Renditions are still generated only when the caller passes `?thumbnail=true`
-  — a per-request boolean, not per-rendition. Adding widths raises the question
-  of whether that flag should become a list (`?renditions=thumb,w960`). Decide
-  this before adding a second spec, not after.
-- Note the interaction with `docs/concurrent-encoding.md`: more sequential
-  encodes per upload strengthens the case for that parked change, since the
-  encode phases sum rather than overlap.
-
-## Verification before landing either branch
-
-1. Measure. Re-run the temporary-instrumentation methodology from the
-   2026-08-19 investigation (see `docs/concurrent-encoding.md`) and compare
-   upload TOTAL against that baseline — branch B must be judged on its real
-   added latency, not the ~40-61ms estimate quoted here.
-2. For branch B, confirm `crop=False` output is genuinely fit-within-box with
-   aspect ratio preserved, at both landscape and portrait inputs.
-3. Confirm the full lifecycle still holds for any new rendition: `DELETE
-   /files/{id}` cascades to the new objects, public→private visibility
-   rotation rotates them, and `?rendition=<new>` serves them for a private
-   record.
-4. Full gate: `ruff check`, `ruff format --check`, `mypy app`, full pytest
-   suite — see `CLAUDE.md`'s commands section.
-5. Respect the anti-bloat and cognitive-complexity rules in `CLAUDE.md`.
+With this profile, public uploads return `storage_key` and `renditions` that resolve directly against `{S3_PUBLIC_BASE_URL}/{key}`.

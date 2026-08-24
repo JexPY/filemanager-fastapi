@@ -41,6 +41,19 @@ class StorageObject:
 DEFAULT_CONTENT_TYPE = "application/octet-stream"
 
 
+def storage_prefix(base_prefix: str, visibility: str) -> str:
+    """Return the storage key prefix for a given asset type and visibility.
+
+    Private objects are placed under the `private/` root prefix (e.g. `private/images`,
+    `private/raw/videos`), establishing a path-based security boundary that allows static
+    file serving and CDN delivery to safely exclude private media by path.
+    """
+    clean = base_prefix.strip("/")
+    if visibility == "private":
+        return f"private/{clean}" if not clean.startswith("private/") else clean
+    return clean.removeprefix("private/")
+
+
 # ---------------------------------------------------------------------------
 # Backend interface
 # ---------------------------------------------------------------------------

@@ -45,8 +45,12 @@ async def test_bulk_image_upload_success(
     assert len(body["items"]) == 2
     assert body["items"][0]["status"] == "success"
     assert body["items"][0]["original_filename"] == "tiny1.png"
+    assert "storage_key" in body["items"][0]
+    assert "renditions" in body["items"][0]
     assert body["items"][1]["status"] == "success"
     assert body["items"][1]["original_filename"] == "tiny2.png"
+    assert "storage_key" in body["items"][1]
+    assert "renditions" in body["items"][1]
 
     for item in body["items"]:
         record = await fake_metadata.get_by_id(item["id"])

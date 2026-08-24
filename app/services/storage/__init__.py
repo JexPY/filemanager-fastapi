@@ -27,6 +27,7 @@ from app.services.storage.base import (
     StorageError,
     StorageNotFound,
     StorageObject,
+    storage_prefix,
 )
 from app.services.storage.gcs import GCSStorage
 from app.services.storage.local import LocalStorage
@@ -49,6 +50,7 @@ __all__ = [
     "get_storage",
     "has_public_base_url",
     "public_object_url",
+    "storage_prefix",
     "upload_file",
     "upload_file_from_path",
 ]
@@ -102,13 +104,13 @@ def public_object_url(key: str) -> str:
 def has_public_base_url() -> bool:
     """Whether the active backend can produce a URL a client can fetch directly.
 
-    True only for the object stores with a ``*_PUBLIC_BASE_URL`` (a CDN or public
-    bucket domain that actually serves the object). **Never for local**: that
-    media volume is exposed only through nginx's internal X-Accel location -- by
-    design, since that is what makes ownership checks unbypassable -- so a
-    ``LOCAL_PUBLIC_BASE_URL``-derived link would dead-end on a 404. ``local`` has
-    no entry in the settings' backend->field map, so it is False by construction
-    rather than by a special case here.
+    True when the active backend has a configured public base URL:
+    - Object stores (S3, GCS, B2) with a ``*_PUBLIC_BASE_URL`` (a CDN or public bucket).
+    - Local storage when ``LOCAL_PUBLIC_BASE_URL`` is set (nginx serving public media prefixes
+      while explicitly denying `private/` and `raw/`).
+
+    Returns False when unset, preserving fallback URLs (e.g. /files/{id}/download or signed
+    imgproxy) for unconfigured setups.
     """
     return bool(settings.active_public_base_url)
 

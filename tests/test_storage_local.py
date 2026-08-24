@@ -1,6 +1,6 @@
 import pytest
 
-from app.services.storage import LocalStorage, StorageError
+from app.services.storage import LocalStorage, StorageError, storage_prefix
 
 
 async def test_upload_download_roundtrip(tmp_path) -> None:
@@ -59,3 +59,26 @@ async def test_path_traversal_is_blocked(tmp_path, key: str) -> None:
     backend = LocalStorage(str(tmp_path), "")
     with pytest.raises(StorageError):
         await backend.upload(b"x", key, "text/plain")
+
+
+@pytest.mark.parametrize(
+    ("base", "visibility", "expected"),
+    [
+        ("images", "public", "images"),
+        ("images", "private", "private/images"),
+        ("raw/videos", "public", "raw/videos"),
+        ("raw/videos", "private", "private/raw/videos"),
+        ("files", "public", "files"),
+        ("files", "private", "private/files"),
+        ("posters", "public", "posters"),
+        ("posters", "private", "private/posters"),
+        ("videos", "public", "videos"),
+        ("videos", "private", "private/videos"),
+        ("private/images", "public", "images"),
+        ("private/images", "private", "private/images"),
+        ("/images/", "private", "private/images"),
+        ("/private/files/", "public", "files"),
+    ],
+)
+def test_storage_prefix_helper(base: str, visibility: str, expected: str) -> None:
+    assert storage_prefix(base, visibility) == expected

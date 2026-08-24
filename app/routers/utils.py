@@ -274,6 +274,7 @@ def _image_response(
     size_bytes: int | None,
     storage_key: str,
     renditions: dict[str, str] | None = None,
+    include_thumbnail: bool = False,
     custom_width: int | None = None,
     custom_height: int | None = None,
     custom_fit: str = "auto",
@@ -301,6 +302,16 @@ def _image_response(
     else:
         main_url = public_url(f"/files/{record_id}/download")
 
+    filtered_renditions: dict[str, str] = {}
+    if renditions:
+        from app.services.renditions import get_rendition_spec
+
+        for name, key in renditions.items():
+            spec = get_rendition_spec(name)
+            if spec and not spec.crop and width is not None and spec.width > width:
+                continue
+            filtered_renditions[name] = key
+
     response: dict[str, Any] = {
         "status": "success",
         "id": record_id,
@@ -315,8 +326,11 @@ def _image_response(
     if visibility != "public":
         return response
 
-    if renditions and "thumbnail" in renditions:
-        response["thumbnail_url"] = derive_thumbnail_url(storage_key, renditions)
+    response["storage_key"] = storage_key
+    response["renditions"] = filtered_renditions
+
+    if include_thumbnail or (filtered_renditions and "thumbnail" in filtered_renditions):
+        response["thumbnail_url"] = derive_thumbnail_url(storage_key, filtered_renditions or None)
 
     # A processed image is *always* stored as webp (image_vips.py's
     # validate_and_strip_image encodes to .webp unconditionally), so

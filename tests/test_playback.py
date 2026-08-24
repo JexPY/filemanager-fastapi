@@ -74,6 +74,7 @@ async def test_local_webm_download_uses_video_webm_content_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "")
     rec = await _seed_video(
         fake_metadata,
         visibility="public",
@@ -86,20 +87,20 @@ async def test_local_webm_download_uses_video_webm_content_type(
     assert resp.headers["content-type"] == "video/webm"
 
 
-async def test_local_public_download_stays_xaccel_even_with_public_base(
+async def test_local_public_download_302s_to_public_url_when_public_base_configured(
     client: httpx.AsyncClient,
     fake_metadata: InMemoryMetadataStore,
+    fake_storage: InMemoryStorageBackend,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Regression: LOCAL_PUBLIC_BASE_URL set to a base nginx doesn't serve (e.g.
-    # the entry proxy origin itself) must NOT turn local public playback into a
-    # 302 to a dead /videos/<key> URL. Local always resolves via X-Accel.
+    # When LOCAL_PUBLIC_BASE_URL is configured, public playback 302s to the direct
+    # public object URL (served directly by nginx) just like s3/gcp/b2.
     monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
     monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "http://localhost:9000")
     rec = await _seed_video(fake_metadata, visibility="public")
     resp = await client.get(f"/files/{rec.id}/download")  # no auth
-    assert resp.status_code == 200
-    assert resp.headers["X-Accel-Redirect"] == "/internal-media/videos/v_compressed.mp4"
+    assert resp.status_code == 302
+    assert resp.headers["location"] == fake_storage.public_url("videos/v_compressed.mp4")
 
 
 async def test_local_private_download_requires_owner(
@@ -127,13 +128,17 @@ async def test_local_private_download_other_owner_404(
 
 
 async def test_download_is_kind_agnostic(
-    client: httpx.AsyncClient, fake_metadata: InMemoryMetadataStore
+    client: httpx.AsyncClient,
+    fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An image resolves through the identical route, auth, and byte path a video
     does -- the route inspects visibility, never `kind`. This replaces a test that
     asserted the opposite (non-video -> 400); the video-only gate was what stopped
     the service from storing anything else, and a PDF or audio file added later
     needs no new endpoint because of this."""
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "")
     image = await fake_metadata.create(
         owner=OWNER,
         kind="image",
@@ -386,6 +391,7 @@ async def test_download_sanitizes_content_disposition_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "")
     rec = await fake_metadata.create(
         owner=OWNER,
         kind="video",
@@ -408,6 +414,7 @@ async def test_download_generic_pdf_inline_disposition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "")
     rec = await fake_metadata.create(
         owner=OWNER,
         kind="file",
@@ -430,6 +437,7 @@ async def test_download_generic_zip_attachment_disposition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "")
     rec = await fake_metadata.create(
         owner=OWNER,
         kind="file",

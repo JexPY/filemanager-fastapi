@@ -33,10 +33,11 @@ services:
       - NGINX_TRUSTED_PROXY_CIDR=${NGINX_TRUSTED_PROXY_CIDR:-127.0.0.1/32}
       - NGINX_UPLOAD_RATE=${NGINX_UPLOAD_RATE:-2r/s}
       - NGINX_UPLOAD_BURST=${NGINX_UPLOAD_BURST:-5}
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
     # NOTE: envsubst only substitutes the variables named here. A var added to
     # the template but forgotten in this list renders as literal `${NAME}` text,
     # which nginx then rejects (or worse, silently misreads) at startup.
-    command: /bin/sh -c "envsubst '$${ENABLE_IMGPROXY_CACHE} $${NGINX_MAX_BODY_SIZE} $${NGINX_TRUSTED_PROXY_CIDR} $${NGINX_UPLOAD_RATE} $${NGINX_UPLOAD_BURST}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"
+    command: /bin/sh -c "envsubst '$${ENABLE_IMGPROXY_CACHE} $${NGINX_MAX_BODY_SIZE} $${NGINX_TRUSTED_PROXY_CIDR} $${NGINX_UPLOAD_RATE} $${NGINX_UPLOAD_BURST} $${STORAGE_BACKEND}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"
     volumes:
       - ./nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
       # Read-only: nginx serves bytes but never writes the media volume.

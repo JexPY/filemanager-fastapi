@@ -427,12 +427,16 @@ record returns **404 Not Found**.
 | `POST` | `/upload/presign` | Master token | Mints short-lived capability JWTs and pre-authenticated direct upload URLs for `image`, `video`, or `file`. |
 
 #### Image Ingestion Parameters
-- **Query parameters:** `thumbnail` (boolean, default `false`: whether to generate and return a 300x300 thumbnail).
+- **Query parameters:** `thumbnail` (boolean, default `false`: whether to generate and return responsive renditions and thumbnail).
 - **Form fields:** `file` (or `files` for bulk), `optimization` (`size`|`balanced`|`quality`), `visibility` (`public`|`private`), `width`, `height`, `fit`, `format`.
 - **Accepted formats:** PNG, JPEG, GIF, WebP, HEIC (detected via magic bytes). SVG is rejected to prevent SSRF and XML entity expansion attacks.
+- **Responsive Renditions (`IMAGE_RENDITION_MODE`):**
+  - In `materialize` mode (default), passing `?thumbnail=true` encodes the square `thumbnail` (300×300, `crop=True`) plus aspect-preserving width specs `w400`, `w800`, and `w1600` (`crop=False`, fit-to-width).
+  - **`≤ source width` rule:** Only widths less than or equal to the source image's width are encoded and returned in `renditions`.
+  - In `on_demand` mode, `renditions` is empty (`{}`) and widths are produced dynamically via `imgproxy`.
 - **Bulk Image Upload Contract (`POST /upload/images`):**
   - **1:1 Index Alignment:** `items` array always contains an entry for every uploaded file in exact positional order (`len(items) == len(files)`).
-  - **Per-item Discrimination:** Each element is either `status: "success"` (carrying `id`, `url`, `thumbnail_url`, `original_filename`, etc.) or `status: "error"` (carrying `code`: `"too_large"` | `"batch_too_large"` | `"invalid_image"` | `"processing_failed"`, `message`, `original_filename`; error items never carry `id`).
+  - **Per-item Discrimination:** Each element is either `status: "success"` (carrying `id`, `storage_key`, `renditions`, `url`, `thumbnail_url`, `original_filename`, etc.) or `status: "error"` (carrying `code`: `"too_large"` | `"batch_too_large"` | `"invalid_image"` | `"processing_failed"`, `message`, `original_filename`; error items never carry `id`).
   - **Counters:** Returns explicit `succeeded`, `failed`, and `total` counters (e.g. `{ "succeeded": 2, "failed": 1, "total": 3, "items": [...] }`).
   - **Idempotency & Filenames:** The upload response echoes the current request's sanitized `original_filename` for client tile mapping; the persisted `UploadRecord` in the database preserves the first-writer's filename under idempotency deduplication.
 - **Optimization profiles:**
@@ -460,30 +464,38 @@ Retrieve record details via `GET /files/{id}`:
 ```json
 {
   "id": "0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95",
-  "kind": "video",
+  "kind": "image",
   "status": "ready",
-  "content_type": "video/mp4",
-  "size_bytes": 4185302,
-  "width": 1280,
-  "height": 720,
-  "task_id": "b2e1d4c8-472e-4b92-8012-e5fb63a201df",
-  "original_filename": "clip.mov",
-  "duration_seconds": 92.4,
-  "truncated": true,
-  "callback_url": "https://hooks.example.com/media",
-  "poster_upload_id": "7a3d9e18c4b24f5aa1e0d7c6b93f2481",
-  "webhook_status": "delivered",
-  "webhook_attempts": 1,
+  "storage_key": "images/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95.webp",
+  "renditions": {
+    "thumbnail": "images/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95_t300.webp",
+    "w400": "images/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95_w400.webp",
+    "w800": "images/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95_w800.webp",
+    "w1600": "images/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95_w1600.webp"
+  },
+  "content_type": "image/webp",
+  "size_bytes": 145020,
+  "width": 1920,
+  "height": 1280,
+  "task_id": null,
+  "original_filename": "photo.jpg",
+  "duration_seconds": null,
+  "truncated": false,
+  "callback_url": null,
+  "poster_upload_id": null,
+  "webhook_status": null,
+  "webhook_attempts": 0,
   "webhook_last_error": null,
-  "webhook_updated_at": "2026-08-15T09:12:44+00:00",
+  "webhook_updated_at": null,
   "visibility": "public",
-  "url": "https://cdn.example.com/videos/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95_compressed.mp4",
-  "poster_url": "https://cdn.example.com/posters/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95_poster.webp",
+  "url": "https://cdn.example.com/images/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95.webp",
+  "thumbnail_url": "https://cdn.example.com/images/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95_t300.webp",
   "created_at": "2026-08-15T09:11:02+00:00",
   "updated_at": "2026-08-15T09:12:40+00:00"
 }
 ```
 
+- **`storage_key` & `renditions`:** Raw relative object keys, allowing consumers to construct URLs as `{MEDIA_BASE_URL}/{key}` without API calls on page renders (resolve-once).
 - **`url`:** Direct CDN URL when a public base URL is configured, or canonical `/files/{id}/download` on local storage or private records.
 - **`thumbnail_url` / `poster_url`:** Public-only accelerators (withheld on private records).
 - **`GET /files`:** Returns paginated records: `{"files": [...], "total_count": N, "limit": L, "offset": O}`.
@@ -645,14 +657,14 @@ B2_REGION=us-west-004
 ```
 
 Storage key structures:
-- Images: `images/<uuid>.webp`, `images/<uuid>_t300.webp`
-- Videos: `raw/videos/<uuid>.<ext>`, `videos/<uuid>_compressed.<ext>`
-- Posters: `posters/<uuid>.webp`
-- Generic Files: `files/<uuid>.<ext>`
+- **Public:** `images/<uuid>.webp`, `images/<uuid>_t300.webp`, `videos/<uuid>_compressed.<ext>`, `posters/<uuid>.webp`, `files/<uuid>.<ext>`
+- **Private:** `private/images/<uuid>.webp`, `private/images/<uuid>_t300.webp`, `private/videos/<uuid>_compressed.<ext>`, `private/posters/<uuid>.webp`, `private/files/<uuid>.<ext>`
 
-### Local S3 Testing with Garage
-The test suite utilizes [Garage](https://garagehq.deuxfleurs.fr/) (pinned to `dxflrs/garage:v2.3.0`)
-as an embedded S3-compatible backend:
+### Local S3 Testing & Exercising Key Model with Garage
+
+With `STORAGE_BACKEND=local`, NGINX only exposes `internal;` X-Accel routes (`/internal-media/` and `/internal-object/`). Direct GETs to stored object keys (e.g. `http://localhost:9000/images/...`) return `404 Not Found` by design to prevent bypassing access controls for private media.
+
+To exercise and test the resolve-once key model locally (fetching `{S3_PUBLIC_BASE_URL}/{key}` without API calls), use the `s3-dev` compose profile powered by [Garage](https://garagehq.deuxfleurs.fr/) (pinned to `dxflrs/garage:v2.3.0`):
 
 ```sh
 # Start Garage and run readiness verification
@@ -660,11 +672,12 @@ docker compose --profile s3-dev up -d --wait garage
 docker compose --profile s3-dev run --rm garage-init
 ```
 
-Configure `.env` for local Garage testing:
+Configure `.env` for local S3 / Garage testing:
 ```ini
 STORAGE_BACKEND=s3
 S3_BUCKET=filemanager-test
 S3_ENDPOINT_URL=http://garage:3900
+S3_PUBLIC_BASE_URL=http://localhost:9002/filemanager-test
 AWS_REGION=garage
 AWS_ACCESS_KEY_ID=garageadmin
 AWS_SECRET_ACCESS_KEY=garageadminsecretkey
@@ -784,6 +797,7 @@ Refer to [`.env-example`](.env-example) for an annotated starter template.
 | `IMGPROXY_BASE_URL` | *None* | External URL where imgproxy is reachable (e.g. `http://localhost:9000/imgproxy`). |
 | `IMGPROXY_ALLOWED_SOURCES` | `local://` | Allow-list of source image prefixes imgproxy may fetch. |
 | `ENABLE_IMGPROXY_CACHE` | `true` | Enables NGINX origin-shield caching for imgproxy transformations. |
+| `IMAGE_RENDITION_MODE` | `materialize` | Image rendition mode: `materialize` (pre-encodes responsive widths w400, w800, w1600 on upload for direct CDN serving) or `on_demand` (generates widths dynamically via imgproxy). |
 | `NGINX_MAX_BODY_SIZE` | `2000m` | NGINX edge payload limit. Must be $\ge$ `MAX_VIDEO_UPLOAD_BYTES`. |
 
 ### Upload & Processing Limits

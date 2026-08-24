@@ -238,7 +238,7 @@ async def test_going_private_rotates_the_storage_key(
     stored = await fake_metadata.get(image.id, OWNER)
     assert stored is not None
     assert stored.storage_key != "images/a.webp"
-    assert stored.storage_key.startswith("images/")
+    assert stored.storage_key.startswith("private/images/")
     assert stored.storage_key.endswith(".webp")
     # Bytes moved, and the old object is gone so its cached URL now 404s.
     assert fake_storage.objects[stored.storage_key] == b"secret-bytes"
@@ -253,7 +253,7 @@ async def test_going_private_cleans_up_rotated_copy_when_set_visibility_raises(
     fake_storage: InMemoryStorageBackend,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_rotate_key_if_going_private already copied the object to a fresh key
+    """_rotate_key_on_visibility_change already copied the object to a fresh key
     before store.set_visibility runs. If that call *raises* (a transient
     store failure, not the delete-race None case), the row was never
     re-pointed at the rotated copy -- it must be cleaned up rather than left
@@ -323,19 +323,19 @@ async def test_going_private_cleans_up_rotated_copy_when_row_is_gone(
     assert len(fake_storage.deleted_keys) == 1
 
 
-async def test_going_public_does_not_rotate(
+async def test_going_public_rotates_out_of_private_prefix(
     client: httpx.AsyncClient,
     auth_headers: dict[str, str],
     fake_metadata: InMemoryMetadataStore,
     fake_storage: InMemoryStorageBackend,
 ) -> None:
-    """The reverse direction has nothing cached to invalidate, so rotating would
-    be a pointless copy of (potentially) a multi-hundred-MB video."""
-    await fake_storage.upload(b"bytes", "images/b.webp", "image/webp")
+    """Turning a private record public moves the object out of the private/ prefix
+    into the public prefix (e.g. images/), allowing public CDN/bucket reads."""
+    await fake_storage.upload(b"bytes", "private/images/b.webp", "image/webp")
     image = await fake_metadata.create(
         owner=OWNER,
         kind="image",
-        storage_key="images/b.webp",
+        storage_key="private/images/b.webp",
         content_type="image/webp",
         size_bytes=5,
         status="ready",
@@ -349,8 +349,12 @@ async def test_going_public_does_not_rotate(
     assert resp.status_code == 200
     stored = await fake_metadata.get(image.id, OWNER)
     assert stored is not None
-    assert stored.storage_key == "images/b.webp"
-    assert fake_storage.deleted_keys == []
+    assert stored.storage_key != "private/images/b.webp"
+    assert stored.storage_key.startswith("images/")
+    assert not stored.storage_key.startswith("private/")
+    assert fake_storage.objects[stored.storage_key] == b"bytes"
+    assert "private/images/b.webp" not in fake_storage.objects
+    assert "private/images/b.webp" in fake_storage.deleted_keys
 
 
 async def test_going_private_cascades_to_the_poster(
@@ -384,6 +388,7 @@ async def test_going_private_cascades_to_the_poster(
     assert stored_poster is not None
     assert stored_poster.visibility == "private"
     assert stored_poster.storage_key != "posters/p.webp"
+    assert stored_poster.storage_key.startswith("private/posters/")
     assert "posters/p.webp" not in fake_storage.objects
 
 

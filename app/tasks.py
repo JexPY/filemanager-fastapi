@@ -28,6 +28,7 @@ from app.services.storage import (
     StorageError,
     delete_file,
     get_storage,
+    storage_prefix,
     upload_file,
     upload_file_from_path,
 )
@@ -348,7 +349,8 @@ async def _extract_and_store_poster(
         webp_bytes, content_type, width, height, _ = await asyncio.to_thread(
             validate_and_strip_image, frame_bytes, generate_renditions=False
         )
-        poster_key = f"posters/{unique_id}.webp"
+        prefix = storage_prefix("posters", visibility)
+        poster_key = f"{prefix}/{unique_id}.webp"
         obj = await upload_file(webp_bytes, poster_key, content_type)
 
         try:
@@ -430,12 +432,15 @@ async def compress_video_task(
 ) -> dict:
     unique_id = uuid.uuid4().hex
 
+    store = await get_metadata_store()
+    rec = await store.get_by_id(upload_id)
+    visibility = rec.visibility if rec else "public"
+    prefix = storage_prefix("videos", visibility)
+
     ext = "webm" if output_format.startswith("webm") else "mp4"
     content_type = f"video/{ext}"
     output_path = os.path.join(tempfile.gettempdir(), f"{unique_id}_compressed.{ext}")
-    output_key = f"videos/{unique_id}_compressed.{ext}"
-
-    store = await get_metadata_store()
+    output_key = f"{prefix}/{unique_id}_compressed.{ext}"
 
     try:
         input_source = await _resolve_ffmpeg_input(raw_storage_key)

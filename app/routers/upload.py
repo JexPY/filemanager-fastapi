@@ -62,6 +62,7 @@ from app.services.storage import (
     StorageError,
     StorageObject,
     delete_file,
+    storage_prefix,
     upload_file,
     upload_file_from_path,
 )
@@ -190,6 +191,7 @@ async def _process_single_image(
                 existing.size_bytes,
                 existing.storage_key,
                 renditions=existing.renditions,
+                include_thumbnail=thumbnail,
                 custom_width=width,
                 custom_height=height,
                 custom_fit=fit,
@@ -226,7 +228,8 @@ async def _process_single_image(
             ) from exc
 
         unique_id = uuid.uuid4().hex
-        object_name = f"images/{unique_id}.webp"
+        prefix = storage_prefix("images", visibility)
+        object_name = f"{prefix}/{unique_id}.webp"
         img_data = _ProcessedImageData(
             buffer=optimized_buffer,
             content_type=content_type,
@@ -249,6 +252,7 @@ async def _process_single_image(
             object_name,
             img_data,
             custom_params,
+            include_thumbnail=thumbnail,
             visibility=visibility,
             raise_on_error=raise_on_error,
         )
@@ -347,6 +351,7 @@ async def _store_and_record_image(
     img_data: _ProcessedImageData,
     custom_params: _CustomImageParams,
     *,
+    include_thumbnail: bool = False,
     visibility: str = "public",
     raise_on_error: bool,
 ) -> dict:
@@ -388,6 +393,7 @@ async def _store_and_record_image(
             record.size_bytes,
             obj.key,
             renditions=renditions_dict,
+            include_thumbnail=include_thumbnail,
             custom_width=custom_params.width,
             custom_height=custom_params.height,
             custom_fit=custom_params.fit,
@@ -731,7 +737,8 @@ async def upload_video(
         # re-buffered); only its key travels through Redis.
         original_filename = file.filename or "video.mp4"
         ext = _sanitize_extension(original_filename)
-        raw_key = f"raw/videos/{uuid.uuid4().hex}.{ext}"
+        prefix = storage_prefix("raw/videos", visibility)
+        raw_key = f"{prefix}/{uuid.uuid4().hex}.{ext}"
         try:
             await upload_file_from_path(temp_path, raw_key, content_type)
         except StorageError as exc:
@@ -870,7 +877,8 @@ async def upload_generic_file(
 
         original_filename = file.filename or "file.bin"
         ext = _sanitize_extension(original_filename)
-        storage_key = f"files/{uuid.uuid4().hex}.{ext}"
+        prefix = storage_prefix("files", visibility)
+        storage_key = f"{prefix}/{uuid.uuid4().hex}.{ext}"
 
         try:
             obj = await upload_file_from_path(temp_path, storage_key, content_type)

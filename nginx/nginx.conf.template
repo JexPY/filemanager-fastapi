@@ -37,6 +37,12 @@ http {
         default off;
     }
 
+    # Local storage static serving mapping (gated by STORAGE_BACKEND env var)
+    map "${STORAGE_BACKEND}" $local_media_root {
+        "local" /data/media;
+        default "";
+    }
+
     proxy_cache_path /tmp/nginx_cache keys_zone=img_cache:10m max_size=5g inactive=24h use_temp_path=off;
 
     # Recover the real client IP when this proxy itself sits behind another one
@@ -133,6 +139,35 @@ http {
             proxy_set_header X-Forwarded-Proto $scheme;
         }
 
+        # Explicitly deny private and staging paths before any public static route.
+        # This is the primary security boundary for local storage static serving.
+        location ^~ /private/ {
+            return 404;
+        }
+
+        location ^~ /raw/ {
+            return 404;
+        }
+
+        # Serve public prefixes as static files from the local media volume when
+        # STORAGE_BACKEND=local (resolved via $local_media_root).
+        location /images/ {
+            root $local_media_root;
+        }
+
+        location /videos/ {
+            root $local_media_root;
+        }
+
+        location /posters/ {
+            root $local_media_root;
+        }
+
+        location /files/ {
+            root $local_media_root;
+            try_files $uri @api;
+        }
+
         # Rate-limit upload endpoints specifically, with tight client_max_body_size per endpoint.
         location = /upload/image {
             client_max_body_size 30m;
@@ -153,7 +188,13 @@ http {
         }
 
         location = /upload/images {
-            client_max_body_size 60m;
+            # Outer backstop (120m) so nginx does not hard-413 bulk uploads before the app
+            # can run its graceful per-file `batch_too_large` degradation. Note the real heap
+            # ceiling is MAX_BULK_UPLOAD_TOTAL_BYTES + MAX_IMAGE_UPLOAD_BYTES (~75 MB), since
+            # checking the budget before reading lets the last admitted file overshoot by one file.
+            # With proxy_request_buffering off, Starlette spools parts to disk and beyond-budget
+            # slots are rejected without being pulled into the heap.
+            client_max_body_size 120m;
             limit_req zone=upload_limit burst=${NGINX_UPLOAD_BURST} nodelay;
             limit_req_status 429;
 
@@ -225,6 +266,16 @@ http {
             add_header 'Access-Control-Allow-Origin' $http_origin always;
             add_header 'Vary' 'Origin' always;
             return 413;
+        }
+
+        location @api {
+            proxy_pass         http://api;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_hide_header  X-Object-Target;
         }
 
         location / {
