@@ -522,41 +522,9 @@ async def _process_single_image_throttled(*args: Any, **kwargs: Any) -> dict:
         return await _process_single_image(*args, **kwargs)
 
 
-@router.post(
-    "/upload/images",
-    tags=["Uploads"],
-    summary="Bulk upload images",
-    response_model=BulkImageUploadResponse,
-    response_model_exclude_unset=True,
-    openapi_extra=_BULK_UPLOAD_OPENAPI_EXTRA,
-)
-async def upload_images(
-    request: Request,
-    files: Annotated[list[UploadFile], File(description="Multiple image files to upload")],
-    thumbnail: bool = Query(default=False, description="Generate and return thumbnail URLs"),
-    width: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
-    height: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
-    fit: Literal["auto", "fit", "fill", "fill-down", "force"] = Form(
-        default="auto", examples=["auto"]
-    ),
-    format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
-        default=None, json_schema_extra={"example": None}
-    ),
-    optimization: Literal["size", "balanced", "quality"] = Form(
-        "balanced", description="Encoding profile for initial image compression"
-    ),
-    visibility: Literal["public", "private"] = Form("public"),
-    owner: str = Depends(require_image_upload),
-):
-    if not files or len(files) == 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files provided")
-    if len(files) > 10:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Maximum of 10 files allowed"
-        )
-
-    # Read each file independently so an oversized/failed file does not abort the batch.
-    # We maintain exact positional alignment across all slots and bound total heap usage.
+async def _read_bulk_files(
+    files: list[UploadFile], request: Request
+) -> tuple[list[bytes | dict], list[str | None]]:
     read_results: list[bytes | dict] = []
     sanitized_filenames: list[str | None] = []
     total_bytes = 0
@@ -599,7 +567,7 @@ async def upload_images(
             else:
                 raise
         except Exception:
-            logger.exception("Failed to read upload file stream for %s", sanitized_name)
+            logger.exception("Failed to read upload file stream for slot")
             read_results.append(
                 {
                     "status": "error",
@@ -608,6 +576,44 @@ async def upload_images(
                     "original_filename": sanitized_name,
                 }
             )
+    return read_results, sanitized_filenames
+
+
+@router.post(
+    "/upload/images",
+    status_code=status.HTTP_200_OK,
+    tags=["Uploads"],
+    summary="Bulk upload images (up to 10 files)",
+    response_model=BulkImageUploadResponse,
+    response_model_exclude_unset=True,
+    openapi_extra=_BULK_UPLOAD_OPENAPI_EXTRA,
+)
+async def upload_images(
+    request: Request,
+    files: Annotated[list[UploadFile], File(description="Multiple image files to upload")],
+    thumbnail: bool = Query(default=False, description="Generate and return thumbnail URLs"),
+    width: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
+    height: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
+    fit: Literal["auto", "fit", "fill", "fill-down", "force"] = Form(
+        default="auto", examples=["auto"]
+    ),
+    format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
+        default=None, json_schema_extra={"example": None}
+    ),
+    optimization: Literal["size", "balanced", "quality"] = Form(
+        "balanced", description="Encoding profile for initial image compression"
+    ),
+    visibility: Literal["public", "private"] = Form("public"),
+    owner: str = Depends(require_image_upload),
+):
+    if not files or len(files) == 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files provided")
+    if len(files) > 10:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Maximum of 10 files allowed"
+        )
+
+    read_results, sanitized_filenames = await _read_bulk_files(files, request)
 
     # Prepare async processing tasks for validly read files
     tasks = []

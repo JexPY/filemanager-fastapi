@@ -49,13 +49,15 @@ class _VisibilityBody(BaseModel):
 def _derive_rotated_key(old_key: str, new_visibility: str) -> str:
     prefix, _, name = old_key.rpartition("/")
     suffix = name.partition(".")[2]
-    new_filename = f"{uuid.uuid4().hex}{'.' + suffix if suffix else ''}"
+    new_filename = f"{uuid.uuid4().hex}.{suffix}" if suffix else uuid.uuid4().hex
 
-    new_prefix = (
-        storage_prefix(prefix, new_visibility)
-        if prefix
-        else ("private" if new_visibility == VISIBILITY_PRIVATE else "")
-    )
+    if prefix:
+        new_prefix = storage_prefix(prefix, new_visibility)
+    elif new_visibility == VISIBILITY_PRIVATE:
+        new_prefix = "private"
+    else:
+        new_prefix = ""
+
     return f"{new_prefix}/{new_filename}" if new_prefix else new_filename
 
 

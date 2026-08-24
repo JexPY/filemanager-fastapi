@@ -419,6 +419,43 @@ async def _run_ffmpeg_compression(ffmpeg_args: list[str]) -> None:
         raise RuntimeError(f"FFmpeg failed: {stderr.decode(errors='replace')}")
 
 
+async def _handle_optional_poster(
+    unique_id: str,
+    output_path: str,
+    poster_seconds: float | None,
+    record: UploadRecord,
+    upload_id: str,
+) -> UploadRecord:
+    if poster_seconds is None:
+        return record
+    try:
+        linked = await _extract_and_store_poster(
+            unique_id,
+            output_path,
+            poster_seconds,
+            record.owner,
+            upload_id,
+            visibility=record.visibility,
+        )
+        if linked is not None:
+            return linked
+    except Exception as p_exc:
+        logger.warning("Automated poster extraction failed for %s: %s", upload_id, p_exc)
+    return record
+
+
+async def _cleanup_video_task_artifacts(output_path: str, raw_storage_key: str) -> None:
+    if await aiofiles.os.path.exists(output_path):
+        await aiofiles.os.remove(output_path)
+
+    try:
+        await delete_file(raw_storage_key)
+    except StorageError as exc:
+        logger.warning(
+            "Failed to delete raw video %s after processing: %s", raw_storage_key, exc
+        )
+
+
 @broker.task
 async def compress_video_task(
     raw_storage_key: str,
@@ -466,15 +503,6 @@ async def compress_video_task(
 
         obj = await upload_file_from_path(output_path, output_key, content_type)
 
-        # Flip the record from `processing` to `ready`, pointing it at the
-        # compressed object. A None result means the owner DELETEd the upload
-        # while it was compressing -- don't leave the object we just wrote
-        # orphaned with no record. A *raised* MetadataError (a transient store
-        # failure, not the delete race) needs the same cleanup: the object
-        # already exists in storage, and the outer `except Exception:` handler
-        # below has no reference to `obj` -- without this it would mark the
-        # row failed and re-raise while leaving the object permanently
-        # orphaned.
         try:
             record = await store.mark_ready(
                 upload_id,
@@ -500,25 +528,10 @@ async def compress_video_task(
                 await delete_file(obj.key)
             return {"status": "discarded", "upload_id": upload_id}
 
-        # Automated single-step poster extraction if poster_seconds is provided
-        if poster_seconds is not None:
-            try:
-                linked = await _extract_and_store_poster(
-                    unique_id,
-                    output_path,
-                    poster_seconds,
-                    record.owner,
-                    upload_id,
-                    visibility=record.visibility,
-                )
-                if linked is not None:
-                    record = linked
-            except Exception as p_exc:
-                logger.warning("Automated poster extraction failed for %s: %s", upload_id, p_exc)
+        record = await _handle_optional_poster(
+            unique_id, output_path, poster_seconds, record, upload_id
+        )
 
-        # Push completion to the client's callback (if any) on its own task, so
-        # they don't have to poll GET /tasks/{id} and a slow receiver can't block
-        # this worker slot. Best-effort; never affects the task result.
         await _enqueue_webhook(record, "video.completed")
 
         res: dict[str, Any] = {"status": "success", "upload_id": upload_id}
@@ -527,10 +540,6 @@ async def compress_video_task(
         return res
 
     except Exception:
-        # Any failure (download, ffmpeg, upload, mark_ready) marks the record
-        # `failed` so GET /files reflects it -- best-effort, then re-raise so the
-        # TaskIQ result is an error too (GET /tasks/{id} -> failed). Fire a
-        # `video.failed` webhook too, so a callback client learns about failures.
         failed_record: UploadRecord | None = None
         with contextlib.suppress(MetadataError):
             failed_record = await store.mark_failed(upload_id)
@@ -539,23 +548,7 @@ async def compress_video_task(
         raise
 
     finally:
-        # Only the (small) compressed output is a temp file now -- the input was
-        # read in place (local path or presigned URL), never copied to /tmp.
-        if await aiofiles.os.path.exists(output_path):
-            await aiofiles.os.remove(output_path)
-
-        # The raw upload has already been fully consumed by ffmpeg above,
-        # whether compression succeeded or failed -- it's never referenced
-        # again, so leaving it in place would just accumulate storage forever
-        # with no way to ever clean it up (delete_file was never called from
-        # anywhere in the codebase before this). Best-effort: a cleanup
-        # failure here must never mask the real task outcome.
-        try:
-            await delete_file(raw_storage_key)
-        except StorageError as exc:
-            logger.warning(
-                "Failed to delete raw video %s after processing: %s", raw_storage_key, exc
-            )
+        await _cleanup_video_task_artifacts(output_path, raw_storage_key)
 
 
 @broker.task

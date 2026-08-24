@@ -28,6 +28,29 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 
+_RECORD_ID_DESC = "The upload record id (use with /files/{id})"
+_STORAGE_KEY_DESC = "Storage key of the uploaded image (public ready images only)"
+_RENDITIONS_DESC = "Storage keys for materialized renditions (public ready images only)"
+_ORIGINAL_FILENAME_DESC = "Original upload filename if provided"
+_SIZE_BYTES_DESC = "Stored (WebP) object size in bytes"
+_SIZE_MB_DESC = "Stored size in megabytes, rounded to 2dp (null for a 0-byte object)"
+_URL_DESC = (
+    "The URL to view/download the full-size image: direct CDN URL on object "
+    "storage with a public base URL configured, or GET /files/{id}/download on local/private."
+)
+_THUMBNAIL_URL_DESC = (
+    "Same value and resolution as GET /files/{id}'s thumbnail_url: the "
+    "materialized 300x300 fill thumbnail's direct object/CDN URL, or a signed imgproxy "
+    "URL (with extension) when no public base URL is configured. Present when thumbnail "
+    "is requested on public uploads."
+)
+_CUSTOM_URL_DESC = (
+    "Signed imgproxy URL (with extension) for the requested custom "
+    "width/height/fit/format; present only when custom transform parameters were "
+    "supplied on a public upload"
+)
+
+
 class ImageDimensions(BaseModel):
     """Pixel dimensions of a stored image (either may be null if unknown)."""
 
@@ -35,87 +58,32 @@ class ImageDimensions(BaseModel):
     height: int | None = Field(default=None, description="Pixel height")
 
 
-class ImageUploadResponse(BaseModel):
+class _BaseImageUploadResponse(BaseModel):
+    """Shared fields for single and bulk successful image upload responses."""
+
+    id: str = Field(description=_RECORD_ID_DESC)
+    storage_key: str | None = Field(default=None, description=_STORAGE_KEY_DESC)
+    renditions: dict[str, str] | None = Field(default=None, description=_RENDITIONS_DESC)
+    original_filename: str | None = Field(default=None, description=_ORIGINAL_FILENAME_DESC)
+    size_bytes: int | None = Field(default=None, description=_SIZE_BYTES_DESC)
+    size_mb: float | None = Field(default=None, description=_SIZE_MB_DESC)
+    dimensions: ImageDimensions
+    url: str | None = Field(default=None, description=_URL_DESC)
+    thumbnail_url: str | None = Field(default=None, description=_THUMBNAIL_URL_DESC)
+    custom_url: str | None = Field(default=None, description=_CUSTOM_URL_DESC)
+
+
+class ImageUploadResponse(_BaseImageUploadResponse):
     """Returned by ``POST /upload/image``."""
 
     status: str = Field(description="Always 'success' for a completed image upload")
-    id: str = Field(description="The upload record id (use with /files/{id})")
-    storage_key: str | None = Field(
-        default=None, description="Storage key of the uploaded image (public ready images only)"
-    )
-    renditions: dict[str, str] | None = Field(
-        default=None,
-        description="Storage keys for materialized renditions (public ready images only)",
-    )
-    original_filename: str | None = Field(
-        default=None, description="Original upload filename if provided"
-    )
-    size_bytes: int | None = Field(default=None, description="Stored (WebP) object size in bytes")
-    size_mb: float | None = Field(
-        default=None,
-        description="Stored size in megabytes, rounded to 2dp (null for a 0-byte object)",
-    )
-    dimensions: ImageDimensions
-    url: str | None = Field(
-        default=None,
-        description="The URL to view/download the full-size image: direct CDN URL on object "
-        "storage with a public base URL configured, or GET /files/{id}/download on local/private.",
-    )
-    thumbnail_url: str | None = Field(
-        default=None,
-        description="Same value and resolution as GET /files/{id}'s thumbnail_url: the "
-        "materialized 300x300 fill thumbnail's direct object/CDN URL, or a signed imgproxy "
-        "URL (with extension) when no public base URL is configured. Present when thumbnail "
-        "is requested on public uploads.",
-    )
-    custom_url: str | None = Field(
-        default=None,
-        description="Signed imgproxy URL (with extension) for the requested custom "
-        "width/height/fit/format; present only when custom transform parameters were "
-        "supplied on a public upload",
-    )
 
 
-class BulkImageUploadItemSuccess(BaseModel):
+class BulkImageUploadItemSuccess(_BaseImageUploadResponse):
     """A successfully uploaded image in a bulk upload batch."""
 
     status: Literal["success"] = Field(
         default="success", description="Status indicator: 'success' for successfully uploaded image"
-    )
-    id: str = Field(description="The upload record id (use with /files/{id})")
-    storage_key: str | None = Field(
-        default=None, description="Storage key of the uploaded image (public ready images only)"
-    )
-    renditions: dict[str, str] | None = Field(
-        default=None,
-        description="Storage keys for materialized renditions (public ready images only)",
-    )
-    original_filename: str | None = Field(
-        default=None, description="Original upload filename if provided"
-    )
-    size_bytes: int | None = Field(default=None, description="Stored (WebP) object size in bytes")
-    size_mb: float | None = Field(
-        default=None,
-        description="Stored size in megabytes, rounded to 2dp (null for a 0-byte object)",
-    )
-    dimensions: ImageDimensions
-    url: str | None = Field(
-        default=None,
-        description="The URL to view/download the full-size image: direct CDN URL on object "
-        "storage with a public base URL configured, or GET /files/{id}/download on local/private.",
-    )
-    thumbnail_url: str | None = Field(
-        default=None,
-        description="Same value and resolution as GET /files/{id}'s thumbnail_url: the "
-        "materialized 300x300 fill thumbnail's direct object/CDN URL, or a signed imgproxy "
-        "URL (with extension) when no public base URL is configured. Present when thumbnail "
-        "is requested on public uploads.",
-    )
-    custom_url: str | None = Field(
-        default=None,
-        description="Signed imgproxy URL (with extension) for the requested custom "
-        "width/height/fit/format; present only when custom transform parameters were "
-        "supplied on a public upload",
     )
 
 
@@ -129,9 +97,7 @@ class BulkImageUploadItemError(BaseModel):
         description="Machine-readable error code"
     )
     message: str = Field(description="Human-readable error explanation for debugging")
-    original_filename: str | None = Field(
-        default=None, description="Original upload filename if provided"
-    )
+    original_filename: str | None = Field(default=None, description=_ORIGINAL_FILENAME_DESC)
 
 
 BulkImageUploadItem = Annotated[
@@ -190,13 +156,13 @@ class FileUploadResponse(BaseModel):
     """Returned by ``POST /upload/file``."""
 
     status: str = Field(description="Always 'success' for a completed file upload")
-    id: str = Field(description="The upload record id (use with /files/{id})")
+    id: str = Field(description=_RECORD_ID_DESC)
     kind: str = Field(description="Always 'file' for generic file uploads")
     content_type: str = Field(description="MIME type of the uploaded file")
     size_bytes: int | None = Field(default=None, description="Stored object size in bytes")
     size_mb: float | None = Field(
         default=None,
-        description="Stored size in megabytes, rounded to 2dp (null for a 0-byte object)",
+        description=_SIZE_MB_DESC,
     )
     original_filename: str | None = Field(default=None, description="Original upload filename")
     visibility: str = Field(description="'private' | 'public'")
@@ -227,7 +193,7 @@ class FileRecord(BaseModel):
     )
     renditions: dict[str, str] | None = Field(
         default=None,
-        description="Storage keys for materialized renditions (public ready images only)",
+        description=_RENDITIONS_DESC,
     )
     content_type: str
     size_bytes: int

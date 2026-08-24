@@ -55,9 +55,10 @@ async def get_files_batch(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if len(records) < len(request.ids):
+        safe_owner = owner.replace("\r", "").replace("\n", "")
         logger.warning(
             "Batch lookup partial miss: owner=%s requested=%d returned=%d",
-            owner,
+            safe_owner,
             len(request.ids),
             len(records),
         )

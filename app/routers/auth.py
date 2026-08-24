@@ -386,7 +386,6 @@ def create_presigned_upload(
     "/whoami",
     tags=["System"],
     summary="Get authenticated owner identity",
-    response_model=WhoAmIResponse,
 )
 def whoami(owner: Annotated[str, Depends(verify_token)]) -> WhoAmIResponse:
     """Return the resolved owner identity of the presented credential.
