@@ -503,6 +503,63 @@ Retrieve record details via `GET /files/{id}`:
 - **`thumbnail_url` / `poster_url`:** Public-only accelerators (withheld on private records).
 - **`GET /files`:** Returns paginated records: `{"files": [...], "total_count": N, "limit": L, "offset": O}`.
 
+#### Rendering placeholders while an image loads
+
+Every ready image carries two placeholder values so a page can paint something
+immediately, with no extra request and no client-side library:
+
+| Field | What it is | Typical size |
+|---|---|---|
+| `dominant_color` | Average colour as `#rrggbb` | 7 bytes |
+| `blur_data_url` | A 16px WebP as a `data:image/webp;base64,...` URI | 135-170 bytes |
+
+**The tile is not pre-blurred — you must blur it.** It is a real 16px image, so
+dropped into an `<img>` untouched it renders as a visibly blocky postage stamp.
+Blurring is left to the consumer so you control the radius and the server does
+not pay for an effect CSS applies for free:
+
+```html
+<div class="ph" style="background:#766c64">
+  <img class="ph-blur" src="data:image/webp;base64,UklGRoIAAABXRUJQ..." alt="">
+  <img class="ph-real" src="https://cdn.example.com/images/<uuid>.webp" alt="Fjords">
+</div>
+```
+
+```css
+.ph { position: relative; overflow: hidden; }          /* dominant_color fills any gap */
+.ph-blur { position: absolute; inset: 0; width: 100%; height: 100%;
+           object-fit: cover; filter: blur(16px); transform: scale(1.1); }
+.ph-real { position: relative; width: 100%; display: block;
+           opacity: 0; transition: opacity .3s; }
+.ph-real[data-loaded] { opacity: 1; }
+```
+
+`transform: scale(1.1)` hides the soft edges blur leaves at the borders. Set
+`data-loaded` in the real image's `onload` handler.
+
+Next.js consumes both directly:
+
+```jsx
+<Image
+  src={photo.url}
+  width={photo.width}
+  height={photo.height}
+  placeholder="blur"
+  blurDataURL={photo.blur_data_url}
+  style={{ backgroundColor: photo.dominant_color }}
+  alt=""
+/>
+```
+
+Two things worth knowing:
+
+- Both fields are present on **private** records too, unlike `storage_key`,
+  `renditions`, `thumbnail_url` and `poster_url`. They carry no storage key and
+  no URL, so there is nothing to withhold — a private gallery gets placeholders
+  exactly like a public one.
+- Both are `null` on records uploaded before this feature shipped, and on
+  non-image records. Treat them as optional; fall back to a neutral background.
+
 ---
 
 ### Files, Playback, and Sharing
