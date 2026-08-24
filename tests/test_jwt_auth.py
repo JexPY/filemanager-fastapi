@@ -357,3 +357,24 @@ async def test_presign_503_when_jwt_disabled(
         json={"kind": "image", "owner_id": "x"},
     )
     assert resp.status_code == 503
+
+
+async def test_whoami_with_manage_files_jwt(client: httpx.AsyncClient, jwt_env: None) -> None:
+    token = _mint(sub="tenant-super", scopes=[SCOPE_MANAGE_FILES])
+    resp = await client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    assert resp.json() == {"owner": "tenant-super"}
+
+
+async def test_whoami_with_upload_scope_jwt_is_403(
+    client: httpx.AsyncClient, jwt_env: None
+) -> None:
+    token = _mint(sub="tenant-super", scopes=[SCOPE_UPLOAD_IMAGE])
+    resp = await client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 403
+
+
+async def test_whoami_with_read_file_jwt_is_403(client: httpx.AsyncClient, jwt_env: None) -> None:
+    token = _mint(sub="tenant-super", scopes=[SCOPE_READ_FILE], file="rec-1")
+    resp = await client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 403

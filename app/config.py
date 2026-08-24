@@ -1,4 +1,5 @@
 import hashlib
+from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -6,13 +7,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 ALLOWED_STORAGE_BACKENDS = {"local", "s3", "gcp", "b2"}
 
 # Which setting holds the "a client can fetch this object directly" base URL, per
-# backend. `local` is deliberately absent: its media volume is reachable only
-# through nginx's internal X-Accel location, so it can never produce a directly
-# fetchable URL and every consumer must fall back to /files/{id}/download. Adding
-# a future object store means adding one line here rather than a third arm to two
-# separate if/elif chains (this map backs both `public_images_unservable` below
-# and `storage.has_public_base_url()`).
+# backend. Local development uses LOCAL_PUBLIC_BASE_URL (served directly by nginx
+# for public asset prefixes while denying private/ and raw/). Adding a future object
+# store means adding one line here rather than a third arm to two separate if/elif
+# chains (this map backs both `public_images_unservable` below and
+# `storage.has_public_base_url()`).
 PUBLIC_BASE_URL_FIELDS = {
+    "local": "LOCAL_PUBLIC_BASE_URL",
     "s3": "S3_PUBLIC_BASE_URL",
     "gcp": "GCS_PUBLIC_BASE_URL",
     "b2": "B2_PUBLIC_BASE_URL",
@@ -38,6 +39,30 @@ def _derive_owner(secret: str) -> str:
 class Settings(BaseSettings):
     # Redis for TaskIQ
     REDIS_URL: str = Field(default="redis://redis:6379/0")
+
+    # --- TaskIQ retention: both of these bound Redis memory. ---
+    #
+    # taskiq-redis leaves both unbounded by default, and *neither* default key
+    # carries a TTL. That matters especially when Redis is shared with another
+    # service under `maxmemory-policy volatile-lru`: that policy can only evict
+    # keys that have an expiry, so these would grow until the instance refuses
+    # writes — taking the co-tenant's cache down with it, not just this service.
+    #
+    # Result payloads. Without an expiry `RedisAsyncResultBackend` issues a plain
+    # SET (see its `result_ex_time` branch), so every task result is kept forever.
+    # A compression finishes in minutes, so a week is far longer than any client
+    # will poll `GET /tasks/{task_id}` for.
+    TASKIQ_RESULT_TTL_SECONDS: int = Field(default=7 * 24 * 3600)
+    #
+    # Stream length. `XACK` only clears the pending-entries list — it does NOT
+    # delete the entry — and taskiq never issues `XDEL`, so without `maxlen` the
+    # stream grows by every job ever processed.
+    #
+    # This is a trim, so it must stay comfortably above the worst-case *pending*
+    # backlog: entries beyond it are dropped, and a dropped entry is a lost job.
+    # 10k queued videos would already be a much larger incident, but raise this if
+    # your backlog can legitimately exceed it.
+    TASKIQ_STREAM_MAXLEN: int = Field(default=10_000)
 
     # Postgres metadata store (system-of-record for every uploaded object).
     # Both the api and worker processes connect to this; the worker updates a
@@ -102,6 +127,11 @@ class Settings(BaseSettings):
     # Whether NGINX should enable the proxy_cache_lock (origin shield) for imgproxy
     ENABLE_IMGPROXY_CACHE: str = Field(default="true")
 
+    # Image rendition generation mode: "materialize" (default) or "on_demand".
+    # materialize: extra widths are encoded at upload and stored for direct CDN delivery.
+    # on_demand: widths are produced on-demand by imgproxy at request time.
+    IMAGE_RENDITION_MODE: Literal["materialize", "on_demand"] = "materialize"
+
     # The API's own externally-reachable origin (scheme+host, e.g.
     # https://media.example.com), used to build absolute share/download URLs in
     # responses. Blank -> those responses return relative paths and the client
@@ -137,6 +167,7 @@ class Settings(BaseSettings):
 
     # Upload limits (bytes)
     MAX_IMAGE_UPLOAD_BYTES: int = Field(default=25 * 1024 * 1024)
+    MAX_BULK_UPLOAD_TOTAL_BYTES: int = Field(default=50 * 1024 * 1024)
     MAX_VIDEO_UPLOAD_BYTES: int = Field(default=2000 * 1024 * 1024)
     MAX_FILE_UPLOAD_BYTES: int = Field(default=100 * 1024 * 1024)
     # Decompression-bomb guard: reject images decoding to more than this
@@ -252,6 +283,16 @@ class Settings(BaseSettings):
             raise ValueError(f"PRIVATE_MEDIA_SERVE_MODE must be 'stream' or 'redirect', got {v!r}")
         return normalized
 
+    @field_validator("IMAGE_RENDITION_MODE")
+    @classmethod
+    def _validate_image_rendition_mode(cls, v: str) -> str:
+        normalized = v.strip().lower()
+        if normalized not in {"materialize", "on_demand"}:
+            raise ValueError(
+                f"IMAGE_RENDITION_MODE must be 'materialize' or 'on_demand', got {v!r}"
+            )
+        return normalized
+
     @model_validator(mode="after")
     def _validate_backend_requirements(self) -> Settings:
         # Fail fast at startup rather than surfacing a confusing error on first upload.
@@ -333,8 +374,7 @@ class Settings(BaseSettings):
 
         The single source of truth for "can a client fetch this object without
         going through us" -- `storage.has_public_base_url()` is just this, coerced
-        to bool. `local` (and any backend absent from PUBLIC_BASE_URL_FIELDS)
-        returns "" by construction rather than by a special case.
+        to bool.
         """
         field_name = PUBLIC_BASE_URL_FIELDS.get(self.STORAGE_BACKEND)
         return getattr(self, field_name) if field_name else ""
@@ -353,8 +393,11 @@ class Settings(BaseSettings):
         perfectly valid without a public base URL, and requiring one would make
         the documented Garage s3-dev flow unbootable -- Garage has no anonymous
         access at all, so no public base URL can exist for it.
+
+        For `local`, imgproxy reads via `local://` mount, so this is never flagged
+        unservable.
         """
-        if self.STORAGE_BACKEND not in PUBLIC_BASE_URL_FIELDS:
+        if self.STORAGE_BACKEND == "local" or self.STORAGE_BACKEND not in PUBLIC_BASE_URL_FIELDS:
             return False
         return not self.active_public_base_url
 

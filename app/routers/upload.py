@@ -27,6 +27,7 @@ from app.routers.utils import (
     _image_response,
     _read_capped,
     _sanitize_extension,
+    _sanitize_filename,
     _sha256_hex,
     _stream_capped_to_temp,
 )
@@ -61,6 +62,7 @@ from app.services.storage import (
     StorageError,
     StorageObject,
     delete_file,
+    storage_prefix,
     upload_file,
     upload_file_from_path,
 )
@@ -83,6 +85,7 @@ class _ProcessedImageData:
     height: int
     renditions_buffers: dict[str, bytes]
     content_hash: str
+    original_filename: str | None = None
 
 
 @dataclass(frozen=True)
@@ -150,11 +153,12 @@ async def _process_single_image(
     thumbnail: bool = False,
     visibility: str = "public",
     raise_on_error: bool,
-) -> dict | None:
+    original_filename: str | None = None,
+) -> dict:
     """Process one image upload end-to-end: sha256 hash -> dedup check ->
     validate/strip -> store -> record. If raise_on_error=True (single upload
     endpoint), propagates HTTPException on client/server failures. If False
-    (bulk endpoint), returns None on any failure so the batch continues. Never
+    (bulk endpoint), returns an error dict on failure so the batch continues. Never
     leaks storage internals to the caller."""
     try:
         # Content hash of the *input* bytes for idempotency. Hashing 25 MB is
@@ -187,11 +191,13 @@ async def _process_single_image(
                 existing.size_bytes,
                 existing.storage_key,
                 renditions=existing.renditions,
+                include_thumbnail=thumbnail,
                 custom_width=width,
                 custom_height=height,
                 custom_fit=fit,
                 custom_format=format,
                 visibility=existing.visibility,
+                original_filename=original_filename,
             )
 
         # Client-side failures (bad/unsupported image) => 400, generic detail.
@@ -211,13 +217,19 @@ async def _process_single_image(
         except ImageValidationError as exc:
             logger.warning("Image validation rejected upload: %s", exc)
             if not raise_on_error:
-                return None
+                return {
+                    "status": "error",
+                    "code": "invalid_image",
+                    "message": "Invalid or unsupported image",
+                    "original_filename": original_filename,
+                }
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or unsupported image"
             ) from exc
 
         unique_id = uuid.uuid4().hex
-        object_name = f"images/{unique_id}.webp"
+        prefix = storage_prefix("images", visibility)
+        object_name = f"{prefix}/{unique_id}.webp"
         img_data = _ProcessedImageData(
             buffer=optimized_buffer,
             content_type=content_type,
@@ -225,6 +237,7 @@ async def _process_single_image(
             height=img_height,
             renditions_buffers=renditions_buffers,
             content_hash=content_hash,
+            original_filename=original_filename,
         )
         custom_params = _CustomImageParams(
             width=width,
@@ -239,6 +252,7 @@ async def _process_single_image(
             object_name,
             img_data,
             custom_params,
+            include_thumbnail=thumbnail,
             visibility=visibility,
             raise_on_error=raise_on_error,
         )
@@ -249,7 +263,12 @@ async def _process_single_image(
         if raise_on_error:
             raise
         logger.exception("Failed to process bulk image item")
-        return None
+        return {
+            "status": "error",
+            "code": "processing_failed",
+            "message": "Failed to process image",
+            "original_filename": original_filename,
+        }
 
 
 async def _cleanup_uploaded_keys(uploaded_keys: list[str]) -> None:
@@ -313,6 +332,7 @@ async def _create_image_record(
             content_hash=img_data.content_hash,
             visibility=visibility,
             renditions=renditions_dict,
+            original_filename=img_data.original_filename,
         )
     except MetadataError as exc:
         logger.exception("Failed to record image upload")
@@ -331,9 +351,10 @@ async def _store_and_record_image(
     img_data: _ProcessedImageData,
     custom_params: _CustomImageParams,
     *,
+    include_thumbnail: bool = False,
     visibility: str = "public",
     raise_on_error: bool,
-) -> dict | None:
+) -> dict:
     uploaded_keys: list[str] = []
     try:
         obj = await _safe_upload_file(
@@ -358,7 +379,12 @@ async def _store_and_record_image(
             uploaded_keys,
         )
         if record is None:
-            return None
+            return {
+                "status": "error",
+                "code": "processing_failed",
+                "message": "Failed to record image metadata",
+                "original_filename": img_data.original_filename,
+            }
 
         return _image_response(
             record.id,
@@ -367,11 +393,13 @@ async def _store_and_record_image(
             record.size_bytes,
             obj.key,
             renditions=renditions_dict,
+            include_thumbnail=include_thumbnail,
             custom_width=custom_params.width,
             custom_height=custom_params.height,
             custom_fit=custom_params.fit,
             custom_format=custom_params.format,
             visibility=record.visibility,
+            original_filename=img_data.original_filename,
         )
 
     except HTTPException:
@@ -382,7 +410,12 @@ async def _store_and_record_image(
         if raise_on_error:
             raise
         logger.exception("Failed to store and record image")
-        return None
+        return {
+            "status": "error",
+            "code": "processing_failed",
+            "message": "Failed to store image",
+            "original_filename": img_data.original_filename,
+        }
 
 
 @router.post(
@@ -410,6 +443,7 @@ async def upload_image(
     visibility: Literal["public", "private"] = Form("public"),
     owner: str = Depends(require_image_upload),
 ):
+    sanitized_filename = _sanitize_filename(file.filename)
     file_data = await _read_capped(file, request, settings.MAX_IMAGE_UPLOAD_BYTES)
     return await _process_single_image(
         file_data,
@@ -422,6 +456,7 @@ async def upload_image(
         thumbnail=thumbnail,
         visibility=visibility,
         raise_on_error=True,
+        original_filename=sanitized_filename,
     )
 
 
@@ -482,15 +517,69 @@ _BULK_UPLOAD_OPENAPI_EXTRA = {
 }
 
 
-async def _process_single_image_throttled(*args: Any, **kwargs: Any) -> dict | None:
+async def _process_single_image_throttled(*args: Any, **kwargs: Any) -> dict:
     async with _bulk_image_concurrency():
         return await _process_single_image(*args, **kwargs)
 
 
+async def _read_bulk_files(
+    files: list[UploadFile], request: Request
+) -> tuple[list[bytes | dict], list[str | None]]:
+    read_results: list[bytes | dict] = []
+    sanitized_filenames: list[str | None] = []
+    total_bytes = 0
+
+    for file in files:
+        sanitized_name = _sanitize_filename(file.filename)
+        sanitized_filenames.append(sanitized_name)
+
+        if total_bytes >= settings.MAX_BULK_UPLOAD_TOTAL_BYTES:
+            read_results.append(
+                {
+                    "status": "error",
+                    "code": "batch_too_large",
+                    "message": "Bulk upload batch exceeds aggregate size limit "
+                    f"({settings.MAX_BULK_UPLOAD_TOTAL_BYTES} bytes)",
+                    "original_filename": sanitized_name,
+                }
+            )
+            continue
+
+        try:
+            data = await _read_capped(file, request, settings.MAX_IMAGE_UPLOAD_BYTES)
+            total_bytes += len(data)
+            read_results.append(data)
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_413_CONTENT_TOO_LARGE:
+                read_results.append(
+                    {
+                        "status": "error",
+                        "code": "too_large",
+                        "message": "File exceeds maximum allowed size "
+                        f"({settings.MAX_IMAGE_UPLOAD_BYTES} bytes)",
+                        "original_filename": sanitized_name,
+                    }
+                )
+            else:
+                raise
+        except Exception:
+            logger.exception("Failed to read upload file stream for slot")
+            read_results.append(
+                {
+                    "status": "error",
+                    "code": "processing_failed",
+                    "message": "Failed to read upload stream",
+                    "original_filename": sanitized_name,
+                }
+            )
+    return read_results, sanitized_filenames
+
+
 @router.post(
     "/upload/images",
+    status_code=status.HTTP_200_OK,
     tags=["Uploads"],
-    summary="Bulk upload images",
+    summary="Bulk upload images (up to 10 files)",
     response_model=BulkImageUploadResponse,
     response_model_exclude_unset=True,
     openapi_extra=_BULK_UPLOAD_OPENAPI_EXTRA,
@@ -520,37 +609,53 @@ async def upload_images(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Maximum of 10 files allowed"
         )
 
-    # Validate size up to 50MB and keep in memory
-    MAX_TOTAL_BYTES = 50 * 1024 * 1024
-    total_bytes = 0
-    files_data = []
+    read_results, sanitized_filenames = await _read_bulk_files(files, request)
 
-    for file in files:
-        per_file_cap = min(settings.MAX_IMAGE_UPLOAD_BYTES, MAX_TOTAL_BYTES - total_bytes)
-        data = await _read_capped(file, request, per_file_cap)
-        total_bytes += len(data)
-        files_data.append(data)
+    # Prepare async processing tasks for validly read files
+    tasks = []
+    task_indices: list[int] = []
 
-    results = await asyncio.gather(
-        *[
-            _process_single_image_throttled(
-                data,
-                owner,
-                optimization,
-                width,
-                height,
-                fit,
-                format,
-                thumbnail=thumbnail,
-                visibility=visibility,
-                raise_on_error=False,
+    for idx, item in enumerate(read_results):
+        if isinstance(item, bytes):
+            tasks.append(
+                _process_single_image_throttled(
+                    item,
+                    owner,
+                    optimization,
+                    width,
+                    height,
+                    fit,
+                    format,
+                    thumbnail=thumbnail,
+                    visibility=visibility,
+                    raise_on_error=False,
+                    original_filename=sanitized_filenames[idx],
+                )
             )
-            for data in files_data
-        ]
-    )
-    items = [r for r in results if r is not None]
+            task_indices.append(idx)
 
-    return {"count": len(items), "items": items}
+    processed_results = await asyncio.gather(*tasks) if tasks else []
+
+    # Map processed items back into their exact original slot indices
+    final_items: list[dict] = []
+    task_map = dict(zip(task_indices, processed_results, strict=True))
+
+    for idx, item in enumerate(read_results):
+        if idx in task_map:
+            final_items.append(task_map[idx])
+        else:
+            assert isinstance(item, dict)
+            final_items.append(item)
+
+    succeeded_count = sum(1 for it in final_items if it.get("status") == "success")
+    failed_count = sum(1 for it in final_items if it.get("status") == "error")
+
+    return {
+        "succeeded": succeeded_count,
+        "failed": failed_count,
+        "total": len(final_items),
+        "items": final_items,
+    }
 
 
 @router.post(
@@ -634,7 +739,8 @@ async def upload_video(
         # re-buffered); only its key travels through Redis.
         original_filename = file.filename or "video.mp4"
         ext = _sanitize_extension(original_filename)
-        raw_key = f"raw/videos/{uuid.uuid4().hex}.{ext}"
+        prefix = storage_prefix("raw/videos", visibility)
+        raw_key = f"{prefix}/{uuid.uuid4().hex}.{ext}"
         try:
             await upload_file_from_path(temp_path, raw_key, content_type)
         except StorageError as exc:
@@ -773,7 +879,8 @@ async def upload_generic_file(
 
         original_filename = file.filename or "file.bin"
         ext = _sanitize_extension(original_filename)
-        storage_key = f"files/{uuid.uuid4().hex}.{ext}"
+        prefix = storage_prefix("files", visibility)
+        storage_key = f"{prefix}/{uuid.uuid4().hex}.{ext}"
 
         try:
             obj = await upload_file_from_path(temp_path, storage_key, content_type)

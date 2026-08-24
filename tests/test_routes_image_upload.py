@@ -11,9 +11,10 @@ from tests.fakes import InMemoryMetadataStore, InMemoryStorageBackend
 
 
 async def test_valid_image_upload_succeeds(
-    client: httpx.AsyncClient, auth_headers: dict[str, str]
+    client: httpx.AsyncClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Default upload: thumbnail=False, returns canonical url and no thumbnail_url
+    # Default upload with public base URL: returns direct public object URL and no thumbnail_url
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "http://localhost:9000")
     resp = await client.post(
         "/upload/image",
         headers=auth_headers,
@@ -25,10 +26,21 @@ async def test_valid_image_upload_succeeds(
     assert body["id"]  # a metadata record id the client can list/get/delete by
     assert body["dimensions"] == {"width": 8, "height": 8}
     assert "url" in body
-    assert body["url"].endswith(f"/files/{body['id']}/download")
+    assert body["url"].endswith(".webp")
     assert "thumbnail_url" not in body
     assert "imgproxy_thumbnail_url" not in body
     assert "medium_url" not in body
+
+    # Without public base URL: falls back to canonical /files/{id}/download
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "")
+    resp_fallback = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp_fallback.status_code == 200
+    body_fb = resp_fallback.json()
+    assert body_fb["url"].endswith(f"/files/{body_fb['id']}/download")
 
     # Upload with ?thumbnail=true returns thumbnail_url with .webp extension
     resp_thumb = await client.post(
@@ -52,12 +64,14 @@ def _decode_imgproxy_source(imgproxy_url: str) -> str:
 
 
 async def test_source_is_local_scheme_for_local_backend(
-    client: httpx.AsyncClient, auth_headers: dict[str, str]
+    client: httpx.AsyncClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The test env's STORAGE_BACKEND defaults to "local" -- build_source_url
     # swaps in imgproxy's local:// scheme rather than the fake's plain URL. The
     # source is no longer returned directly (raw_url was dropped); it survives
     # only b64-embedded in the signed imgproxy URLs, so assert it there.
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "")
     resp = await client.post(
         "/upload/image?thumbnail=true",
         headers=auth_headers,

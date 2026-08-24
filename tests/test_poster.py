@@ -57,7 +57,7 @@ async def test_generate_poster_creates_linked_webp_image_record(
     assert poster is not None
     assert poster.kind == KIND_IMAGE
     assert poster.content_type == "image/webp"
-    assert poster.storage_key.startswith("posters/")
+    assert poster.storage_key.startswith("private/posters/")
     assert poster.storage_key in fake_storage.objects
     assert poster.width
     assert poster.height  # real dimensions from pyvips
@@ -65,8 +65,8 @@ async def test_generate_poster_creates_linked_webp_image_record(
     # generate_renditions=False through to validate_and_strip_image, since a
     # poster never gets its own materialized rendition (see CLAUDE.md).
     assert not poster.renditions
-    assert not any(k.startswith("posters/") and "_t300" in k for k in fake_storage.objects)
-    assert not any(k.startswith("posters/") and "_m960" in k for k in fake_storage.objects)
+    assert not any("posters/" in k and "_t300" in k for k in fake_storage.objects)
+    assert not any("posters/" in k and "_m960" in k for k in fake_storage.objects)
 
     # The video row now points at its poster.
     video = await fake_metadata.get(video_id, OWNER)
@@ -113,8 +113,8 @@ async def test_generate_poster_discards_when_video_deleted_midflight(
 
     assert result["status"] == "discarded"
     # The poster it wrote must not be left orphaned in storage.
-    assert not any(k.startswith("posters/") for k in fake_storage.objects)
-    assert any(k.startswith("posters/") for k in fake_storage.deleted_keys)
+    assert not any("posters/" in k for k in fake_storage.objects)
+    assert any("posters/" in k for k in fake_storage.deleted_keys)
 
 
 async def test_generate_poster_discards_when_set_poster_raises(
@@ -139,8 +139,8 @@ async def test_generate_poster_discards_when_set_poster_raises(
         await generate_poster_task(upload_id=video_id, at_seconds=0.0)
 
     # Neither the object nor the row it just created may be left behind.
-    assert not any(k.startswith("posters/") for k in fake_storage.objects)
-    assert any(k.startswith("posters/") for k in fake_storage.deleted_keys)
+    assert not any("posters/" in k for k in fake_storage.objects)
+    assert any("posters/" in k for k in fake_storage.deleted_keys)
     assert not any(r.kind == KIND_IMAGE for r in fake_metadata.records.values())
 
 
@@ -168,8 +168,8 @@ async def test_generate_poster_discards_when_create_raises(
     with pytest.raises(MetadataError):
         await generate_poster_task(upload_id=video_id, at_seconds=0.0)
 
-    assert not any(k.startswith("posters/") for k in fake_storage.objects)
-    assert any(k.startswith("posters/") for k in fake_storage.deleted_keys)
+    assert not any("posters/" in k for k in fake_storage.objects)
+    assert any("posters/" in k for k in fake_storage.deleted_keys)
 
 
 # --- The poster route ------------------------------------------------------
@@ -364,9 +364,12 @@ async def test_video_record_carries_direct_poster_url_when_public_base_url_set(
 
 async def test_poster_url_falls_back_to_imgproxy_without_public_base_url(
     fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without a configured public base URL (e.g. local backend), poster_url
     falls back to signed imgproxy."""
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "")
     poster = await fake_metadata.create(
         owner=OWNER,
         kind=KIND_IMAGE,

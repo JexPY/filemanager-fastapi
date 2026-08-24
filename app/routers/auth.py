@@ -52,6 +52,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.schemas import WhoAmIResponse
 
 logger = logging.getLogger(__name__)
 
@@ -379,3 +380,18 @@ def create_presigned_upload(
     base = settings.PUBLIC_BASE_URL.rstrip("/")
     url = f"{base}{path}?token={token}" if base else f"{path}?token={token}"
     return PresignedUploadResponse(url=url, token=token, expires_at=expires_at, scope=scope)
+
+
+@router.get(
+    "/whoami",
+    tags=["System"],
+    summary="Get authenticated owner identity",
+)
+def whoami(owner: Annotated[str, Depends(verify_token)]) -> WhoAmIResponse:
+    """Return the resolved owner identity of the presented credential.
+
+    Guarded by ``verify_token``: static master tokens and ``manage:files`` JWTs
+    pass; upload and ``read:file`` tokens receive 403; missing/invalid credentials
+    receive 401. Pure credential resolution with no database round-trip.
+    """
+    return WhoAmIResponse(owner=owner)

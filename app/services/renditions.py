@@ -51,12 +51,51 @@ RENDITION_SPECS: dict[str, RenditionSpec] = {
         crop=True,
         effort=4,
     ),
+    "w400": RenditionSpec(
+        name="w400",
+        suffix="w400",
+        width=400,
+        height=0,
+        format=FORMAT_WEBP,
+        mime_type=MIME_WEBP,
+        quality=80,
+        crop=False,
+        effort=4,
+    ),
+    "w800": RenditionSpec(
+        name="w800",
+        suffix="w800",
+        width=800,
+        height=0,
+        format=FORMAT_WEBP,
+        mime_type=MIME_WEBP,
+        quality=80,
+        crop=False,
+        effort=4,
+    ),
+    "w1600": RenditionSpec(
+        name="w1600",
+        suffix="w1600",
+        width=1600,
+        height=0,
+        format=FORMAT_WEBP,
+        mime_type=MIME_WEBP,
+        quality=80,
+        crop=False,
+        effort=4,
+    ),
 }
 
 _RENDITION_ALIASES: dict[str, str] = {
     "thumbnail": "thumbnail",
     "thumb": "thumbnail",
     "t300": "thumbnail",
+    "w400": "w400",
+    "400": "w400",
+    "w800": "w800",
+    "800": "w800",
+    "w1600": "w1600",
+    "1600": "w1600",
 }
 
 ALLOWED_RENDITION_NAMES = frozenset(_RENDITION_ALIASES.keys())
@@ -83,6 +122,7 @@ def derive_rendition_key(parent_storage_key: str, rend_name: str) -> str:
     """Derive a rendition storage key from a parent storage key.
 
     E.g. 'images/uuid.webp', 'thumbnail' -> 'images/uuid_t300.webp'.
+    'images/uuid.webp', 'w400' -> 'images/uuid_w400.webp'.
     'videos/uuid_compressed.mp4', 'thumbnail' -> 'videos/uuid_compressed_t300.webp'.
 
     The rendition's output format is a property of the rendition itself
@@ -104,15 +144,15 @@ def _derive_rendition_public_url(
     storage_key: str,
     renditions: dict[str, str] | None,
 ) -> str:
-    """Shared resolution for every materialized rendition's public URL.
+    """Shared resolution for every rendition's public URL.
 
     If the rendition was materialized (present in `renditions`):
     - On object storage with a public base URL, emits the direct CDN object URL.
     - Otherwise (local or no public base URL), emits signed imgproxy with 'rs:auto'.
 
-    If it was not materialized (pre-existing records from before a given
-    rendition spec existed), falls back to a live signed imgproxy transform of
-    the *parent* object using `fallback_processing_options`.
+    If it was not materialized (in `on_demand` mode or pre-existing records),
+    resolves to a live signed imgproxy transform of the parent object using
+    `fallback_processing_options`.
     """
     from app.services.imgproxy import signed_image_url
     from app.services.storage import has_public_base_url, public_object_url

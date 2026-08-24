@@ -82,7 +82,7 @@ class UploadRecord:
 
         if self.renditions and "thumbnail" in self.renditions:
             data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, self.renditions)
-        elif self.renditions is None:
+        else:
             data["thumbnail_url"] = derive_thumbnail_url(self.storage_key, None)
 
     def _populate_poster_url(self, data: dict[str, Any], poster_storage_key: str | None) -> None:
@@ -117,6 +117,20 @@ class UploadRecord:
         self._populate_thumbnail_url(data)
         self._populate_poster_url(data, poster_storage_key)
 
+    def _filtered_renditions(self) -> dict[str, str]:
+        """Return renditions mapping, excluding width specs exceeding source width."""
+        if not self.renditions:
+            return {}
+        from app.services.renditions import get_rendition_spec
+
+        result: dict[str, str] = {}
+        for name, key in self.renditions.items():
+            spec = get_rendition_spec(name)
+            if spec and not spec.crop and self.width is not None and spec.width > self.width:
+                continue
+            result[name] = key
+        return result
+
     def to_public(self, poster_storage_key: str | None = None) -> dict[str, Any]:
         """Owner-safe JSON view for API responses (no cross-tenant fields)."""
         data = {
@@ -146,5 +160,8 @@ class UploadRecord:
 
         if self.status == STATUS_READY:
             self._populate_ready_urls(data, poster_storage_key)
+            if self.visibility == VISIBILITY_PUBLIC:
+                data["storage_key"] = self.storage_key
+                data["renditions"] = self._filtered_renditions()
 
         return data

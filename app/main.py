@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from taskiq_fastapi import populate_dependency_context
 
 from app.broker import broker
-from app.config import settings
+from app.config import _derive_owner, settings
 from app.middleware import RequestIDLogFilter, RequestIDMiddleware
 from app.routers import (
     auth,
@@ -84,6 +84,25 @@ async def lifespan(app: FastAPI):
             "sources, so thumbnail_url on public records will not resolve. "
             "Set one unless this deployment stores private media only.",
             settings.STORAGE_BACKEND,
+        )
+    for raw in settings.FILE_MANAGER_BEARER_TOKENS.split(","):
+        entry = raw.strip()
+        if entry and ":" not in entry:
+            derived = _derive_owner(entry)
+            logger.warning(
+                "Unlabelled bearer token in FILE_MANAGER_BEARER_TOKENS fell back to "
+                "derived owner '%s'. Use 'label:secret' format to ensure explicit, "
+                "verifiable tenant identities.",
+                derived,
+            )
+    if (
+        settings.IMAGE_RENDITION_MODE == "on_demand"
+        and settings.ENABLE_IMGPROXY_CACHE.strip().lower() != "true"
+    ):
+        logger.warning(
+            "IMAGE_RENDITION_MODE=on_demand but ENABLE_IMGPROXY_CACHE is disabled: "
+            "imgproxy will serve responsive image widths without NGINX origin shielding "
+            "(proxy_cache_lock)."
         )
     # Initialize TaskIQ context for dependencies
     if not broker.is_worker_process:

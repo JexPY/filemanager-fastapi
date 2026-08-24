@@ -4,6 +4,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import aiofiles
 from fastapi import HTTPException, Request, UploadFile, status
@@ -248,8 +249,56 @@ async def resolve_playback(
     return RedirectResponse(url=signed, status_code=status.HTTP_302_FOUND)
 
 
+def _sanitize_filename(filename: str | None, max_length: int = 255) -> str | None:
+    """Sanitize client-provided filename by extracting the basename, stripping
+    null bytes/control characters, and truncating to max_length."""
+    if not filename:
+        return None
+    cleaned = "".join(c for c in filename if c.isprintable() and c != "\x00").strip()
+    if not cleaned:
+        return None
+    base = os.path.basename(cleaned)
+    if not base or base in (".", ".."):
+        return None
+    return base[:max_length]
+
+
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _filter_renditions(renditions: dict[str, str] | None, width: int | None) -> dict[str, str]:
+    if not renditions:
+        return {}
+    from app.services.renditions import get_rendition_spec
+
+    filtered: dict[str, str] = {}
+    for name, key in renditions.items():
+        spec = get_rendition_spec(name)
+        if spec and not spec.crop and width is not None and spec.width > width:
+            continue
+        filtered[name] = key
+    return filtered
+
+
+def _derive_custom_transform_url(
+    storage_key: str,
+    custom_width: int | None,
+    custom_height: int | None,
+    custom_fit: str,
+    custom_format: str | None,
+) -> str | None:
+    requests_format_change = custom_format is not None and custom_format != "webp"
+    if not (custom_width or custom_height or requests_format_change or custom_fit != "auto"):
+        return None
+
+    cw = custom_width or 0
+    ch = custom_height or 0
+    processing_options = f"rs:{custom_fit}" if not (cw or ch) else f"rs:{custom_fit}:{cw}:{ch}"
+
+    return signed_image_url(
+        storage_key, processing_options=processing_options, format=custom_format or "webp"
+    )
 
 
 def _image_response(
@@ -259,33 +308,23 @@ def _image_response(
     size_bytes: int | None,
     storage_key: str,
     renditions: dict[str, str] | None = None,
+    include_thumbnail: bool = False,
     custom_width: int | None = None,
     custom_height: int | None = None,
     custom_fit: str = "auto",
     custom_format: str | None = None,
     visibility: str = "public",
+    original_filename: str | None = None,
 ) -> dict:
-    """Shape the POST /upload/image response.
-
-    Takes the storage *key*, not a pre-resolved source URL, so it derives its
-    imgproxy URLs through the same `signed_image_url` helper as
-    `UploadRecord.to_public`.
-
-    It also mirrors that method's visibility rule: imgproxy URLs are emitted for
-    `public` uploads only. An imgproxy URL carries no ownership check and never
-    expires, so returning one for a `private` upload handed the owner a
-    permanent unauthenticated way to read media they had just marked private --
-    and it resolves, since imgproxy reads the shared volume (or a public bucket)
-    directly. `GET /files/{id}` already withheld it; this endpoint did not, so
-    the two views of the same record disagreed. A private upload is readable
-    through `GET /files/{id}/download?rendition=thumb`.
-    """
+    """Shape the POST /upload/image response."""
     if visibility == "public" and has_public_base_url():
         main_url = public_object_url(storage_key)
     else:
         main_url = public_url(f"/files/{record_id}/download")
 
-    response = {
+    filtered_renditions = _filter_renditions(renditions, width)
+
+    response: dict[str, Any] = {
         "status": "success",
         "id": record_id,
         "size_bytes": size_bytes,
@@ -293,30 +332,22 @@ def _image_response(
         "dimensions": {"width": width, "height": height},
         "url": main_url,
     }
+    if original_filename is not None:
+        response["original_filename"] = original_filename
+
     if visibility != "public":
         return response
 
-    if renditions and "thumbnail" in renditions:
-        response["thumbnail_url"] = derive_thumbnail_url(storage_key, renditions)
+    response["storage_key"] = storage_key
+    response["renditions"] = filtered_renditions
 
-    # A processed image is *always* stored as webp (image_vips.py's
-    # validate_and_strip_image encodes to .webp unconditionally), so
-    # custom_format="webp" with no width/height/fit is not a customization at
-    # all -- it's a no-op imgproxy round trip that re-fetches and re-encodes
-    # the already-webp original for zero actual change. A client (or, as
-    # observed, Swagger UI's "Try it out" form) that leaves width/height
-    # blank but still sends the form's own default format=webp used to
-    # trigger this branch and get a redundant custom URL for nothing.
-    requests_format_change = custom_format is not None and custom_format != "webp"
-    if not (custom_width or custom_height or requests_format_change or custom_fit != "auto"):
-        return response
+    if include_thumbnail or (filtered_renditions and "thumbnail" in filtered_renditions):
+        response["thumbnail_url"] = derive_thumbnail_url(storage_key, filtered_renditions or None)
 
-    cw = custom_width or 0
-    ch = custom_height or 0
-    processing_options = f"rs:{custom_fit}" if not (cw or ch) else f"rs:{custom_fit}:{cw}:{ch}"
-
-    response["custom_url"] = signed_image_url(
-        storage_key, processing_options=processing_options, format=custom_format or "webp"
+    custom_url = _derive_custom_transform_url(
+        storage_key, custom_width, custom_height, custom_fit, custom_format
     )
+    if custom_url is not None:
+        response["custom_url"] = custom_url
 
     return response

@@ -107,12 +107,15 @@ def test_b2_does_not_pick_up_another_backends_public_base_url() -> None:
     assert settings.active_public_base_url == ""
 
 
-def test_local_never_reports_a_public_base_url() -> None:
-    # Its media volume is only reachable through nginx's internal X-Accel
-    # location, so a LOCAL_PUBLIC_BASE_URL-derived link would dead-end on a 404.
-    settings = _settings(
-        STORAGE_BACKEND="local", LOCAL_PUBLIC_BASE_URL="https://local-cdn.example.com"
-    )
+def test_local_reports_public_base_url_when_configured() -> None:
+    # Local development with LOCAL_PUBLIC_BASE_URL resolves to the configured URL,
+    # served directly by nginx for public prefixes.
+    settings = _settings(STORAGE_BACKEND="local", LOCAL_PUBLIC_BASE_URL="http://localhost:9000")
+    assert settings.active_public_base_url == "http://localhost:9000"
+
+
+def test_local_without_public_base_url_resolves_to_empty() -> None:
+    settings = _settings(STORAGE_BACKEND="local", LOCAL_PUBLIC_BASE_URL="")
     assert settings.active_public_base_url == ""
 
 
@@ -145,4 +148,24 @@ def test_has_public_base_url_is_false_for_b2_without_one(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(live_settings, "STORAGE_BACKEND", "b2")
     monkeypatch.setattr(live_settings, "B2_PUBLIC_BASE_URL", "")
+    assert has_public_base_url() is False
+
+
+def test_has_public_base_url_is_true_for_local_with_configured_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import settings as live_settings
+
+    monkeypatch.setattr(live_settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(live_settings, "LOCAL_PUBLIC_BASE_URL", "http://localhost:9000")
+    assert has_public_base_url() is True
+
+
+def test_has_public_base_url_is_false_for_local_without_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import settings as live_settings
+
+    monkeypatch.setattr(live_settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(live_settings, "LOCAL_PUBLIC_BASE_URL", "")
     assert has_public_base_url() is False

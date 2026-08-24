@@ -131,8 +131,9 @@ async def test_upload_image_no_custom_url_for_a_no_op_format_request(
 
 async def test_to_public_url_is_the_canonical_route_for_every_kind(
     fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`url` is the same shape for an image and a video: the app's own route.
+    """Without a public base URL, `url` is the app's own download route.
 
     It is the one URL that is permanent (a backend switch, a CDN change, or a
     visibility flip do not touch it) and the one that resolves for a private
@@ -140,6 +141,8 @@ async def test_to_public_url_is_the_canonical_route_for_every_kind(
     they are never the canonical address, because an imgproxy URL is an
     unexpiring bearer capability with no ownership check.
     """
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "")
     image = await fake_metadata.create(
         owner=TEST_OWNER,
         kind="image",
@@ -150,7 +153,8 @@ async def test_to_public_url_is_the_canonical_route_for_every_kind(
         visibility="public",
     )
     public_data = image.to_public()
-    assert "storage_key" not in public_data
+    assert public_data["storage_key"] == "images/test_to_public.webp"
+    assert "renditions" in public_data
     assert "content_hash" not in public_data
     assert public_data["url"].endswith(f"/files/{image.id}/download")
     assert "/rs:auto/" not in public_data["url"]
@@ -187,6 +191,27 @@ async def test_to_public_url_is_the_canonical_route_for_every_kind(
     assert video_data["poster_upload_id"] == poster.id
 
 
+async def test_to_public_url_uses_direct_object_url_when_public_base_configured(
+    fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(settings, "LOCAL_PUBLIC_BASE_URL", "http://localhost:9000")
+    image = await fake_metadata.create(
+        owner=TEST_OWNER,
+        kind="image",
+        storage_key="images/test_direct.webp",
+        content_type="image/webp",
+        size_bytes=123,
+        status="ready",
+        visibility="public",
+        renditions={"thumbnail": "images/test_direct_t300.webp"},
+    )
+    public_data = image.to_public()
+    assert public_data["url"] == "http://localhost:9000/images/test_direct.webp"
+    assert public_data["thumbnail_url"] == "http://localhost:9000/images/test_direct_t300.webp"
+
+
 async def test_to_public_withholds_accelerator_urls_from_private_records(
     fake_metadata: InMemoryMetadataStore,
 ) -> None:
@@ -208,3 +233,5 @@ async def test_to_public_withholds_accelerator_urls_from_private_records(
 
     assert data["url"].endswith(f"/files/{private.id}/download")
     assert "thumbnail_url" not in data
+    assert "storage_key" not in data
+    assert "renditions" not in data
