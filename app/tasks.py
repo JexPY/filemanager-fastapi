@@ -364,6 +364,8 @@ async def _extract_and_store_poster(
                 width=processed.width,
                 height=processed.height,
                 visibility=visibility,
+                dominant_color=processed.dominant_color,
+                blur_data_url=processed.blur_data_url,
             )
         except MetadataError:
             # The object already exists in storage; a raised (not just a

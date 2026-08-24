@@ -3,6 +3,7 @@ import hashlib
 import os
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -301,6 +302,14 @@ def _derive_custom_transform_url(
     )
 
 
+@dataclass(frozen=True)
+class CustomImageParams:
+    width: int | None = None
+    height: int | None = None
+    fit: str = "auto"
+    format: str | None = None
+
+
 def _image_response(
     record_id: str,
     width: int | None,
@@ -309,12 +318,10 @@ def _image_response(
     storage_key: str,
     renditions: dict[str, str] | None = None,
     include_thumbnail: bool = False,
-    custom_width: int | None = None,
-    custom_height: int | None = None,
-    custom_fit: str = "auto",
-    custom_format: str | None = None,
+    custom_params: CustomImageParams | None = None,
     visibility: str = "public",
     original_filename: str | None = None,
+    placeholders: tuple[str | None, str | None] | None = None,
 ) -> dict:
     """Shape the POST /upload/image response."""
     if visibility == "public" and has_public_base_url():
@@ -335,6 +342,13 @@ def _image_response(
     if original_filename is not None:
         response["original_filename"] = original_filename
 
+    if placeholders:
+        dominant_color, blur_data_url = placeholders
+        if dominant_color is not None:
+            response["dominant_color"] = dominant_color
+        if blur_data_url is not None:
+            response["blur_data_url"] = blur_data_url
+
     if visibility != "public":
         return response
 
@@ -344,10 +358,15 @@ def _image_response(
     if include_thumbnail or (filtered_renditions and "thumbnail" in filtered_renditions):
         response["thumbnail_url"] = derive_thumbnail_url(storage_key, filtered_renditions or None)
 
-    custom_url = _derive_custom_transform_url(
-        storage_key, custom_width, custom_height, custom_fit, custom_format
-    )
-    if custom_url is not None:
-        response["custom_url"] = custom_url
+    if custom_params is not None:
+        custom_url = _derive_custom_transform_url(
+            storage_key,
+            custom_params.width,
+            custom_params.height,
+            custom_params.fit,
+            custom_params.format,
+        )
+        if custom_url is not None:
+            response["custom_url"] = custom_url
 
     return response

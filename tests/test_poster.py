@@ -67,6 +67,10 @@ async def test_generate_poster_creates_linked_webp_image_record(
     assert not poster.renditions
     assert not any("posters/" in k and "_t300" in k for k in fake_storage.objects)
     assert not any("posters/" in k and "_m960" in k for k in fake_storage.objects)
+    assert poster.dominant_color is not None
+    assert poster.dominant_color.startswith("#")
+    assert poster.blur_data_url is not None
+    assert poster.blur_data_url.startswith("data:image/webp;base64,")
 
     # The video row now points at its poster.
     video = await fake_metadata.get(video_id, OWNER)

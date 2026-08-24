@@ -165,6 +165,8 @@ class InMemoryMetadataStore(MetadataStore):
     ) -> UploadRecord:
         callback_url = kwargs.get("callback_url")
         renditions = kwargs.get("renditions")
+        dominant_color = kwargs.get("dominant_color")
+        blur_data_url = kwargs.get("blur_data_url")
         self._counter += 1
         upload_id = f"rec-{self._counter:08d}"
         now = datetime.now(UTC)
@@ -194,6 +196,8 @@ class InMemoryMetadataStore(MetadataStore):
             created_at=now,
             updated_at=now,
             renditions=renditions,
+            dominant_color=dominant_color,
+            blur_data_url=blur_data_url,
         )
         self.records[upload_id] = record
         self._order.append(upload_id)

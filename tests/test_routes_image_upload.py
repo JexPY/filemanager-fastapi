@@ -144,3 +144,65 @@ async def test_corrupt_bytes_upload_is_rejected(
         files={"file": ("fake.png", fixture_bytes("corrupt.bin"), "image/png")},
     )
     assert resp.status_code == 400
+
+
+async def test_image_upload_carries_placeholders(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    resp = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "dominant_color" in body
+    assert body["dominant_color"].startswith("#")
+    assert "blur_data_url" in body
+    assert body["blur_data_url"].startswith("data:image/webp;base64,")
+
+
+async def test_private_image_upload_carries_placeholders(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    """Private uploads withhold storage_key/renditions/accelerators but expose placeholders."""
+    resp = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        data={"visibility": "private"},
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "storage_key" not in body
+    assert "renditions" not in body
+    assert "thumbnail_url" not in body
+    assert "dominant_color" in body
+    assert body["dominant_color"].startswith("#")
+    assert "blur_data_url" in body
+    assert body["blur_data_url"].startswith("data:image/webp;base64,")
+
+
+async def test_dedup_image_upload_carries_placeholders(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    """A deduplicated image upload echoes placeholders from the existing record."""
+    resp1 = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp1.status_code == 200
+    body1 = resp1.json()
+
+    resp2 = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp2.status_code == 200
+    body2 = resp2.json()
+
+    assert body2["id"] == body1["id"]
+    assert body2["dominant_color"] == body1["dominant_color"]
+    assert body2["blur_data_url"] == body1["blur_data_url"]

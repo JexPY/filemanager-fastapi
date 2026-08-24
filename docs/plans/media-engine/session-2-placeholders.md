@@ -74,11 +74,21 @@ def _extract_placeholders(image: pyvips.Image) -> tuple[str, str]:
   rounded, formatted `f"#{r:02x}{g:02x}{b:02x}"`. Session 1's `colourspace`
   normalization guarantees ≥3 bands, so a greyscale input is already expanded;
   add a defensive guard anyway if band count < 3.
-- **Blur tile:** `image.thumbnail_image(16, height=16, size=pyvips.Size.DOWN,
-  crop=pyvips.Interesting.NONE)` → `write_to_buffer(".webp", Q=20, strip=True,
+- **Blur tile:** `pyvips.Image.thumbnail_buffer(<encoded output>, 16, height=16,
+  size=pyvips.Size.DOWN)` → `write_to_buffer(".webp", Q=20, strip=True,
   effort=0)` → `base64.b64encode` → `f"data:image/webp;base64,{b64}"`.
   `effort=0` deliberately: at 16px the file-size difference between effort 0
   and 6 is a handful of bytes and the point is that this is nearly free.
+
+> **Corrected after implementation.** This item originally said to extract from
+> the normalized pyvips image *before* the max-dim resize. That was wrong on both
+> counts and the measurements are in `CLAUDE.md`: extract from the **encoded
+> output buffer**, after `write_to_buffer` and therefore after the
+> `MAX_IMAGE_PIXELS` guard. Extracting from the source forces a second
+> full-resolution decode (591ms on a 24.5MP photo vs 15.8ms), and sitting above
+> the pixel guard lets a decompression bomb decode fully before rejection
+> (256ms vs 0.3ms). Beware of measuring this on a `.copy_memory()`-materialized
+> image -- that hides the decode and reports ~1.6ms for a 591ms operation.
 
 Add both to the `ProcessedImage` dataclass:
 

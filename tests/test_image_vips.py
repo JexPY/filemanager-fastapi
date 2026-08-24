@@ -1,10 +1,16 @@
+import base64
+import re
+import time
+
 import pytest
 import pyvips
 
 from app.config import settings
+from app.services import image_vips
 from app.services.image_vips import (
     ImageValidationError,
     ProcessedImage,
+    _extract_placeholders,
     sniff_format,
     validate_and_strip_image,
 )
@@ -174,3 +180,106 @@ def test_corrupt_icc_profile_does_not_fail_upload(monkeypatch: pytest.MonkeyPatc
     assert result.content_type == "image/webp"
     assert result.width == 40
     assert result.height == 40
+
+
+def test_placeholders_extracted_and_bounded() -> None:
+    """Every ready image extracts dominant_color and blur_data_url within budget bounds."""
+    raw = fixture_bytes("tiny.png")
+    result = validate_and_strip_image(raw)
+
+    # 1. Dominant colour matches 7-char hex string #rrggbb
+    assert result.dominant_color is not None
+    assert re.match(r"^#[0-9a-f]{6}$", result.dominant_color)
+
+    # 2. blur_data_url starts with data URI scheme
+    assert result.blur_data_url is not None
+    assert result.blur_data_url.startswith("data:image/webp;base64,")
+
+    # 3. Decoded payload is a valid WebP image with long edge <= 16px
+    b64_payload = result.blur_data_url.removeprefix("data:image/webp;base64,")
+    decoded_bytes = base64.b64decode(b64_payload)
+    assert decoded_bytes[:4] == b"RIFF"
+    assert decoded_bytes[8:12] == b"WEBP"
+
+    tile_image = pyvips.Image.new_from_buffer(decoded_bytes, "")
+    assert tile_image.width <= 16
+    assert tile_image.height <= 16
+
+    # 4. Payload budget tripwire: <= 1200 bytes
+    assert len(result.blur_data_url) <= 1200
+
+
+def test_dominant_color_accuracy_on_known_solid_color() -> None:
+    """A known solid RGB colour produces approximately that hex colour."""
+    # Synthesize a solid colour image: RGB (180, 50, 100) => #b43264
+    img = pyvips.Image.black(32, 32, bands=3).copy(interpretation="srgb") + [180, 50, 100]
+    png_bytes = img.write_to_buffer(".png")
+
+    result = validate_and_strip_image(png_bytes)
+    assert result.dominant_color is not None
+
+    r = int(result.dominant_color[1:3], 16)
+    g = int(result.dominant_color[3:5], 16)
+    b = int(result.dominant_color[5:7], 16)
+
+    # Separate atomic assertions per channel with tight tolerance
+    assert abs(r - 180) <= 2
+    assert abs(g - 50) <= 2
+    assert abs(b - 100) <= 2
+
+
+def test_placeholder_alpha_flattening() -> None:
+    """Transparent PNG is flattened on white before computing dominant colour and blur tile."""
+    # Transparent image: RGB (0, 0, 0) with alpha 0 => flattened on white (255, 255, 255) => #ffffff
+    transparent_img = pyvips.Image.black(32, 32, bands=4)
+    png_bytes = transparent_img.write_to_buffer(".png")
+
+    result = validate_and_strip_image(png_bytes)
+    assert result.dominant_color == "#ffffff"
+    assert result.blur_data_url is not None
+    assert result.blur_data_url.startswith("data:image/webp;base64,")
+
+
+def test_placeholder_extraction_performance() -> None:
+    """Extraction from the encoded output stays well inside the 15ms budget.
+
+    Measured from real encoded bytes on purpose. An earlier version of this test
+    called `.copy_memory()` on a pyvips image first, which pre-materialized the
+    pixels and hid the decode that dominates the real cost -- it reported 1.6ms
+    while a genuine 24.5MP photo took 591ms.
+    """
+    img = pyvips.Image.black(1920, 1280, bands=3).copy(interpretation="srgb") + [120, 140, 160]
+    encoded = img.write_to_buffer(".webp", Q=85, strip=True, effort=4)
+
+    _extract_placeholders(encoded)  # warm up libvips
+
+    t0 = time.perf_counter()
+    iterations = 10
+    for _ in range(iterations):
+        _extract_placeholders(encoded)
+    duration_per_call_ms = ((time.perf_counter() - t0) / iterations) * 1000
+
+    assert duration_per_call_ms < 15.0
+
+
+def test_oversized_image_rejected_before_any_placeholder_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MAX_IMAGE_PIXELS guard must fire before any pixel work happens.
+
+    pyvips is lazy, so whichever call forces evaluation first pays for a full
+    decode. When placeholder extraction sat above this guard, a 36MP
+    decompression bomb was fully decoded before being rejected -- 256ms versus
+    0.5ms. Asserting on call ordering rather than elapsed time keeps this
+    deterministic on a loaded CI box.
+    """
+
+    def _fail(*args: object, **kwargs: object) -> tuple[str, str]:
+        raise AssertionError("placeholder extraction ran before the pixel-count guard")
+
+    monkeypatch.setattr(settings, "MAX_IMAGE_PIXELS", 10)  # tiny.png is 8x8 = 64 pixels
+    monkeypatch.setattr(image_vips, "_extract_placeholders", _fail)
+    raw = fixture_bytes("tiny.png")
+
+    with pytest.raises(ImageValidationError, match="exceed"):
+        validate_and_strip_image(raw)

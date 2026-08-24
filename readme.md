@@ -488,6 +488,8 @@ Retrieve record details via `GET /files/{id}`:
   "webhook_last_error": null,
   "webhook_updated_at": null,
   "visibility": "public",
+  "dominant_color": "#1e293b",
+  "blur_data_url": "data:image/webp;base64,UklGRl...",
   "url": "https://cdn.example.com/images/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95.webp",
   "thumbnail_url": "https://cdn.example.com/images/0f1c2b7a5e4d4a9c8f2b1d6e3a7c0b95_t300.webp",
   "created_at": "2026-08-15T09:11:02+00:00",
@@ -496,6 +498,7 @@ Retrieve record details via `GET /files/{id}`:
 ```
 
 - **`storage_key` & `renditions`:** Raw relative object keys, allowing consumers to construct URLs as `{MEDIA_BASE_URL}/{key}` without API calls on page renders (resolve-once).
+- **`dominant_color` & `blur_data_url`:** Lightweight LQIP placeholders exposed on all ready images regardless of visibility.
 - **`url`:** Direct CDN URL when a public base URL is configured, or canonical `/files/{id}/download` on local storage or private records.
 - **`thumbnail_url` / `poster_url`:** Public-only accelerators (withheld on private records).
 - **`GET /files`:** Returns paginated records: `{"files": [...], "total_count": N, "limit": L, "offset": O}`.

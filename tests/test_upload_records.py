@@ -37,6 +37,10 @@ async def test_image_upload_creates_a_ready_record(
     assert record.status == "ready"
     assert record.storage_key.startswith("images/")
     assert record.content_type == "image/webp"
+    assert record.dominant_color is not None
+    assert record.blur_data_url is not None
+    assert body["dominant_color"] == record.dominant_color
+    assert body["blur_data_url"] == record.blur_data_url
 
 
 async def test_video_upload_creates_a_processing_record_with_task_id(

@@ -137,3 +137,36 @@ async def test_get_requires_auth(
 ) -> None:
     record = await _seed(fake_metadata, OWNER, "image", "images/a.webp")
     assert (await client.get(f"/files/{record.id}")).status_code == 401
+
+
+async def test_list_and_get_include_placeholders(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+) -> None:
+    rec = await fake_metadata.create(
+        owner=OWNER,
+        kind="image",
+        storage_key="images/ph.webp",
+        content_type="image/webp",
+        size_bytes=10,
+        status="ready",
+        visibility="public",
+        dominant_color="#1e293b",
+        blur_data_url="data:image/webp;base64,UklGRl...",
+    )
+    # Test GET /files/{id}
+    resp = await client.get(f"/files/{rec.id}", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["dominant_color"] == "#1e293b"
+    assert body["blur_data_url"] == "data:image/webp;base64,UklGRl..."
+
+    # Test GET /files
+    list_resp = await client.get("/files", headers=auth_headers)
+    assert list_resp.status_code == 200
+    files = list_resp.json()["files"]
+    target = next((f for f in files if f["id"] == rec.id), None)
+    assert target is not None
+    assert target["dominant_color"] == "#1e293b"
+    assert target["blur_data_url"] == "data:image/webp;base64,UklGRl..."

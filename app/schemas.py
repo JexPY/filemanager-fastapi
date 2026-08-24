@@ -49,6 +49,12 @@ _CUSTOM_URL_DESC = (
     "width/height/fit/format; present only when custom transform parameters were "
     "supplied on a public upload"
 )
+_DOMINANT_COLOR_DESC = (
+    "Average dominant colour of the image formatted as a 7-character hex string (e.g. #1e293b)"
+)
+_BLUR_DATA_URL_DESC = (
+    "16px WebP encoded as a data:image/webp;base64,... URI for blurred image placeholder preview"
+)
 
 
 class ImageDimensions(BaseModel):
@@ -71,6 +77,8 @@ class _BaseImageUploadResponse(BaseModel):
     url: str | None = Field(default=None, description=_URL_DESC)
     thumbnail_url: str | None = Field(default=None, description=_THUMBNAIL_URL_DESC)
     custom_url: str | None = Field(default=None, description=_CUSTOM_URL_DESC)
+    dominant_color: str | None = Field(default=None, description=_DOMINANT_COLOR_DESC)
+    blur_data_url: str | None = Field(default=None, description=_BLUR_DATA_URL_DESC)
 
 
 class ImageUploadResponse(_BaseImageUploadResponse):
@@ -237,6 +245,8 @@ class FileRecord(BaseModel):
             "is configured, otherwise signed imgproxy URL. Public records only."
         ),
     )
+    dominant_color: str | None = Field(default=None, description=_DOMINANT_COLOR_DESC)
+    blur_data_url: str | None = Field(default=None, description=_BLUR_DATA_URL_DESC)
     created_at: str = Field(description="ISO-8601 timestamp")
     updated_at: str = Field(description="ISO-8601 timestamp")
 
