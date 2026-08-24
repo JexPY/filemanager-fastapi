@@ -17,6 +17,18 @@ logger = logging.getLogger(__name__)
 # Sessions 3 and 4 bump this constant.
 IMAGE_PIPELINE_VERSION = 3
 
+# Long edge of the throwaway thumbnail used by the lossless entropy probe.
+_LOSSLESS_PROBE_SIDE = 512
+
+# Below this source pixel count the entropy probe is skipped entirely. Two
+# reasons, and the first is a correctness bug the guard has without it: at
+# small sizes WebP's fixed container overhead (~30 bytes) dominates the
+# bytes-per-pixel ratio, so an 8x8 image scores ~0.5 and would be rejected
+# whatever its content. The second is that the guard exists to prevent
+# expensive encodes, and a sub-megapixel image cannot produce one -- a 1MP
+# photograph measured 375ms and 0.4MB at lossless, which is fine.
+_LOSSLESS_GUARD_MIN_PIXELS = 1_000_000
+
 
 @dataclass(frozen=True)
 class _EncodeParams:
@@ -52,6 +64,16 @@ _SIGNATURES: dict[str, tuple[bytes, ...]] = {
 class ImageValidationError(Exception):
     """Any client-input image problem: unsupported format, oversized
     dimensions, or a corrupt/truncated file pyvips can't decode."""
+
+
+class LosslessUnsuitableError(ImageValidationError):
+    """`optimization=lossless` was requested for content it is not for.
+
+    A subclass so every existing `except ImageValidationError` still catches
+    it, but distinguishable at the route so the caller can be told which
+    parameter to change. The message the route emits is a fixed constant, not
+    a stringified exception -- no internal detail reaches the client.
+    """
 
 
 def sniff_format(data: bytes) -> str | None:
@@ -112,6 +134,37 @@ def _extract_placeholders(encoded: bytes) -> tuple[str, str]:
     blur_data_url = f"data:image/webp;base64,{b64}"
 
     return dominant_color, blur_data_url
+
+
+def _lossless_probe_bytes_per_pixel(image: pyvips.Image) -> float:
+    """Lossless-encode a 512px thumbnail and return its bytes-per-pixel.
+
+    A cheap stand-in for content entropy, which is what actually drives
+    lossless cost -- see the settings comment on
+    LOSSLESS_MAX_PROBE_BYTES_PER_PIXEL for the measurements. `effort=0`
+    because the probe only needs a size signal, not a small file.
+    """
+    small = image.thumbnail_image(
+        _LOSSLESS_PROBE_SIDE,
+        height=_LOSSLESS_PROBE_SIDE,
+        size=pyvips.Size.DOWN,
+        crop=pyvips.Interesting.NONE,
+    )
+    buf = small.write_to_buffer(".webp", lossless=True, Q=75, strip=True, effort=0)
+    return len(buf) / max(small.width * small.height, 1)
+
+
+def _reject_unsuitable_lossless(image: pyvips.Image) -> None:
+    """Raise if this image is photographic enough that lossless is a mistake."""
+    if image.width * image.height < _LOSSLESS_GUARD_MIN_PIXELS:
+        return
+    bpp = _lossless_probe_bytes_per_pixel(image)
+    limit = settings.LOSSLESS_MAX_PROBE_BYTES_PER_PIXEL
+    if bpp > limit:
+        raise LosslessUnsuitableError(
+            f"lossless probe {bpp:.4f} bytes/px exceeds the {limit} limit "
+            f"(photographic content -- use optimization=quality)"
+        )
 
 
 def _generate_materialized_renditions(image: pyvips.Image, width: int) -> dict[str, bytes]:
@@ -220,6 +273,12 @@ def validate_and_strip_image(
         height = image.height
 
     if params.lossless:
+        # Materialize once: the probe and the encode are two independent
+        # pyvips sinks, and without this each would force its own full
+        # decode (the same trap documented on _extract_placeholders). Bounded
+        # by max_dim=4096, so at most ~50MB for this branch only.
+        image = image.copy_memory()
+        _reject_unsuitable_lossless(image)
         optimized_buffer = image.write_to_buffer(
             ".webp",
             Q=params.q,
@@ -227,6 +286,13 @@ def validate_and_strip_image(
             effort=params.effort,
             lossless=True,
         )
+        if len(optimized_buffer) > settings.LOSSLESS_MAX_OUTPUT_BYTES:
+            # Backstop for content the probe misjudged. The CPU is already
+            # spent, but an unbounded object never reaches storage.
+            raise LosslessUnsuitableError(
+                f"lossless output {len(optimized_buffer)} bytes exceeds the "
+                f"{settings.LOSSLESS_MAX_OUTPUT_BYTES}-byte limit"
+            )
     else:
         optimized_buffer = image.write_to_buffer(
             ".webp",

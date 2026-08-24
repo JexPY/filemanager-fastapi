@@ -9,6 +9,7 @@ from app.config import settings
 from app.services import image_vips
 from app.services.image_vips import (
     ImageValidationError,
+    LosslessUnsuitableError,
     ProcessedImage,
     _extract_placeholders,
     sniff_format,
@@ -377,3 +378,72 @@ def test_lossless_renditions_stay_lossy() -> None:
     ).write_to_buffer(".webp", Q=75, strip=True, effort=4, lossless=True)
 
     assert result.renditions["thumbnail"] != lossless_thumb
+
+
+def _flat_graphic(width: int = 1100, height: int = 1000) -> bytes:
+    """Screenshot-like content: flat fills and hard edges. What lossless is for."""
+    im = (pyvips.Image.black(width, height, bands=3) + [246, 247, 249]).cast("uchar")
+    bar = (pyvips.Image.black(int(width * 0.6), 18, bands=3) + [40, 44, 52]).cast("uchar")
+    for i in range(8):
+        im = im.insert(bar, 20, 20 + i * 40)
+    return im.copy(interpretation="srgb").write_to_buffer(".png")
+
+
+def _photographic(width: int = 1100, height: int = 1000) -> bytes:
+    """High-entropy content standing in for a photograph.
+
+    Sized just over `_LOSSLESS_GUARD_MIN_PIXELS` on purpose: below that floor
+    the probe is skipped, because WebP's fixed container overhead dominates
+    bytes-per-pixel at small sizes and would reject anything.
+    """
+    noise = pyvips.Image.gaussnoise(width, height, mean=128, sigma=60)
+    im = noise.bandjoin([noise.rot(pyvips.Angle.D180), noise * 0.8]).cast("uchar")
+    return im.copy(interpretation="srgb").write_to_buffer(".png")
+
+
+def test_lossless_accepts_flat_graphic_content() -> None:
+    """The entropy probe must not reject the content lossless exists for."""
+    result = validate_and_strip_image(_flat_graphic(), "lossless")
+    assert result.content_type == "image/webp"
+    assert result.buffer[:4] == b"RIFF"
+
+
+def test_lossless_rejects_photographic_content() -> None:
+    """Lossless on photographic content is a mistake, and an expensive one.
+
+    Measured: a 12.2MP photograph takes ~5.5s and produces ~6.1MB, while a
+    *larger* 14.7MP flat-colour screenshot takes 262ms and produces 5KB. Cost
+    tracks content entropy, not pixel count, so the guard probes entropy
+    rather than capping dimensions -- a pixel cap would block the intended use
+    and permit the abusive one.
+    """
+    raw = _photographic()
+
+    with pytest.raises(LosslessUnsuitableError, match="bytes/px"):
+        validate_and_strip_image(raw, "lossless")
+
+
+def test_lossless_rejection_is_an_image_validation_error() -> None:
+    """Subclassing matters: every existing `except ImageValidationError`
+    (including the bulk-upload handler) must keep catching this."""
+    raw = _photographic()
+
+    with pytest.raises(ImageValidationError):
+        validate_and_strip_image(raw, "lossless")
+
+
+def test_photographic_content_is_fine_on_lossy_profiles() -> None:
+    """The guard is scoped to lossless -- it must not reject normal uploads."""
+    raw = _photographic()
+    result = validate_and_strip_image(raw, "balanced")
+    assert result.content_type == "image/webp"
+
+
+def test_lossless_output_size_backstop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Content the probe lets through is still bounded by an output-size cap."""
+    monkeypatch.setattr(settings, "LOSSLESS_MAX_PROBE_BYTES_PER_PIXEL", 99.0)  # disable the probe
+    monkeypatch.setattr(settings, "LOSSLESS_MAX_OUTPUT_BYTES", 1024)
+    raw = _photographic()
+
+    with pytest.raises(LosslessUnsuitableError, match="exceeds"):
+        validate_and_strip_image(raw, "lossless")

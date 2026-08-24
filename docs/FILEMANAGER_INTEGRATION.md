@@ -85,6 +85,8 @@ Images can be uploaded with four optimization profiles:
 >
 > On the content it is meant for, it wins decisively in both directions: a 1920×1080 flat-colour graphic came out **16.7× smaller and 5.4× faster** than `balanced`.
 >
+> **Photographic uploads are rejected with `400`, not silently encoded.** A cheap entropy probe (a 512px lossless test encode) runs before the real one; photographic content scores far above the threshold and the request fails with a message naming `optimization=quality` as the alternative. Flat-colour graphics are unaffected — a 5K screenshot still encodes in ~200ms. The probe is skipped below 1 MP, where WebP's fixed container overhead would make the ratio meaningless.
+>
 > Materialized renditions (`thumbnail`, `w400`, etc.) always remain lossy even for lossless uploads to ensure responsive delivery remains compact.
 
 ---
