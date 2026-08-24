@@ -83,8 +83,9 @@ DETAIL_STORAGE_UNAVAILABLE = "Storage backend unavailable"
 # Static and deliberately specific: this names the caller's own parameter,
 # leaks nothing internal, and a generic 400 would leave them no way to act.
 DETAIL_LOSSLESS_UNSUITABLE = (
-    "optimization=lossless is for flat-colour graphics (diagrams, screenshots, "
-    "logos); this image is photographic -- use optimization=quality"
+    "optimization=lossless would produce an oversized object for this image; "
+    "it is intended for flat-colour graphics (diagrams, screenshots, logos) -- "
+    "use optimization=quality"
 )
 DETAIL_UPLOAD_FAILED = "Upload could not be completed"
 

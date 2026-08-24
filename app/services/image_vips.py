@@ -20,15 +20,6 @@ IMAGE_PIPELINE_VERSION = 3
 # Long edge of the throwaway thumbnail used by the lossless entropy probe.
 _LOSSLESS_PROBE_SIDE = 512
 
-# Below this source pixel count the entropy probe is skipped entirely. Two
-# reasons, and the first is a correctness bug the guard has without it: at
-# small sizes WebP's fixed container overhead (~30 bytes) dominates the
-# bytes-per-pixel ratio, so an 8x8 image scores ~0.5 and would be rejected
-# whatever its content. The second is that the guard exists to prevent
-# expensive encodes, and a sub-megapixel image cannot produce one -- a 1MP
-# photograph measured 375ms and 0.4MB at lossless, which is fine.
-_LOSSLESS_GUARD_MIN_PIXELS = 1_000_000
-
 
 @dataclass(frozen=True)
 class _EncodeParams:
@@ -155,15 +146,28 @@ def _lossless_probe_bytes_per_pixel(image: pyvips.Image) -> float:
 
 
 def _reject_unsuitable_lossless(image: pyvips.Image) -> None:
-    """Raise if this image is photographic enough that lossless is a mistake."""
-    if image.width * image.height < _LOSSLESS_GUARD_MIN_PIXELS:
-        return
-    bpp = _lossless_probe_bytes_per_pixel(image)
-    limit = settings.LOSSLESS_MAX_PROBE_BYTES_PER_PIXEL
-    if bpp > limit:
+    """Reject a lossless encode whose projected output would be oversized.
+
+    `_lossless_probe_bytes_per_pixel` is a content signal that barely moves
+    with image size (measured 1.265-1.297 across 0.25MP-12MP crops of the same
+    photograph), so multiplying it by the real pixel count projects the actual
+    output within about 1.5x -- enough to decide before paying for the encode.
+
+    Projecting a size rather than thresholding the ratio matters: the ratio
+    alone says "this is photographic", which is not by itself a problem. A 1MP
+    photograph encodes losslessly in 389ms to 1.0MB, which is entirely
+    affordable and should be allowed; a 12MP one takes 5.4s and is not. It also
+    removes what would otherwise need an arbitrary small-image exemption --
+    WebP's ~30-byte container overhead makes the ratio meaningless at tiny
+    sizes (an 8x8 image scores ~0.5), but 0.5 * 64 pixels projects to 30 bytes,
+    so small images pass on the projection without a special case.
+    """
+    projected = _lossless_probe_bytes_per_pixel(image) * image.width * image.height
+    limit = settings.LOSSLESS_MAX_OUTPUT_BYTES
+    if projected > limit:
         raise LosslessUnsuitableError(
-            f"lossless probe {bpp:.4f} bytes/px exceeds the {limit} limit "
-            f"(photographic content -- use optimization=quality)"
+            f"lossless would produce roughly {projected / 1e6:.1f}MB, over the "
+            f"{limit / 1e6:.1f}MB limit (use optimization=quality)"
         )
 
 

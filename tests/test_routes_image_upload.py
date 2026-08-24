@@ -259,7 +259,7 @@ async def test_upload_image_rejects_unsuitable_lossless(
 ) -> None:
     import pyvips
 
-    noise = pyvips.Image.gaussnoise(1100, 1000, mean=128, sigma=60)
+    noise = pyvips.Image.gaussnoise(2600, 2600, mean=128, sigma=60)
     photo = noise.bandjoin([noise.rot(pyvips.Angle.D180), noise * 0.8]).cast("uchar")
     raw_photo = photo.copy(interpretation="srgb").write_to_buffer(".png")
 
@@ -270,7 +270,7 @@ async def test_upload_image_rejects_unsuitable_lossless(
         files={"file": ("photo.png", raw_photo, "image/png")},
     )
     assert resp.status_code == 400
-    assert "photographic" in resp.json()["detail"]
+    assert "oversized" in resp.json()["detail"]
 
 
 async def test_upload_images_bulk_handles_unsuitable_lossless(
@@ -278,7 +278,7 @@ async def test_upload_images_bulk_handles_unsuitable_lossless(
 ) -> None:
     import pyvips
 
-    noise = pyvips.Image.gaussnoise(1100, 1000, mean=128, sigma=60)
+    noise = pyvips.Image.gaussnoise(2600, 2600, mean=128, sigma=60)
     photo = noise.bandjoin([noise.rot(pyvips.Angle.D180), noise * 0.8]).cast("uchar")
     raw_photo = photo.copy(interpretation="srgb").write_to_buffer(".png")
 
@@ -295,6 +295,5 @@ async def test_upload_images_bulk_handles_unsuitable_lossless(
     body = resp.json()
     assert body["succeeded"] == 1
     assert body["failed"] == 1
-    assert "photographic" in body["items"][0]["message"]
+    assert "oversized" in body["items"][0]["message"]
     assert body["items"][1]["status"] == "success"
-

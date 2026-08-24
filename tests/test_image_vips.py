@@ -389,13 +389,8 @@ def _flat_graphic(width: int = 1100, height: int = 1000) -> bytes:
     return im.copy(interpretation="srgb").write_to_buffer(".png")
 
 
-def _photographic(width: int = 1100, height: int = 1000) -> bytes:
-    """High-entropy content standing in for a photograph.
-
-    Sized just over `_LOSSLESS_GUARD_MIN_PIXELS` on purpose: below that floor
-    the probe is skipped, because WebP's fixed container overhead dominates
-    bytes-per-pixel at small sizes and would reject anything.
-    """
+def _photographic(width: int = 1000, height: int = 1000) -> bytes:
+    """High-entropy content standing in for a photograph."""
     noise = pyvips.Image.gaussnoise(width, height, mean=128, sigma=60)
     im = noise.bandjoin([noise.rot(pyvips.Angle.D180), noise * 0.8]).cast("uchar")
     return im.copy(interpretation="srgb").write_to_buffer(".png")
@@ -408,42 +403,59 @@ def test_lossless_accepts_flat_graphic_content() -> None:
     assert result.buffer[:4] == b"RIFF"
 
 
-def test_lossless_rejects_photographic_content() -> None:
-    """Lossless on photographic content is a mistake, and an expensive one.
+def test_lossless_rejects_oversized_photographic_content() -> None:
+    """A large photograph projects to an oversized object and is rejected.
 
     Measured: a 12.2MP photograph takes ~5.5s and produces ~6.1MB, while a
     *larger* 14.7MP flat-colour screenshot takes 262ms and produces 5KB. Cost
-    tracks content entropy, not pixel count, so the guard probes entropy
-    rather than capping dimensions -- a pixel cap would block the intended use
-    and permit the abusive one.
+    tracks content, not pixel count, so the guard projects the output size from
+    a cheap entropy probe rather than capping dimensions -- a dimension cap
+    would block the intended use and permit the abusive one.
     """
-    raw = _photographic()
+    raw = _photographic(2600, 2600)  # ~6.8MP: projects well past the 8MB limit
 
-    with pytest.raises(LosslessUnsuitableError, match="bytes/px"):
+    with pytest.raises(LosslessUnsuitableError, match="would produce"):
         validate_and_strip_image(raw, "lossless")
+
+
+def test_lossless_allows_small_photographic_content() -> None:
+    """Being photographic is not itself disqualifying -- only being expensive is.
+
+    A 1MP photograph encodes losslessly in ~389ms to ~1.0MB. That is
+    affordable, the caller asked for it explicitly, and rejecting it would make
+    the guard do something its purpose does not justify.
+    """
+    result = validate_and_strip_image(_photographic(1000, 1000), "lossless")
+    assert result.content_type == "image/webp"
+    assert result.buffer[:4] == b"RIFF"
+
+
+def test_tiny_image_passes_lossless_guard() -> None:
+    """WebP's fixed container overhead makes bytes-per-pixel meaningless at
+    tiny sizes (an 8x8 scores ~0.5, similar to a photograph). Projecting a
+    size rather than thresholding the ratio handles this with no special
+    case: 0.5 * 64 pixels is 30 bytes."""
+    result = validate_and_strip_image(fixture_bytes("tiny.png"), "lossless")
+    assert result.content_type == "image/webp"
 
 
 def test_lossless_rejection_is_an_image_validation_error() -> None:
     """Subclassing matters: every existing `except ImageValidationError`
     (including the bulk-upload handler) must keep catching this."""
-    raw = _photographic()
+    raw = _photographic(2600, 2600)
 
     with pytest.raises(ImageValidationError):
         validate_and_strip_image(raw, "lossless")
 
 
-def test_photographic_content_is_fine_on_lossy_profiles() -> None:
-    """The guard is scoped to lossless -- it must not reject normal uploads."""
-    raw = _photographic()
-    result = validate_and_strip_image(raw, "balanced")
-    assert result.content_type == "image/webp"
-
-
 def test_lossless_output_size_backstop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Content the probe lets through is still bounded by an output-size cap."""
-    monkeypatch.setattr(settings, "LOSSLESS_MAX_PROBE_BYTES_PER_PIXEL", 99.0)  # disable the probe
-    monkeypatch.setattr(settings, "LOSSLESS_MAX_OUTPUT_BYTES", 1024)
-    raw = _photographic()
+    """The projection is approximate, so the actual result is re-checked.
 
-    with pytest.raises(LosslessUnsuitableError, match="exceeds"):
+    Exercised by setting a limit the projection clears but the real encode
+    does not.
+    """
+    raw = _flat_graphic(1400, 1200)
+    monkeypatch.setattr(settings, "LOSSLESS_MAX_OUTPUT_BYTES", 200)
+
+    with pytest.raises(LosslessUnsuitableError):
         validate_and_strip_image(raw, "lossless")

@@ -870,8 +870,7 @@ Refer to [`.env-example`](.env-example) for an annotated starter template.
 | `MAX_VIDEO_UPLOAD_BYTES` | 2000 MiB | Maximum payload size for video uploads. |
 | `MAX_FILE_UPLOAD_BYTES` | 100 MiB | Maximum payload size for `/upload/file`. |
 | `MAX_IMAGE_PIXELS` | 50,000,000 | Decompression-bomb limit checked prior to full decode. |
-| `LOSSLESS_MAX_PROBE_BYTES_PER_PIXEL` | 0.25 | `optimization=lossless` entropy guard. A 512px lossless probe scores flat-colour graphics at 0.012-0.018 bytes/px and photographs at 0.66-1.27, so photographic uploads are rejected before the expensive encode. Skipped below 1 MP. |
-| `LOSSLESS_MAX_OUTPUT_BYTES` | 8 MB | Backstop: a lossless result larger than this is rejected rather than stored. |
+| `LOSSLESS_MAX_OUTPUT_BYTES` | 8 MB | `optimization=lossless` cost guard. A 512px lossless probe yields bytes-per-pixel (a content signal, near-constant with image size); multiplied by the pixel count it projects the output, and anything over this limit is rejected before the expensive encode. Re-checked against the real result afterwards. Flat-colour graphics project tiny and are unaffected. |
 | `MAX_QR_CONTENT_LENGTH` | 2000 | Maximum character length for QR code content. |
 | `MAX_QR_LOGO_BYTES` | 5 MiB | Maximum file size for QR logo overlays. |
 | `VIDEO_MAX_DURATION_SECONDS` | 60 | Maximum compressed video duration (FFmpeg `-t`). `0` disables cap. |
