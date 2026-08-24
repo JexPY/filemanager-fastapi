@@ -315,8 +315,8 @@ async def test_upload_animated_gif_succeeds(
     assert body["status"] == "success"
     assert body["dimensions"] == {"width": 32, "height": 32}
     assert "url" in body
-    assert body["url"].endswith(".webp")
     assert "thumbnail_url" in body
+    assert body["thumbnail_url"].endswith(".webp")
 
     # Verify persisted record dimensions match frame dimensions
     record = await fake_metadata.get(body["id"], _derive_owner("test-token"))
@@ -324,3 +324,4 @@ async def test_upload_animated_gif_succeeds(
     assert record.width == 32
     assert record.height == 32
     assert record.content_type == "image/webp"
+    assert record.storage_key.endswith(".webp")
