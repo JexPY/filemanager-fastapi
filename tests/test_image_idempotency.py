@@ -86,3 +86,31 @@ async def test_dedup_is_scoped_to_the_owner(
     assert len(_stored_images(fake_storage)) == 2  # 2 main images
     assert len(await fake_metadata.list("alice")) == 1
     assert len(await fake_metadata.list("bob")) == 1
+
+
+async def test_pipeline_version_participates_in_dedup_signature(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_storage: InMemoryStorageBackend,
+    fake_metadata: InMemoryMetadataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    png = fixture_bytes("tiny.png")
+
+    # Upload under pipeline version 2
+    monkeypatch.setattr("app.routers.upload.IMAGE_PIPELINE_VERSION", 2)
+    first = await client.post(
+        "/upload/image", headers=auth_headers, files={"file": ("a.png", png, "image/png")}
+    )
+    assert first.status_code == 200
+
+    # Re-uploading under a bumped pipeline version creates a distinct record instead of deduping
+    monkeypatch.setattr("app.routers.upload.IMAGE_PIPELINE_VERSION", 3)
+    second = await client.post(
+        "/upload/image", headers=auth_headers, files={"file": ("b.png", png, "image/png")}
+    )
+    assert second.status_code == 200
+
+    assert first.json()["id"] != second.json()["id"]
+    assert len(_stored_images(fake_storage)) == 2
+    assert len(await fake_metadata.list(OWNER)) == 2

@@ -346,23 +346,23 @@ async def _extract_and_store_poster(
         # generate_renditions=False: a poster never gets its own thumbnail/
         # medium rendition (see CLAUDE.md), so skip that encode work entirely
         # instead of throwing the result away.
-        webp_bytes, content_type, width, height, _ = await asyncio.to_thread(
+        processed = await asyncio.to_thread(
             validate_and_strip_image, frame_bytes, generate_renditions=False
         )
         prefix = storage_prefix("posters", visibility)
         poster_key = f"{prefix}/{unique_id}.webp"
-        obj = await upload_file(webp_bytes, poster_key, content_type)
+        obj = await upload_file(processed.buffer, poster_key, processed.content_type)
 
         try:
             poster = await store.create(
                 owner=owner,
                 kind=KIND_IMAGE,
                 storage_key=obj.key,
-                content_type=content_type,
+                content_type=processed.content_type,
                 size_bytes=obj.size,
                 status=STATUS_READY,
-                width=width,
-                height=height,
+                width=processed.width,
+                height=processed.height,
                 visibility=visibility,
             )
         except MetadataError:

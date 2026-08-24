@@ -1,7 +1,30 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
 import pyvips
 
 from app.config import settings
 from app.services.renditions import RENDITION_SPECS
+
+logger = logging.getLogger(__name__)
+
+# Bumped whenever a change to this module alters the bytes it produces for
+# the same input. Folded into the upload dedup signature so a pipeline fix is
+# not masked by a hit on a record produced by the previous pipeline.
+# Sessions 3 and 4 bump this constant.
+IMAGE_PIPELINE_VERSION = 2
+
+
+@dataclass(frozen=True)
+class ProcessedImage:
+    buffer: bytes
+    content_type: str
+    width: int
+    height: int
+    renditions: dict[str, bytes]
+
 
 # Allow-list of accepted input formats, checked via magic bytes before pyvips
 # ever touches the buffer. Deliberately excludes SVG: Dockerfile.api compiles
@@ -79,10 +102,10 @@ def _get_optimization_params(optimization: str) -> tuple[int, int, int]:
 
 def validate_and_strip_image(
     file_data: bytes, optimization: str = "balanced", *, generate_renditions: bool = False
-) -> tuple[bytes, str, int, int, dict[str, bytes]]:
-    """Load image using pyvips, strip metadata (EXIF), generate materialized
-    thumbnail rendition if requested, and return the optimized bytes along with
-    detected format, dimensions, and renditions buffers.
+) -> ProcessedImage:
+    """Load image using pyvips, normalize orientation and colour, strip metadata
+    (EXIF/ICC), generate materialized thumbnail rendition if requested, and return
+    the optimized bytes along with detected format, dimensions, and renditions buffers.
 
     `generate_renditions=False` skips rendition generation (returning an empty
     dict in its place) when the caller does not request a thumbnail.
@@ -94,6 +117,24 @@ def validate_and_strip_image(
         image = pyvips.Image.new_from_buffer(file_data, "")
     except pyvips.Error as exc:
         raise ImageValidationError(f"Could not decode image: {exc}") from exc
+
+    # 1. autorot before pixel check and resize because it can swap width/height,
+    # and also clears the orientation tag from metadata.
+    image = image.autorot()
+
+    # 2. Convert embedded wide-gamut profile (Display P3, AdobeRGB) to sRGB before
+    # strip=True drops the profile and before rendition generation.
+    if image.get_typeof("icc-profile-data") != 0:
+        try:
+            image = image.icc_transform("srgb", embedded=True)
+        except pyvips.Error as exc:
+            # An unconvertible/corrupt profile must not fail the upload; leaving
+            # the pixels untouched is the same behaviour as before this change.
+            logger.warning("Failed to apply embedded ICC profile: %s", exc)
+
+    # 3. Handle CMYK and greyscale inputs arriving with a non-sRGB interpretation.
+    if image.interpretation != pyvips.Interpretation.SRGB:
+        image = image.colourspace(pyvips.Interpretation.SRGB)
 
     width = image.width
     height = image.height
@@ -117,4 +158,10 @@ def validate_and_strip_image(
     optimized_buffer = image.write_to_buffer(
         ".webp", Q=q_value, strip=True, effort=effort, smart_subsample=True
     )
-    return optimized_buffer, "image/webp", width, height, renditions
+    return ProcessedImage(
+        buffer=optimized_buffer,
+        content_type="image/webp",
+        width=width,
+        height=height,
+        renditions=renditions,
+    )
