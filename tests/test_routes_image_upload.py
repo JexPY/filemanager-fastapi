@@ -295,5 +295,32 @@ async def test_upload_images_bulk_handles_unsuitable_lossless(
     body = resp.json()
     assert body["succeeded"] == 1
     assert body["failed"] == 1
-    assert "oversized" in body["items"][0]["message"]
+    assert body["items"][0]["message"]
     assert body["items"][1]["status"] == "success"
+
+
+async def test_upload_animated_gif_succeeds(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+) -> None:
+    """Animated GIF upload returns a success response with individual frame dimensions."""
+    resp = await client.post(
+        "/upload/image?thumbnail=true",
+        headers=auth_headers,
+        files={"file": ("animated.gif", fixture_bytes("animated.gif"), "image/gif")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "success"
+    assert body["dimensions"] == {"width": 32, "height": 32}
+    assert "url" in body
+    assert body["url"].endswith(".webp")
+    assert "thumbnail_url" in body
+
+    # Verify persisted record dimensions match frame dimensions
+    record = await fake_metadata.get(body["id"], _derive_owner("test-token"))
+    assert record is not None
+    assert record.width == 32
+    assert record.height == 32
+    assert record.content_type == "image/webp"

@@ -871,6 +871,8 @@ Refer to [`.env-example`](.env-example) for an annotated starter template.
 | `MAX_FILE_UPLOAD_BYTES` | 100 MiB | Maximum payload size for `/upload/file`. |
 | `MAX_IMAGE_PIXELS` | 50,000,000 | Decompression-bomb limit checked prior to full decode. |
 | `LOSSLESS_MAX_OUTPUT_BYTES` | 8 MB | `optimization=lossless` cost guard. A 512px lossless probe yields bytes-per-pixel (a content signal, near-constant with image size); multiplied by the pixel count it projects the output, and anything over this limit is rejected before the expensive encode. Re-checked against the real result afterwards. Flat-colour graphics project tiny and are unaffected. |
+| `IMAGE_ANIMATION_MAX_FRAMES` | 300 | Maximum frame count accepted for animated GIF/WebP uploads. |
+| `IMAGE_ANIMATION_MAX_TOTAL_PIXELS` | 100,000,000 | Maximum cumulative pixel count (`frame_w * frame_h * frames`). A coarse bound only — encode cost tracks content, not pixel count, so a photographic 28.8 MP animation is slower than a flat 92 MP one. `MAX_IMAGE_UPLOAD_BYTES` is what bounds the worst case in practice. |
 | `MAX_QR_CONTENT_LENGTH` | 2000 | Maximum character length for QR code content. |
 | `MAX_QR_LOGO_BYTES` | 5 MiB | Maximum file size for QR logo overlays. |
 | `VIDEO_MAX_DURATION_SECONDS` | 60 | Maximum compressed video duration (FFmpeg `-t`). `0` disables cap. |

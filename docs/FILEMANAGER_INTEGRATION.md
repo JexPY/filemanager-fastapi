@@ -89,6 +89,24 @@ Images can be uploaded with four optimization profiles:
 >
 > Materialized renditions (`thumbnail`, `w400`, etc.) always remain lossy even for lossless uploads to ensure responsive delivery remains compact.
 
+### Animated GIF & Animated WebP Ingestion
+
+Uploaded animated GIFs and animated WebPs are converted into **animated WebPs**, preserving all frames, individual frame delays (non-uniform timing), and animation loop counts.
+
+> [!WARNING]
+> **Contract Change for Existing Clients:**
+> Earlier versions flattened animated GIFs to a single static WebP (frame 0). The service now preserves animation on all multi-frame uploads.
+
+Key considerations for animated media:
+- **Dimensions:** The returned and stored `width` and `height` reflect the individual **frame dimensions**, not the composite filmstrip dimensions.
+- **Renditions:** Responsive renditions (`thumbnail`, `w400`, etc.) are **static single-frame images** generated from frame 0 only.
+- **Synchronous Resource Caps:**
+  - `IMAGE_ANIMATION_MAX_FRAMES` (default: 300 frames)
+  - `IMAGE_ANIMATION_MAX_TOTAL_PIXELS` (default: 100,000,000 pixels, measured as `frame_w * frame_h * frames`)
+  - Uploads exceeding either cap are rejected immediately with `400 Bad Request`.
+- **Latency:** a typical animated GIF completes in roughly 280ms–1s. Photographic (video-converted) GIFs are more expensive — a 800×600, 60-frame clip measures ~2.3s — because encode cost tracks content, not frame count. `MAX_IMAGE_UPLOAD_BYTES` bounds the worst case in practice.
+- **`optimization=lossless` on an animated upload** is subject to the same projected-output-size guard as still images, applied against the whole animation.
+
 ---
 
 ## 3. Video Upload & Lifecycle
