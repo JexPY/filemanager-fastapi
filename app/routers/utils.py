@@ -3,6 +3,7 @@ import hashlib
 import os
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -301,6 +302,58 @@ def _derive_custom_transform_url(
     )
 
 
+@dataclass(frozen=True)
+class CustomImageParams:
+    width: int | None = None
+    height: int | None = None
+    fit: str = "auto"
+    format: str | None = None
+
+
+def _resolve_main_image_url(record_id: str, storage_key: str, visibility: str) -> str:
+    if visibility == "public" and has_public_base_url():
+        return public_object_url(storage_key)
+    return public_url(f"/files/{record_id}/download")
+
+
+def _apply_placeholders(
+    response: dict[str, Any],
+    placeholders: tuple[str | None, str | None] | None,
+) -> None:
+    if not placeholders:
+        return
+    dominant_color, blur_data_url = placeholders
+    if dominant_color is not None:
+        response["dominant_color"] = dominant_color
+    if blur_data_url is not None:
+        response["blur_data_url"] = blur_data_url
+
+
+def _apply_public_image_fields(
+    response: dict[str, Any],
+    storage_key: str,
+    filtered_renditions: dict[str, str],
+    include_thumbnail: bool,
+    custom_params: CustomImageParams | None,
+) -> None:
+    response["storage_key"] = storage_key
+    response["renditions"] = filtered_renditions
+
+    if include_thumbnail or "thumbnail" in filtered_renditions:
+        response["thumbnail_url"] = derive_thumbnail_url(storage_key, filtered_renditions or None)
+
+    if custom_params is not None:
+        custom_url = _derive_custom_transform_url(
+            storage_key,
+            custom_params.width,
+            custom_params.height,
+            custom_params.fit,
+            custom_params.format,
+        )
+        if custom_url is not None:
+            response["custom_url"] = custom_url
+
+
 def _image_response(
     record_id: str,
     width: int | None,
@@ -309,19 +362,12 @@ def _image_response(
     storage_key: str,
     renditions: dict[str, str] | None = None,
     include_thumbnail: bool = False,
-    custom_width: int | None = None,
-    custom_height: int | None = None,
-    custom_fit: str = "auto",
-    custom_format: str | None = None,
+    custom_params: CustomImageParams | None = None,
     visibility: str = "public",
     original_filename: str | None = None,
-) -> dict:
+    placeholders: tuple[str | None, str | None] | None = None,
+) -> dict[str, Any]:
     """Shape the POST /upload/image response."""
-    if visibility == "public" and has_public_base_url():
-        main_url = public_object_url(storage_key)
-    else:
-        main_url = public_url(f"/files/{record_id}/download")
-
     filtered_renditions = _filter_renditions(renditions, width)
 
     response: dict[str, Any] = {
@@ -330,24 +376,20 @@ def _image_response(
         "size_bytes": size_bytes,
         "size_mb": round(size_bytes / (1024 * 1024), 2) if size_bytes else None,
         "dimensions": {"width": width, "height": height},
-        "url": main_url,
+        "url": _resolve_main_image_url(record_id, storage_key, visibility),
     }
     if original_filename is not None:
         response["original_filename"] = original_filename
 
-    if visibility != "public":
-        return response
+    _apply_placeholders(response, placeholders)
 
-    response["storage_key"] = storage_key
-    response["renditions"] = filtered_renditions
-
-    if include_thumbnail or (filtered_renditions and "thumbnail" in filtered_renditions):
-        response["thumbnail_url"] = derive_thumbnail_url(storage_key, filtered_renditions or None)
-
-    custom_url = _derive_custom_transform_url(
-        storage_key, custom_width, custom_height, custom_fit, custom_format
-    )
-    if custom_url is not None:
-        response["custom_url"] = custom_url
+    if visibility == "public":
+        _apply_public_image_fields(
+            response,
+            storage_key=storage_key,
+            filtered_renditions=filtered_renditions,
+            include_thumbnail=include_thumbnail,
+            custom_params=custom_params,
+        )
 
     return response

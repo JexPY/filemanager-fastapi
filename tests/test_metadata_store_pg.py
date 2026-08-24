@@ -460,3 +460,52 @@ async def test_renditions_jsonb_roundtrip(pg_store: PostgresMetadataStore) -> No
     refetched = await pg_store.get(rec.id, "alice")
     assert refetched is not None
     assert refetched.renditions == {"thumbnail": "images/rot_t300.webp"}
+
+
+async def test_placeholders_persistence_roundtrip(pg_store: PostgresMetadataStore) -> None:
+    rec = await pg_store.create(
+        owner="alice",
+        kind=KIND_IMAGE,
+        storage_key="images/ph.webp",
+        content_type="image/webp",
+        size_bytes=100,
+        status=STATUS_READY,
+        dominant_color="#1e293b",
+        blur_data_url="data:image/webp;base64,UklGRl...",
+    )
+    assert rec.dominant_color == "#1e293b"
+    assert rec.blur_data_url == "data:image/webp;base64,UklGRl..."
+
+    fetched = await pg_store.get(rec.id, "alice")
+    assert fetched is not None
+    assert fetched.dominant_color == "#1e293b"
+    assert fetched.blur_data_url == "data:image/webp;base64,UklGRl..."
+
+    # Also verified on get_many and list
+    many = await pg_store.get_many("alice", [rec.id])
+    assert len(many) == 1
+    assert many[0].dominant_color == "#1e293b"
+    assert many[0].blur_data_url == "data:image/webp;base64,UklGRl..."
+
+    listed = await pg_store.list("alice")
+    assert len(listed) == 1
+    assert listed[0].dominant_color == "#1e293b"
+    assert listed[0].blur_data_url == "data:image/webp;base64,UklGRl..."
+
+
+async def test_placeholders_null_for_unprovided(pg_store: PostgresMetadataStore) -> None:
+    rec = await pg_store.create(
+        owner="alice",
+        kind=KIND_IMAGE,
+        storage_key="images/noph.webp",
+        content_type="image/webp",
+        size_bytes=100,
+        status=STATUS_READY,
+    )
+    assert rec.dominant_color is None
+    assert rec.blur_data_url is None
+
+    fetched = await pg_store.get(rec.id, "alice")
+    assert fetched is not None
+    assert fetched.dominant_color is None
+    assert fetched.blur_data_url is None

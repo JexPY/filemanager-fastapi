@@ -165,3 +165,43 @@ async def test_mark_failed_transitions_status() -> None:
     updated = await store.mark_failed(rec.id)
     assert updated is not None
     assert updated.status == STATUS_FAILED
+
+
+async def test_placeholders_persistence_roundtrip() -> None:
+    store = InMemoryMetadataStore()
+    rec = await store.create(
+        owner="alice",
+        kind=KIND_IMAGE,
+        storage_key="images/ph.webp",
+        content_type="image/webp",
+        size_bytes=100,
+        status=STATUS_READY,
+        dominant_color="#1e293b",
+        blur_data_url="data:image/webp;base64,UklGRl...",
+    )
+    assert rec.dominant_color == "#1e293b"
+    assert rec.blur_data_url == "data:image/webp;base64,UklGRl..."
+
+    fetched = await store.get(rec.id, "alice")
+    assert fetched is not None
+    assert fetched.dominant_color == "#1e293b"
+    assert fetched.blur_data_url == "data:image/webp;base64,UklGRl..."
+
+
+async def test_placeholders_null_for_unprovided() -> None:
+    store = InMemoryMetadataStore()
+    rec = await store.create(
+        owner="alice",
+        kind=KIND_IMAGE,
+        storage_key="images/noph.webp",
+        content_type="image/webp",
+        size_bytes=100,
+        status=STATUS_READY,
+    )
+    assert rec.dominant_color is None
+    assert rec.blur_data_url is None
+
+    fetched = await store.get(rec.id, "alice")
+    assert fetched is not None
+    assert fetched.dominant_color is None
+    assert fetched.blur_data_url is None

@@ -24,6 +24,7 @@ from fastapi import (
 from app.config import settings
 from app.routers.auth import require_scopes
 from app.routers.utils import (
+    CustomImageParams,
     _image_response,
     _read_capped,
     _sanitize_extension,
@@ -89,15 +90,9 @@ class _ProcessedImageData:
     height: int
     renditions_buffers: dict[str, bytes]
     content_hash: str
+    dominant_color: str | None = None
+    blur_data_url: str | None = None
     original_filename: str | None = None
-
-
-@dataclass(frozen=True)
-class _CustomImageParams:
-    width: int | None = None
-    height: int | None = None
-    fit: str = "auto"
-    format: str | None = None
 
 
 _ALLOWED_VIDEO_CONTENT_TYPES = frozenset(
@@ -200,12 +195,15 @@ async def _process_single_image(
                 existing.storage_key,
                 renditions=existing.renditions,
                 include_thumbnail=thumbnail,
-                custom_width=width,
-                custom_height=height,
-                custom_fit=fit,
-                custom_format=format,
+                custom_params=CustomImageParams(
+                    width=width,
+                    height=height,
+                    fit=fit,
+                    format=format,
+                ),
                 visibility=existing.visibility,
                 original_filename=original_filename,
+                placeholders=(existing.dominant_color, existing.blur_data_url),
             )
 
         # Client-side failures (bad/unsupported image) => 400, generic detail.
@@ -239,9 +237,11 @@ async def _process_single_image(
             height=processed.height,
             renditions_buffers=processed.renditions,
             content_hash=content_hash,
+            dominant_color=processed.dominant_color,
+            blur_data_url=processed.blur_data_url,
             original_filename=original_filename,
         )
-        custom_params = _CustomImageParams(
+        custom_params = CustomImageParams(
             width=width,
             height=height,
             fit=fit,
@@ -334,6 +334,8 @@ async def _create_image_record(
             content_hash=img_data.content_hash,
             visibility=visibility,
             renditions=renditions_dict,
+            dominant_color=img_data.dominant_color,
+            blur_data_url=img_data.blur_data_url,
             original_filename=img_data.original_filename,
         )
     except MetadataError as exc:
@@ -351,7 +353,7 @@ async def _store_and_record_image(
     owner: str,
     object_name: str,
     img_data: _ProcessedImageData,
-    custom_params: _CustomImageParams,
+    custom_params: CustomImageParams,
     *,
     include_thumbnail: bool = False,
     visibility: str = "public",
@@ -396,12 +398,10 @@ async def _store_and_record_image(
             obj.key,
             renditions=renditions_dict,
             include_thumbnail=include_thumbnail,
-            custom_width=custom_params.width,
-            custom_height=custom_params.height,
-            custom_fit=custom_params.fit,
-            custom_format=custom_params.format,
+            custom_params=custom_params,
             visibility=record.visibility,
             original_filename=img_data.original_filename,
+            placeholders=(record.dominant_color, record.blur_data_url),
         )
 
     except HTTPException:

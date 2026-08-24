@@ -120,3 +120,27 @@ async def test_batch_partial_miss_logs_warning(
         f"Batch lookup partial miss: owner={OWNER} requested=3 returned=1" in rec.message
         for rec in warning_logs
     )
+
+
+async def test_batch_includes_placeholders(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_metadata: InMemoryMetadataStore,
+) -> None:
+    rec = await fake_metadata.create(
+        owner=OWNER,
+        kind=KIND_IMAGE,
+        storage_key="images/ph.webp",
+        content_type="image/webp",
+        size_bytes=10,
+        status=STATUS_READY,
+        visibility="public",
+        dominant_color="#1e293b",
+        blur_data_url="data:image/webp;base64,UklGRl...",
+    )
+    resp = await client.post("/files/batch", headers=auth_headers, json={"ids": [rec.id]})
+    assert resp.status_code == 200
+    files = resp.json()["files"]
+    assert len(files) == 1
+    assert files[0]["dominant_color"] == "#1e293b"
+    assert files[0]["blur_data_url"] == "data:image/webp;base64,UklGRl..."

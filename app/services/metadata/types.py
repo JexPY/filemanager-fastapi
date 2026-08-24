@@ -72,6 +72,8 @@ class UploadRecord:
     updated_at: datetime
     poster_storage_key: str | None = None
     renditions: dict[str, str] | None = None
+    dominant_color: str | None = None
+    blur_data_url: str | None = None
 
     def _populate_thumbnail_url(self, data: dict[str, Any]) -> None:
         """Static thumbnail URL for a public, ready image record."""
@@ -116,6 +118,17 @@ class UploadRecord:
 
         self._populate_thumbnail_url(data)
         self._populate_poster_url(data, poster_storage_key)
+
+    def _populate_placeholders(self, data: dict[str, Any]) -> None:
+        """Populate LQIP placeholder fields for ready image records.
+
+        Exposed regardless of visibility (deliberately breaks the
+        public-only symmetry of storage_key/renditions/accelerators
+        because placeholders leak no storage keys or URLs).
+        """
+        if self.kind == KIND_IMAGE and self.status == STATUS_READY:
+            data["dominant_color"] = self.dominant_color
+            data["blur_data_url"] = self.blur_data_url
 
     def _filtered_renditions(self) -> dict[str, str]:
         """Return renditions mapping, excluding width specs exceeding source width."""
@@ -163,5 +176,6 @@ class UploadRecord:
             if self.visibility == VISIBILITY_PUBLIC:
                 data["storage_key"] = self.storage_key
                 data["renditions"] = self._filtered_renditions()
+            self._populate_placeholders(data)
 
         return data

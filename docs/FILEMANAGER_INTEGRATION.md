@@ -23,7 +23,7 @@ Integration guide for client applications and consuming backends using `filemana
 ## 2. Image Upload Contracts
 
 ### Single Upload (`POST /upload/image`)
-Supports `thumbnail=true` to generate responsive renditions and thumbnail:
+Supports `thumbnail=true` to generate responsive renditions and thumbnail. Every ready image response also carries LQIP placeholder fields (`dominant_color` and `blur_data_url`):
 
 ```json
 {
@@ -39,6 +39,8 @@ Supports `thumbnail=true` to generate responsive renditions and thumbnail:
   "dimensions": { "width": 1920, "height": 1280 },
   "size_bytes": 145020,
   "size_mb": 0.14,
+  "dominant_color": "#1e293b",
+  "blur_data_url": "data:image/webp;base64,UklGRl...",
   "url": "https://cdn.example.com/images/4b17c80521ad47a884819ca1e7c9bf8f.webp",
   "thumbnail_url": "https://cdn.example.com/images/4b17c80521ad47a884819ca1e7c9bf8f_t300.webp"
 }
@@ -59,6 +61,8 @@ Guarantees 1:1 positional array mapping with explicit status discriminator and c
       "storage_key": "images/abc.webp",
       "renditions": { "thumbnail": "images/abc_t300.webp", "w400": "images/abc_w400.webp" },
       "dimensions": { "width": 600, "height": 400 },
+      "dominant_color": "#1e293b",
+      "blur_data_url": "data:image/webp;base64,UklGRl...",
       "url": "https://cdn.example.com/images/abc.webp",
       "thumbnail_url": "https://cdn.example.com/images/abc_t300.webp"
     }
@@ -103,6 +107,15 @@ When a public upload completes, store:
 2. `storage_key` — the relative object path for the primary asset (e.g. `images/4b17c80521ad47a884819ca1e7c9bf8f.webp`).
 3. `renditions` — a JSON map of rendition names to their relative storage keys (e.g. `{"thumbnail": "images/..._t300.webp", "w400": "images/..._w400.webp"}`).
 4. `width` & `height` — dimensions for layout calculation and aspect-ratio preservation.
+5. `dominant_color` & `blur_data_url` — LQIP placeholders for instant rendering while loading.
+
+### Using LQIP Placeholders on the Consumer
+Every ready image record carries:
+- `dominant_color` (e.g. `#1e293b`): Use as `background-color` on the image wrapper for a solid background before any bytes load.
+- `blur_data_url` (16px WebP base64 URI): Use as an inline blur preview (e.g. Next.js `<Image placeholder="blur" blurDataURL={photo.blur_data_url} />` or an underlying `<img>` with CSS `filter: blur(20px)`). The service intentionally does **not** pre-blur the 16px tile to minimize payload size and preserve consumer control over blur radius.
+
+> [!NOTE]
+> Unlike accelerator URLs (`thumbnail_url`, `poster_url`) and `storage_key`, `dominant_color` and `blur_data_url` are exposed on **both public and private records** (gated on `kind == "image"` and `status == "ready"`), since they leak no storage keys or object URLs.
 
 ### Constructing URLs on the Consumer
 Consumers configure `MEDIA_BASE_URL` (e.g. `https://cdn.example.com`) and build URLs via simple string concatenation:

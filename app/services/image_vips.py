@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import logging
 from dataclasses import dataclass
 
@@ -24,6 +25,8 @@ class ProcessedImage:
     width: int
     height: int
     renditions: dict[str, bytes]
+    dominant_color: str | None = None
+    blur_data_url: str | None = None
 
 
 # Allow-list of accepted input formats, checked via magic bytes before pyvips
@@ -62,6 +65,45 @@ def sniff_format(data: bytes) -> str | None:
         if major_brand in {b"avif", b"avis"}:
             return "avif"
     return None
+
+
+def _extract_placeholders(encoded: bytes) -> tuple[str, str]:
+    """Return (dominant_color_hex, blur_data_url) for an already-encoded image.
+
+    Deliberately derived from the *output* buffer rather than the full-resolution
+    source, for two reasons that only show up on real photos:
+
+    - pyvips recomputes a pipeline for every independent sink, so extracting from
+      the source forced a second full-resolution decode + ICC transform. Measured
+      on a 24.5MP iPhone photo: 591ms from the source vs 15.8ms here.
+    - Running before the MAX_IMAGE_PIXELS guard meant a decompression bomb was
+      fully decoded before being rejected (256ms vs 0.5ms for a 36MP input).
+
+    Reading back the output -- already normalized to sRGB, already downscaled --
+    avoids both, and is format-independent (shrink-on-load does not exist for
+    PNG, so shrinking the *source* is slow for exactly the formats a bomb uses).
+    At 16px on the long edge the lossy re-encode is immaterial.
+    """
+    tile = pyvips.Image.thumbnail_buffer(encoded, 16, height=16, size=pyvips.Size.DOWN)
+    if tile.hasalpha():
+        tile = tile.flatten(background=[255, 255, 255])
+
+    if tile.bands >= 3:
+        r = int(min(max(round(tile[0].avg()), 0), 255))
+        g = int(min(max(round(tile[1].avg()), 0), 255))
+        b = int(min(max(round(tile[2].avg()), 0), 255))
+    elif tile.bands == 1:
+        val = int(min(max(round(tile[0].avg()), 0), 255))
+        r = g = b = val
+    else:
+        r = g = b = 0
+    dominant_color = f"#{r:02x}{g:02x}{b:02x}"
+
+    tile_buf = tile.write_to_buffer(".webp", Q=20, strip=True, effort=0)
+    b64 = base64.b64encode(tile_buf).decode("ascii")
+    blur_data_url = f"data:image/webp;base64,{b64}"
+
+    return dominant_color, blur_data_url
 
 
 def _generate_materialized_renditions(image: pyvips.Image, width: int) -> dict[str, bytes]:
@@ -158,10 +200,19 @@ def validate_and_strip_image(
     optimized_buffer = image.write_to_buffer(
         ".webp", Q=q_value, strip=True, effort=effort, smart_subsample=True
     )
+
+    # Placeholders come from the encoded output, not the source -- see
+    # _extract_placeholders. This must stay after the encode; moving it earlier
+    # reintroduces both a second full-resolution decode and a bypass of the
+    # MAX_IMAGE_PIXELS guard above.
+    dominant_color, blur_data_url = _extract_placeholders(optimized_buffer)
+
     return ProcessedImage(
         buffer=optimized_buffer,
         content_type="image/webp",
         width=width,
         height=height,
         renditions=renditions,
+        dominant_color=dominant_color,
+        blur_data_url=blur_data_url,
     )

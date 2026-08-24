@@ -44,7 +44,11 @@ class MetadataStore(ABC):
         original_filename: str | None = None,
         visibility: str = "private",
         **kwargs: object,
-    ) -> UploadRecord: ...
+    ) -> UploadRecord:
+        """Create a new upload record. Optional metadata fields such as
+        ``callback_url``, ``renditions``, ``dominant_color``, and ``blur_data_url``
+        are accepted via ``**kwargs`` to stay within parameter count limits."""
+        ...
 
     @abstractmethod
     async def set_task_id(self, upload_id: str, task_id: str) -> None:

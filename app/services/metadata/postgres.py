@@ -30,7 +30,8 @@ _COLUMNS = (
     "id, owner, kind, storage_key, content_type, size_bytes, width, height, "
     "content_hash, status, task_id, original_filename, duration_seconds, truncated, "
     "callback_url, poster_upload_id, webhook_status, webhook_attempts, webhook_last_error, "
-    "webhook_updated_at, visibility, share_token, renditions, created_at, updated_at"
+    "webhook_updated_at, visibility, share_token, renditions, dominant_color, blur_data_url, "
+    "created_at, updated_at"
 )
 
 _JOIN_COLUMNS = (
@@ -38,7 +39,8 @@ _JOIN_COLUMNS = (
     "u.content_hash, u.status, u.task_id, u.original_filename, u.duration_seconds, u.truncated, "
     "u.callback_url, u.poster_upload_id, u.webhook_status, u.webhook_attempts, "
     "u.webhook_last_error, u.webhook_updated_at, u.visibility, u.share_token, "
-    "u.renditions, u.created_at, u.updated_at, p.storage_key AS poster_storage_key"
+    "u.renditions, u.dominant_color, u.blur_data_url, u.created_at, u.updated_at, "
+    "p.storage_key AS poster_storage_key"
 )
 
 
@@ -68,6 +70,8 @@ def _parse_renditions(raw: Any) -> dict[str, str] | None:
 def _row_to_record(row: asyncpg.Record) -> UploadRecord:
     poster_storage_key = row["poster_storage_key"] if "poster_storage_key" in row else None
     renditions = _parse_renditions(row["renditions"]) if "renditions" in row else None
+    dominant_color = row["dominant_color"] if "dominant_color" in row else None
+    blur_data_url = row["blur_data_url"] if "blur_data_url" in row else None
     return UploadRecord(
         id=row["id"],
         owner=row["owner"],
@@ -95,6 +99,8 @@ def _row_to_record(row: asyncpg.Record) -> UploadRecord:
         updated_at=row["updated_at"],
         poster_storage_key=poster_storage_key,
         renditions=renditions,
+        dominant_color=dominant_color,
+        blur_data_url=blur_data_url,
     )
 
 
@@ -192,13 +198,16 @@ class PostgresMetadataStore(MetadataStore):
     ) -> UploadRecord:
         callback_url = kwargs.get("callback_url")
         renditions = kwargs.get("renditions")
+        dominant_color = kwargs.get("dominant_color")
+        blur_data_url = kwargs.get("blur_data_url")
         upload_id = uuid.uuid4().hex
         renditions_json = json.dumps(renditions) if renditions is not None else None
         row = await self._fetchrow(
             f"INSERT INTO uploads (id, owner, kind, storage_key, content_type, size_bytes, "
             f"width, height, content_hash, status, task_id, original_filename, "
-            f"callback_url, visibility, renditions) "
-            f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb) "
+            f"callback_url, visibility, renditions, dominant_color, blur_data_url) "
+            f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, "
+            f"$15::jsonb, $16, $17) "
             f"RETURNING {_COLUMNS}",
             upload_id,
             owner,
@@ -215,6 +224,8 @@ class PostgresMetadataStore(MetadataStore):
             callback_url,
             visibility,
             renditions_json,
+            dominant_color,
+            blur_data_url,
             error_msg=f"Failed to record upload {storage_key!r}",
         )
         assert row is not None  # INSERT ... RETURNING always yields a row
