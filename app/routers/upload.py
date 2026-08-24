@@ -47,7 +47,11 @@ from app.services.file_validation import (
     FileValidationError,
     validate_file_from_path,
 )
-from app.services.image_vips import ImageValidationError, validate_and_strip_image
+from app.services.image_vips import (
+    IMAGE_PIPELINE_VERSION,
+    ImageValidationError,
+    validate_and_strip_image,
+)
 from app.services.metadata import (
     KIND_FILE,
     KIND_IMAGE,
@@ -163,13 +167,17 @@ async def _process_single_image(
     try:
         # Content hash of the *input* bytes for idempotency. Hashing 25 MB is
         # borderline CPU work, so offload it like the other CPU-bound steps.
-        # The processing parameters are folded in, so the same bytes requested
-        # with different options are correctly treated as distinct uploads.
+        # The processing parameters and IMAGE_PIPELINE_VERSION are folded in, so the
+        # same bytes requested with different options (or after a pipeline change)
+        # are correctly treated as distinct uploads.
         # `visibility` and `thumbnail` are part of that on purpose: without them,
         # re-uploading with different options would dedupe onto the existing
-        # record and silently ignore the caller's intent.
+        # record and silently ignore the caller's intent. Folding in the pipeline
+        # version ensures pipeline fixes are not masked by stale existing records.
         input_hash = await asyncio.to_thread(_sha256_hex, file_data)
-        signature = f"{input_hash}:{optimization}:{visibility}:{thumbnail}"
+        signature = (
+            f"{input_hash}:{optimization}:{visibility}:{thumbnail}:v{IMAGE_PIPELINE_VERSION}"
+        )
         content_hash = hashlib.sha256(signature.encode()).hexdigest()
 
         store = await get_metadata_store()
@@ -202,13 +210,7 @@ async def _process_single_image(
 
         # Client-side failures (bad/unsupported image) => 400, generic detail.
         try:
-            (
-                optimized_buffer,
-                content_type,
-                img_width,
-                img_height,
-                renditions_buffers,
-            ) = await asyncio.to_thread(
+            processed = await asyncio.to_thread(
                 validate_and_strip_image,
                 file_data,
                 optimization,
@@ -231,11 +233,11 @@ async def _process_single_image(
         prefix = storage_prefix("images", visibility)
         object_name = f"{prefix}/{unique_id}.webp"
         img_data = _ProcessedImageData(
-            buffer=optimized_buffer,
-            content_type=content_type,
-            width=img_width,
-            height=img_height,
-            renditions_buffers=renditions_buffers,
+            buffer=processed.buffer,
+            content_type=processed.content_type,
+            width=processed.width,
+            height=processed.height,
+            renditions_buffers=processed.renditions,
             content_hash=content_hash,
             original_filename=original_filename,
         )
