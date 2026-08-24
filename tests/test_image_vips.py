@@ -283,3 +283,97 @@ def test_oversized_image_rejected_before_any_placeholder_work(
 
     with pytest.raises(ImageValidationError, match="exceed"):
         validate_and_strip_image(raw)
+
+
+def test_optimization_lossless_produces_valid_webp() -> None:
+    raw = fixture_bytes("tiny.png")
+    balanced_result = validate_and_strip_image(raw, optimization="balanced")
+    lossless_result = validate_and_strip_image(raw, optimization="lossless")
+
+    assert lossless_result.content_type == "image/webp"
+    assert lossless_result.buffer[:4] == b"RIFF"
+    assert lossless_result.buffer[8:12] == b"WEBP"
+    assert lossless_result.buffer != balanced_result.buffer
+
+
+def test_lossless_roundtrip_pixel_identity() -> None:
+    """Synthetic sharp-edged graphic fixture round-trips pixel-identically at lossless."""
+    base = pyvips.Image.black(64, 64, bands=3).copy(interpretation="srgb") + [20, 40, 60]
+    box = pyvips.Image.black(24, 24, bands=3).copy(interpretation="srgb") + [200, 100, 50]
+    source_img = base.insert(box, 0, 0)
+    raw_png = source_img.write_to_buffer(".png")
+
+    result = validate_and_strip_image(raw_png, optimization="lossless")
+    decoded = pyvips.Image.new_from_buffer(result.buffer, "")
+
+    pt_box = decoded.getpoint(10, 10)
+    assert pt_box[0] == 200.0
+    assert pt_box[1] == 100.0
+    assert pt_box[2] == 50.0
+
+    pt_bg = decoded.getpoint(40, 40)
+    assert pt_bg[0] == 20.0
+    assert pt_bg[1] == 40.0
+    assert pt_bg[2] == 60.0
+
+
+def test_balanced_roundtrip_is_not_pixel_identical() -> None:
+    """The same sharp-edged fixture at balanced introduces lossy compression drift."""
+    base = pyvips.Image.black(64, 64, bands=3).copy(interpretation="srgb") + [20, 40, 60]
+    box = pyvips.Image.black(24, 24, bands=3).copy(interpretation="srgb") + [200, 100, 50]
+    source_img = base.insert(box, 0, 0)
+    raw_png = source_img.write_to_buffer(".png")
+
+    result = validate_and_strip_image(raw_png, optimization="balanced")
+    decoded = pyvips.Image.new_from_buffer(result.buffer, "")
+
+    pt_box = decoded.getpoint(10, 10)
+    pt_bg = decoded.getpoint(40, 40)
+    lossy_drift = (
+        pt_box[0] != 200.0
+        or pt_box[1] != 100.0
+        or pt_box[2] != 50.0
+        or pt_bg[0] != 20.0
+        or pt_bg[1] != 40.0
+        or pt_bg[2] != 60.0
+    )
+    assert lossy_drift is True
+
+
+def test_attention_crop_differs_from_centre_crop() -> None:
+    """Attention crop focuses on off-centre salient features rather than geometric centre."""
+    dark_bg = pyvips.Image.black(800, 400, bands=3).copy(interpretation="srgb")
+    bright_box = pyvips.Image.black(120, 120, bands=3).copy(interpretation="srgb") + [255, 255, 255]
+    composite = dark_bg.insert(bright_box, 10, 10)
+    raw_png = composite.write_to_buffer(".png")
+
+    result = validate_and_strip_image(raw_png, generate_renditions=True)
+    assert "thumbnail" in result.renditions
+
+    thumb_attn = pyvips.Image.new_from_buffer(result.renditions["thumbnail"], "")
+    assert thumb_attn.width == 300
+    assert thumb_attn.height == 300
+
+    img = pyvips.Image.new_from_buffer(raw_png, "")
+    thumb_centre = img.thumbnail_image(300, height=300, crop=pyvips.Interesting.CENTRE)
+
+    mean_attn = thumb_attn.avg()
+    mean_centre = thumb_centre.avg()
+
+    assert mean_attn != mean_centre
+    assert mean_attn > mean_centre
+
+
+def test_lossless_renditions_stay_lossy() -> None:
+    """Materialized renditions remain lossy even when main asset uses lossless optimization."""
+    raw = fixture_bytes("tiny.png")
+    result = validate_and_strip_image(raw, optimization="lossless", generate_renditions=True)
+    assert "thumbnail" in result.renditions
+    assert result.renditions["thumbnail"][:4] == b"RIFF"
+
+    img = pyvips.Image.new_from_buffer(raw, "")
+    lossless_thumb = img.thumbnail_image(
+        300, height=300, crop=pyvips.Interesting.ATTENTION
+    ).write_to_buffer(".webp", Q=75, strip=True, effort=4, lossless=True)
+
+    assert result.renditions["thumbnail"] != lossless_thumb

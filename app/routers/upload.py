@@ -439,8 +439,11 @@ async def upload_image(
     format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
         default=None, json_schema_extra={"example": None}
     ),
-    optimization: Literal["size", "balanced", "quality"] = Form(
-        "balanced", description="Encoding profile for initial image compression"
+    optimization: Literal["size", "balanced", "quality", "lossless"] = Form(
+        "balanced",
+        description=(
+            "Encoding profile for initial image compression (lossless caps dimensions at 4096px)"
+        ),
     ),
     visibility: Literal["public", "private"] = Form("public"),
     owner: str = Depends(require_image_upload),
@@ -502,8 +505,12 @@ _BULK_UPLOAD_OPENAPI_EXTRA = {
                         },
                         "optimization": {
                             "type": "string",
-                            "enum": ["size", "balanced", "quality"],
+                            "enum": ["size", "balanced", "quality", "lossless"],
                             "default": "balanced",
+                            "description": (
+                                "Encoding profile for initial image compression "
+                                "(lossless caps dimensions at 4096px)"
+                            ),
                         },
                         "visibility": {
                             "type": "string",
@@ -598,8 +605,11 @@ async def upload_images(
     format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
         default=None, json_schema_extra={"example": None}
     ),
-    optimization: Literal["size", "balanced", "quality"] = Form(
-        "balanced", description="Encoding profile for initial image compression"
+    optimization: Literal["size", "balanced", "quality", "lossless"] = Form(
+        "balanced",
+        description=(
+            "Encoding profile for initial image compression (lossless caps dimensions at 4096px)"
+        ),
     ),
     visibility: Literal["public", "private"] = Form("public"),
     owner: str = Depends(require_image_upload),

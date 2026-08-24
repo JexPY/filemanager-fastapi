@@ -15,7 +15,15 @@ logger = logging.getLogger(__name__)
 # the same input. Folded into the upload dedup signature so a pipeline fix is
 # not masked by a hit on a record produced by the previous pipeline.
 # Sessions 3 and 4 bump this constant.
-IMAGE_PIPELINE_VERSION = 2
+IMAGE_PIPELINE_VERSION = 3
+
+
+@dataclass(frozen=True)
+class _EncodeParams:
+    q: int
+    max_dim: int
+    effort: int
+    lossless: bool = False
 
 
 @dataclass(frozen=True)
@@ -107,13 +115,21 @@ def _extract_placeholders(encoded: bytes) -> tuple[str, str]:
 
 
 def _generate_materialized_renditions(image: pyvips.Image, width: int) -> dict[str, bytes]:
-    """Encode extra responsive width and thumbnail renditions in materialize mode."""
+    """Encode extra responsive width and thumbnail renditions in materialize mode.
+
+    Renditions deliberately remain lossy regardless of the primary asset's
+    optimization profile (e.g. `lossless`), because renditions are CDN
+    accelerators where compact transfer size is the primary goal.
+    """
     renditions: dict[str, bytes] = {}
     for spec in RENDITION_SPECS.values():
         if spec.crop:
-            rend_image = image.thumbnail_image(
-                spec.width, height=spec.height, crop=pyvips.Interesting.CENTRE
+            interesting = (
+                pyvips.Interesting.ATTENTION
+                if spec.crop_mode == "attention"
+                else pyvips.Interesting.CENTRE
             )
+            rend_image = image.thumbnail_image(spec.width, height=spec.height, crop=interesting)
         else:
             if width < spec.width:
                 continue
@@ -133,13 +149,19 @@ def _generate_materialized_renditions(image: pyvips.Image, width: int) -> dict[s
     return renditions
 
 
-def _get_optimization_params(optimization: str) -> tuple[int, int, int]:
-    """Return (q_value, max_dimension, effort) for the given optimization profile."""
+def _get_optimization_params(optimization: str) -> _EncodeParams:
+    """Return _EncodeParams for the given optimization profile."""
     if optimization == "size":
-        return 65, 1280, 4
+        return _EncodeParams(q=65, max_dim=1280, effort=4, lossless=False)
     if optimization == "quality":
-        return 95, 3840, 6
-    return 85, 1920, 4
+        return _EncodeParams(q=95, max_dim=3840, effort=6, lossless=False)
+    if optimization == "lossless":
+        # libwebp hard limits dimensions to 16383px. Capping lossless at 4096px
+        # ensures large scans never hit libwebp's hard ceiling while preserving
+        # pixel fidelity for graphics, screenshots, and logos.
+        # Q is a compression-effort level in lossless WebP rather than quality.
+        return _EncodeParams(q=75, max_dim=4096, effort=4, lossless=True)
+    return _EncodeParams(q=85, max_dim=1920, effort=4, lossless=False)
 
 
 def validate_and_strip_image(
@@ -189,17 +211,30 @@ def validate_and_strip_image(
     if generate_renditions and settings.IMAGE_RENDITION_MODE == "materialize":
         renditions = _generate_materialized_renditions(image, width)
 
-    q_value, max_dim, effort = _get_optimization_params(optimization)
+    params = _get_optimization_params(optimization)
 
-    if width > max_dim or height > max_dim:
-        scale = min(max_dim / width, max_dim / height)
+    if width > params.max_dim or height > params.max_dim:
+        scale = min(params.max_dim / width, params.max_dim / height)
         image = image.resize(scale)
         width = image.width
         height = image.height
 
-    optimized_buffer = image.write_to_buffer(
-        ".webp", Q=q_value, strip=True, effort=effort, smart_subsample=True
-    )
+    if params.lossless:
+        optimized_buffer = image.write_to_buffer(
+            ".webp",
+            Q=params.q,
+            strip=True,
+            effort=params.effort,
+            lossless=True,
+        )
+    else:
+        optimized_buffer = image.write_to_buffer(
+            ".webp",
+            Q=params.q,
+            strip=True,
+            effort=params.effort,
+            smart_subsample=True,
+        )
 
     # Placeholders come from the encoded output, not the source -- see
     # _extract_placeholders. This must stay after the encode; moving it earlier

@@ -428,10 +428,10 @@ record returns **404 Not Found**.
 
 #### Image Ingestion Parameters
 - **Query parameters:** `thumbnail` (boolean, default `false`: whether to generate and return responsive renditions and thumbnail).
-- **Form fields:** `file` (or `files` for bulk), `optimization` (`size`|`balanced`|`quality`), `visibility` (`public`|`private`), `width`, `height`, `fit`, `format`.
+- **Form fields:** `file` (or `files` for bulk), `optimization` (`size`|`balanced`|`quality`|`lossless`), `visibility` (`public`|`private`), `width`, `height`, `fit`, `format`.
 - **Accepted formats:** PNG, JPEG, GIF, WebP, HEIC (detected via magic bytes). SVG is rejected to prevent SSRF and XML entity expansion attacks.
 - **Responsive Renditions (`IMAGE_RENDITION_MODE`):**
-  - In `materialize` mode (default), passing `?thumbnail=true` encodes the square `thumbnail` (300×300, `crop=True`) plus aspect-preserving width specs `w400`, `w800`, and `w1600` (`crop=False`, fit-to-width).
+  - In `materialize` mode (default), passing `?thumbnail=true` encodes the square `thumbnail` (300×300, smart attention crop via `pyvips.Interesting.ATTENTION`) plus aspect-preserving width specs `w400`, `w800`, and `w1600` (`crop=False`, fit-to-width).
   - **`≤ source width` rule:** Only widths less than or equal to the source image's width are encoded and returned in `renditions`.
   - In `on_demand` mode, `renditions` is empty (`{}`) and widths are produced dynamically via `imgproxy`.
 - **Bulk Image Upload Contract (`POST /upload/images`):**
@@ -443,6 +443,7 @@ record returns **404 Not Found**.
   - `size`: WebP quality 65, max dimension 1280 px.
   - `balanced` (default): WebP quality 85, max dimension 1920 px.
   - `quality`: WebP quality 95, max dimension 3840 px.
+  - `lossless`: Lossless WebP, max dimension capped at 4096 px (designed for sharp-edged graphics, logos, and screenshots).
 
 #### Video Ingestion Parameters
 - **Form fields:** `file`, `format` (`mp4`|`webm_vp9`|`webm_av1`), `optimization` (`balanced`|`quality`), `start_seconds`, `end_seconds`, `poster_seconds`, `visibility` (`public`|`private`), `callback_url`.

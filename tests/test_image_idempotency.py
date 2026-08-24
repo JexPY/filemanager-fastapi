@@ -114,3 +114,44 @@ async def test_pipeline_version_participates_in_dedup_signature(
     assert first.json()["id"] != second.json()["id"]
     assert len(_stored_images(fake_storage)) == 2
     assert len(await fake_metadata.list(OWNER)) == 2
+
+
+async def test_lossless_optimization_participates_in_dedup_signature(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    fake_storage: InMemoryStorageBackend,
+    fake_metadata: InMemoryMetadataStore,
+) -> None:
+    png = fixture_bytes("tiny.png")
+
+    first = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        data={"optimization": "balanced"},
+        files={"file": ("a.png", png, "image/png")},
+    )
+    assert first.status_code == 200
+
+    second = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        data={"optimization": "lossless"},
+        files={"file": ("b.png", png, "image/png")},
+    )
+    assert second.status_code == 200
+
+    assert first.json()["id"] != second.json()["id"]
+    assert len(_stored_images(fake_storage)) == 2
+    assert len(await fake_metadata.list(OWNER)) == 2
+
+    # Re-upload with lossless dedupes onto the second record
+    third = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        data={"optimization": "lossless"},
+        files={"file": ("c.png", png, "image/png")},
+    )
+    assert third.status_code == 200
+    assert third.json()["id"] == second.json()["id"]
+    assert len(_stored_images(fake_storage)) == 2
+    assert len(await fake_metadata.list(OWNER)) == 2
