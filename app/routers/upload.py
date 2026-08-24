@@ -51,6 +51,7 @@ from app.services.file_validation import (
 from app.services.image_vips import (
     IMAGE_PIPELINE_VERSION,
     ImageValidationError,
+    LosslessUnsuitableError,
     validate_and_strip_image,
 )
 from app.services.metadata import (
@@ -79,6 +80,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 DETAIL_STORAGE_UNAVAILABLE = "Storage backend unavailable"
+# Static and deliberately specific: this names the caller's own parameter,
+# leaks nothing internal, and a generic 400 would leave them no way to act.
+DETAIL_LOSSLESS_UNSUITABLE = (
+    "optimization=lossless would produce an oversized object for this image; "
+    "it is intended for flat-colour graphics (diagrams, screenshots, logos) -- "
+    "use optimization=quality"
+)
 DETAIL_UPLOAD_FAILED = "Upload could not be completed"
 
 
@@ -216,16 +224,16 @@ async def _process_single_image(
             )
         except ImageValidationError as exc:
             logger.warning("Image validation rejected upload: %s", exc)
+            unsuitable = isinstance(exc, LosslessUnsuitableError)
+            detail = DETAIL_LOSSLESS_UNSUITABLE if unsuitable else "Invalid or unsupported image"
             if not raise_on_error:
                 return {
                     "status": "error",
                     "code": "invalid_image",
-                    "message": "Invalid or unsupported image",
+                    "message": detail,
                     "original_filename": original_filename,
                 }
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or unsupported image"
-            ) from exc
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
 
         unique_id = uuid.uuid4().hex
         prefix = storage_prefix("images", visibility)
@@ -420,6 +428,36 @@ async def _store_and_record_image(
         }
 
 
+class ImageTransformParams:
+    """Form parameters for single and bulk image transformation and encoding."""
+
+    def __init__(
+        self,
+        width: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
+        height: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
+        fit: Literal["auto", "fit", "fill", "fill-down", "force"] = Form(
+            default="auto", examples=["auto"]
+        ),
+        format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
+            default=None, json_schema_extra={"example": None}
+        ),
+        optimization: Literal["size", "balanced", "quality", "lossless"] = Form(
+            "balanced",
+            description=(
+                "Encoding profile for initial image compression "
+                "(lossless caps dimensions at 4096px)"
+            ),
+        ),
+        visibility: Literal["public", "private"] = Form("public"),
+    ):
+        self.width = width
+        self.height = height
+        self.fit = fit
+        self.format = format
+        self.optimization = optimization
+        self.visibility = visibility
+
+
 @router.post(
     "/upload/image",
     tags=["Uploads"],
@@ -431,18 +469,7 @@ async def upload_image(
     request: Request,
     file: UploadFile = File(...),
     thumbnail: bool = Query(default=False, description="Generate and return a thumbnail URL"),
-    width: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
-    height: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
-    fit: Literal["auto", "fit", "fill", "fill-down", "force"] = Form(
-        default="auto", examples=["auto"]
-    ),
-    format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
-        default=None, json_schema_extra={"example": None}
-    ),
-    optimization: Literal["size", "balanced", "quality"] = Form(
-        "balanced", description="Encoding profile for initial image compression"
-    ),
-    visibility: Literal["public", "private"] = Form("public"),
+    params: ImageTransformParams = Depends(),
     owner: str = Depends(require_image_upload),
 ):
     sanitized_filename = _sanitize_filename(file.filename)
@@ -450,13 +477,13 @@ async def upload_image(
     return await _process_single_image(
         file_data,
         owner,
-        optimization,
-        width,
-        height,
-        fit,
-        format,
+        params.optimization,
+        params.width,
+        params.height,
+        params.fit,
+        params.format,
         thumbnail=thumbnail,
-        visibility=visibility,
+        visibility=params.visibility,
         raise_on_error=True,
         original_filename=sanitized_filename,
     )
@@ -502,8 +529,12 @@ _BULK_UPLOAD_OPENAPI_EXTRA = {
                         },
                         "optimization": {
                             "type": "string",
-                            "enum": ["size", "balanced", "quality"],
+                            "enum": ["size", "balanced", "quality", "lossless"],
                             "default": "balanced",
+                            "description": (
+                                "Encoding profile for initial image compression "
+                                "(lossless caps dimensions at 4096px)"
+                            ),
                         },
                         "visibility": {
                             "type": "string",
@@ -590,18 +621,7 @@ async def upload_images(
     request: Request,
     files: Annotated[list[UploadFile], File(description="Multiple image files to upload")],
     thumbnail: bool = Query(default=False, description="Generate and return thumbnail URLs"),
-    width: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
-    height: int | None = Form(default=None, ge=0, le=8192, json_schema_extra={"default": ""}),
-    fit: Literal["auto", "fit", "fill", "fill-down", "force"] = Form(
-        default="auto", examples=["auto"]
-    ),
-    format: Literal["webp", "png", "jpg", "jpeg", "avif", "gif"] | None = Form(
-        default=None, json_schema_extra={"example": None}
-    ),
-    optimization: Literal["size", "balanced", "quality"] = Form(
-        "balanced", description="Encoding profile for initial image compression"
-    ),
-    visibility: Literal["public", "private"] = Form("public"),
+    params: ImageTransformParams = Depends(),
     owner: str = Depends(require_image_upload),
 ):
     if not files or len(files) == 0:
@@ -623,13 +643,13 @@ async def upload_images(
                 _process_single_image_throttled(
                     item,
                     owner,
-                    optimization,
-                    width,
-                    height,
-                    fit,
-                    format,
+                    params.optimization,
+                    params.width,
+                    params.height,
+                    params.fit,
+                    params.format,
                     thumbnail=thumbnail,
-                    visibility=visibility,
+                    visibility=params.visibility,
                     raise_on_error=False,
                     original_filename=sanitized_filenames[idx],
                 )

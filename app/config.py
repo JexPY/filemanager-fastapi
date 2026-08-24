@@ -173,6 +173,15 @@ class Settings(BaseSettings):
     # Decompression-bomb guard: reject images decoding to more than this
     # many total pixels (width * height), before the full-resolution encode.
     MAX_IMAGE_PIXELS: int = Field(default=50_000_000)
+    # `optimization=lossless` cost guard. Lossless cost tracks content entropy,
+    # NOT pixel count -- measured, a 14.7MP flat-colour screenshot encodes in
+    # 262ms to 5KB while a 12.2MP photograph takes 5563ms and produces 6.1MB.
+    # A 512px lossless probe yields a bytes-per-pixel figure that is essentially
+    # constant for a given image regardless of its size (1.265-1.297 measured
+    # across 0.25MP-12MP crops of the same photo), so `bpp * pixels` projects
+    # the real output size and is checked against this limit before the
+    # expensive encode runs. The same limit is re-checked on the actual result.
+    LOSSLESS_MAX_OUTPUT_BYTES: int = Field(default=8 * 1024 * 1024)
     # QR codes have a hard capacity limit (~2953 bytes at version 40/level L);
     # this just rejects absurd input before it ever reaches segno.
     MAX_QR_CONTENT_LENGTH: int = Field(default=2000)

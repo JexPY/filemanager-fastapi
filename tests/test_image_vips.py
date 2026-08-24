@@ -9,6 +9,7 @@ from app.config import settings
 from app.services import image_vips
 from app.services.image_vips import (
     ImageValidationError,
+    LosslessUnsuitableError,
     ProcessedImage,
     _extract_placeholders,
     sniff_format,
@@ -283,3 +284,178 @@ def test_oversized_image_rejected_before_any_placeholder_work(
 
     with pytest.raises(ImageValidationError, match="exceed"):
         validate_and_strip_image(raw)
+
+
+def test_optimization_lossless_produces_valid_webp() -> None:
+    raw = fixture_bytes("tiny.png")
+    balanced_result = validate_and_strip_image(raw, optimization="balanced")
+    lossless_result = validate_and_strip_image(raw, optimization="lossless")
+
+    assert lossless_result.content_type == "image/webp"
+    assert lossless_result.buffer[:4] == b"RIFF"
+    assert lossless_result.buffer[8:12] == b"WEBP"
+    assert lossless_result.buffer != balanced_result.buffer
+
+
+def test_lossless_roundtrip_pixel_identity() -> None:
+    """Synthetic sharp-edged graphic fixture round-trips pixel-identically at lossless."""
+    base = pyvips.Image.black(64, 64, bands=3).copy(interpretation="srgb") + [20, 40, 60]
+    box = pyvips.Image.black(24, 24, bands=3).copy(interpretation="srgb") + [200, 100, 50]
+    source_img = base.insert(box, 0, 0)
+    raw_png = source_img.write_to_buffer(".png")
+
+    result = validate_and_strip_image(raw_png, optimization="lossless")
+    decoded = pyvips.Image.new_from_buffer(result.buffer, "")
+
+    pt_box = decoded.getpoint(10, 10)
+    assert pt_box[0] == 200.0
+    assert pt_box[1] == 100.0
+    assert pt_box[2] == 50.0
+
+    pt_bg = decoded.getpoint(40, 40)
+    assert pt_bg[0] == 20.0
+    assert pt_bg[1] == 40.0
+    assert pt_bg[2] == 60.0
+
+
+def test_balanced_roundtrip_is_not_pixel_identical() -> None:
+    """The same sharp-edged fixture at balanced introduces lossy compression drift."""
+    base = pyvips.Image.black(64, 64, bands=3).copy(interpretation="srgb") + [20, 40, 60]
+    box = pyvips.Image.black(24, 24, bands=3).copy(interpretation="srgb") + [200, 100, 50]
+    source_img = base.insert(box, 0, 0)
+    raw_png = source_img.write_to_buffer(".png")
+
+    result = validate_and_strip_image(raw_png, optimization="balanced")
+    decoded = pyvips.Image.new_from_buffer(result.buffer, "")
+
+    pt_box = decoded.getpoint(10, 10)
+    pt_bg = decoded.getpoint(40, 40)
+    lossy_drift = (
+        pt_box[0] != 200.0
+        or pt_box[1] != 100.0
+        or pt_box[2] != 50.0
+        or pt_bg[0] != 20.0
+        or pt_bg[1] != 40.0
+        or pt_bg[2] != 60.0
+    )
+    assert lossy_drift is True
+
+
+def test_attention_crop_differs_from_centre_crop() -> None:
+    """Attention crop focuses on off-centre salient features rather than geometric centre."""
+    dark_bg = pyvips.Image.black(800, 400, bands=3).copy(interpretation="srgb")
+    bright_box = pyvips.Image.black(120, 120, bands=3).copy(interpretation="srgb") + [255, 255, 255]
+    composite = dark_bg.insert(bright_box, 10, 10)
+    raw_png = composite.write_to_buffer(".png")
+
+    result = validate_and_strip_image(raw_png, generate_renditions=True)
+    assert "thumbnail" in result.renditions
+
+    thumb_attn = pyvips.Image.new_from_buffer(result.renditions["thumbnail"], "")
+    assert thumb_attn.width == 300
+    assert thumb_attn.height == 300
+
+    img = pyvips.Image.new_from_buffer(raw_png, "")
+    thumb_centre = img.thumbnail_image(300, height=300, crop=pyvips.Interesting.CENTRE)
+
+    mean_attn = thumb_attn.avg()
+    mean_centre = thumb_centre.avg()
+
+    assert mean_attn != mean_centre
+    assert mean_attn > mean_centre
+
+
+def test_lossless_renditions_stay_lossy() -> None:
+    """Materialized renditions remain lossy even when main asset uses lossless optimization."""
+    raw = fixture_bytes("tiny.png")
+    result = validate_and_strip_image(raw, optimization="lossless", generate_renditions=True)
+    assert "thumbnail" in result.renditions
+    assert result.renditions["thumbnail"][:4] == b"RIFF"
+
+    img = pyvips.Image.new_from_buffer(raw, "")
+    lossless_thumb = img.thumbnail_image(
+        300, height=300, crop=pyvips.Interesting.ATTENTION
+    ).write_to_buffer(".webp", Q=75, strip=True, effort=4, lossless=True)
+
+    assert result.renditions["thumbnail"] != lossless_thumb
+
+
+def _flat_graphic(width: int = 1100, height: int = 1000) -> bytes:
+    """Screenshot-like content: flat fills and hard edges. What lossless is for."""
+    im = (pyvips.Image.black(width, height, bands=3) + [246, 247, 249]).cast("uchar")
+    bar = (pyvips.Image.black(int(width * 0.6), 18, bands=3) + [40, 44, 52]).cast("uchar")
+    for i in range(8):
+        im = im.insert(bar, 20, 20 + i * 40)
+    return im.copy(interpretation="srgb").write_to_buffer(".png")
+
+
+def _photographic(width: int = 1000, height: int = 1000) -> bytes:
+    """High-entropy content standing in for a photograph."""
+    noise = pyvips.Image.gaussnoise(width, height, mean=128, sigma=60)
+    im = noise.bandjoin([noise.rot(pyvips.Angle.D180), noise * 0.8]).cast("uchar")
+    return im.copy(interpretation="srgb").write_to_buffer(".png")
+
+
+def test_lossless_accepts_flat_graphic_content() -> None:
+    """The entropy probe must not reject the content lossless exists for."""
+    result = validate_and_strip_image(_flat_graphic(), "lossless")
+    assert result.content_type == "image/webp"
+    assert result.buffer[:4] == b"RIFF"
+
+
+def test_lossless_rejects_oversized_photographic_content() -> None:
+    """A large photograph projects to an oversized object and is rejected.
+
+    Measured: a 12.2MP photograph takes ~5.5s and produces ~6.1MB, while a
+    *larger* 14.7MP flat-colour screenshot takes 262ms and produces 5KB. Cost
+    tracks content, not pixel count, so the guard projects the output size from
+    a cheap entropy probe rather than capping dimensions -- a dimension cap
+    would block the intended use and permit the abusive one.
+    """
+    raw = _photographic(2600, 2600)  # ~6.8MP: projects well past the 8MB limit
+
+    with pytest.raises(LosslessUnsuitableError, match="would produce"):
+        validate_and_strip_image(raw, "lossless")
+
+
+def test_lossless_allows_small_photographic_content() -> None:
+    """Being photographic is not itself disqualifying -- only being expensive is.
+
+    A 1MP photograph encodes losslessly in ~389ms to ~1.0MB. That is
+    affordable, the caller asked for it explicitly, and rejecting it would make
+    the guard do something its purpose does not justify.
+    """
+    result = validate_and_strip_image(_photographic(1000, 1000), "lossless")
+    assert result.content_type == "image/webp"
+    assert result.buffer[:4] == b"RIFF"
+
+
+def test_tiny_image_passes_lossless_guard() -> None:
+    """WebP's fixed container overhead makes bytes-per-pixel meaningless at
+    tiny sizes (an 8x8 scores ~0.5, similar to a photograph). Projecting a
+    size rather than thresholding the ratio handles this with no special
+    case: 0.5 * 64 pixels is 30 bytes."""
+    result = validate_and_strip_image(fixture_bytes("tiny.png"), "lossless")
+    assert result.content_type == "image/webp"
+
+
+def test_lossless_rejection_is_an_image_validation_error() -> None:
+    """Subclassing matters: every existing `except ImageValidationError`
+    (including the bulk-upload handler) must keep catching this."""
+    raw = _photographic(2600, 2600)
+
+    with pytest.raises(ImageValidationError):
+        validate_and_strip_image(raw, "lossless")
+
+
+def test_lossless_output_size_backstop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The projection is approximate, so the actual result is re-checked.
+
+    Exercised by setting a limit the projection clears but the real encode
+    does not.
+    """
+    raw = _flat_graphic(1400, 1200)
+    monkeypatch.setattr(settings, "LOSSLESS_MAX_OUTPUT_BYTES", 200)
+
+    with pytest.raises(LosslessUnsuitableError):
+        validate_and_strip_image(raw, "lossless")

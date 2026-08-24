@@ -70,6 +70,25 @@ Guarantees 1:1 positional array mapping with explicit status discriminator and c
 }
 ```
 
+### Optimization Profiles (`optimization`)
+
+Images can be uploaded with four optimization profiles:
+- `balanced` (default): Q=85, max dimension 1920px. Standard profile for photos and general web assets.
+- `size`: Q=65, max dimension 1280px. Aggressive compression for size-critical bandwidth constraints.
+- `quality`: Q=95, max dimension 3840px. High-fidelity encoding for hero assets and photography portfolios.
+- `lossless`: Lossless WebP encoding with max dimension capped at 4096px (protecting against libwebp's 16383px ceiling).
+
+> [!NOTE]
+> `lossless` is designed for graphics with flat colours, sharp edges, diagrams, screenshots, and logos where lossy compression artifacts are unacceptable.
+>
+> **Do not use it on photographs.** Measured on real iPhone photos, `lossless` is roughly **20–30× larger and 7–11× slower** than `balanced` — a 4284×5712 HEIC (2.66 MB in) produces a **9.3 MB** object in about **6 seconds**, versus 0.35 MB in 0.8 s at `balanced`. Note the output is larger than the *input*: a lossy-compressed source re-encoded losslessly grows. Six seconds is also long enough to matter for client and CDN read timeouts.
+>
+> On the content it is meant for, it wins decisively in both directions: a 1920×1080 flat-colour graphic came out **16.7× smaller and 5.4× faster** than `balanced`.
+>
+> **Uploads that would produce an oversized lossless object are rejected with `400`, not silently encoded.** A cheap 512px probe projects the output size before the real encode runs; anything over `LOSSLESS_MAX_OUTPUT_BYTES` (8 MB default) fails with a message naming `optimization=quality` as the alternative. Flat-colour graphics project tiny and are unaffected — a 5K screenshot still encodes in ~200ms. Small photographs are fine too: the guard is about cost, not content, so a 1 MP photo (~400ms, ~0.4 MB) is accepted while a 12 MP one is not.
+>
+> Materialized renditions (`thumbnail`, `w400`, etc.) always remain lossy even for lossless uploads to ensure responsive delivery remains compact.
+
 ---
 
 ## 3. Video Upload & Lifecycle

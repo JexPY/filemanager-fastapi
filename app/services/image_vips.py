@@ -15,7 +15,21 @@ logger = logging.getLogger(__name__)
 # the same input. Folded into the upload dedup signature so a pipeline fix is
 # not masked by a hit on a record produced by the previous pipeline.
 # Sessions 3 and 4 bump this constant.
-IMAGE_PIPELINE_VERSION = 2
+IMAGE_PIPELINE_VERSION = 3
+
+# Long edge of the throwaway thumbnail used by the lossless entropy probe.
+_LOSSLESS_PROBE_SIDE = 512
+
+# Output container format used for encoded buffers in this pipeline.
+_WEBP_FORMAT = ".webp"
+
+
+@dataclass(frozen=True)
+class _EncodeParams:
+    q: int
+    max_dim: int
+    effort: int
+    lossless: bool = False
 
 
 @dataclass(frozen=True)
@@ -44,6 +58,16 @@ _SIGNATURES: dict[str, tuple[bytes, ...]] = {
 class ImageValidationError(Exception):
     """Any client-input image problem: unsupported format, oversized
     dimensions, or a corrupt/truncated file pyvips can't decode."""
+
+
+class LosslessUnsuitableError(ImageValidationError):
+    """`optimization=lossless` was requested for content it is not for.
+
+    A subclass so every existing `except ImageValidationError` still catches
+    it, but distinguishable at the route so the caller can be told which
+    parameter to change. The message the route emits is a fixed constant, not
+    a stringified exception -- no internal detail reaches the client.
+    """
 
 
 def sniff_format(data: bytes) -> str | None:
@@ -99,21 +123,73 @@ def _extract_placeholders(encoded: bytes) -> tuple[str, str]:
         r = g = b = 0
     dominant_color = f"#{r:02x}{g:02x}{b:02x}"
 
-    tile_buf = tile.write_to_buffer(".webp", Q=20, strip=True, effort=0)
+    tile_buf = tile.write_to_buffer(_WEBP_FORMAT, Q=20, strip=True, effort=0)
     b64 = base64.b64encode(tile_buf).decode("ascii")
     blur_data_url = f"data:image/webp;base64,{b64}"
 
     return dominant_color, blur_data_url
 
 
+def _lossless_probe_bytes_per_pixel(image: pyvips.Image) -> float:
+    """Lossless-encode a 512px thumbnail and return its bytes-per-pixel.
+
+    A cheap stand-in for content entropy, which is what actually drives
+    lossless cost -- see the settings comment on
+    LOSSLESS_MAX_PROBE_BYTES_PER_PIXEL for the measurements. `effort=0`
+    because the probe only needs a size signal, not a small file.
+    """
+    small = image.thumbnail_image(
+        _LOSSLESS_PROBE_SIDE,
+        height=_LOSSLESS_PROBE_SIDE,
+        size=pyvips.Size.DOWN,
+        crop=pyvips.Interesting.NONE,
+    )
+    buf = small.write_to_buffer(_WEBP_FORMAT, lossless=True, Q=75, strip=True, effort=0)
+    return len(buf) / max(small.width * small.height, 1)
+
+
+def _reject_unsuitable_lossless(image: pyvips.Image) -> None:
+    """Reject a lossless encode whose projected output would be oversized.
+
+    `_lossless_probe_bytes_per_pixel` is a content signal that barely moves
+    with image size (measured 1.265-1.297 across 0.25MP-12MP crops of the same
+    photograph), so multiplying it by the real pixel count projects the actual
+    output within about 1.5x -- enough to decide before paying for the encode.
+
+    Projecting a size rather than thresholding the ratio matters: the ratio
+    alone says "this is photographic", which is not by itself a problem. A 1MP
+    photograph encodes losslessly in 389ms to 1.0MB, which is entirely
+    affordable and should be allowed; a 12MP one takes 5.4s and is not. It also
+    removes what would otherwise need an arbitrary small-image exemption --
+    WebP's ~30-byte container overhead makes the ratio meaningless at tiny
+    sizes (an 8x8 image scores ~0.5), but 0.5 * 64 pixels projects to 30 bytes,
+    so small images pass on the projection without a special case.
+    """
+    projected = _lossless_probe_bytes_per_pixel(image) * image.width * image.height
+    limit = settings.LOSSLESS_MAX_OUTPUT_BYTES
+    if projected > limit:
+        raise LosslessUnsuitableError(
+            f"lossless would produce roughly {projected / 1e6:.1f}MB, over the "
+            f"{limit / 1e6:.1f}MB limit (use optimization=quality)"
+        )
+
+
 def _generate_materialized_renditions(image: pyvips.Image, width: int) -> dict[str, bytes]:
-    """Encode extra responsive width and thumbnail renditions in materialize mode."""
+    """Encode extra responsive width and thumbnail renditions in materialize mode.
+
+    Renditions deliberately remain lossy regardless of the primary asset's
+    optimization profile (e.g. `lossless`), because renditions are CDN
+    accelerators where compact transfer size is the primary goal.
+    """
     renditions: dict[str, bytes] = {}
     for spec in RENDITION_SPECS.values():
         if spec.crop:
-            rend_image = image.thumbnail_image(
-                spec.width, height=spec.height, crop=pyvips.Interesting.CENTRE
+            interesting = (
+                pyvips.Interesting.ATTENTION
+                if spec.crop_mode == "attention"
+                else pyvips.Interesting.CENTRE
             )
+            rend_image = image.thumbnail_image(spec.width, height=spec.height, crop=interesting)
         else:
             if width < spec.width:
                 continue
@@ -133,13 +209,19 @@ def _generate_materialized_renditions(image: pyvips.Image, width: int) -> dict[s
     return renditions
 
 
-def _get_optimization_params(optimization: str) -> tuple[int, int, int]:
-    """Return (q_value, max_dimension, effort) for the given optimization profile."""
+def _get_optimization_params(optimization: str) -> _EncodeParams:
+    """Return _EncodeParams for the given optimization profile."""
     if optimization == "size":
-        return 65, 1280, 4
+        return _EncodeParams(q=65, max_dim=1280, effort=4, lossless=False)
     if optimization == "quality":
-        return 95, 3840, 6
-    return 85, 1920, 4
+        return _EncodeParams(q=95, max_dim=3840, effort=6, lossless=False)
+    if optimization == "lossless":
+        # libwebp hard limits dimensions to 16383px. Capping lossless at 4096px
+        # ensures large scans never hit libwebp's hard ceiling while preserving
+        # pixel fidelity for graphics, screenshots, and logos.
+        # Q is a compression-effort level in lossless WebP rather than quality.
+        return _EncodeParams(q=75, max_dim=4096, effort=4, lossless=True)
+    return _EncodeParams(q=85, max_dim=1920, effort=4, lossless=False)
 
 
 def validate_and_strip_image(
@@ -189,17 +271,43 @@ def validate_and_strip_image(
     if generate_renditions and settings.IMAGE_RENDITION_MODE == "materialize":
         renditions = _generate_materialized_renditions(image, width)
 
-    q_value, max_dim, effort = _get_optimization_params(optimization)
+    params = _get_optimization_params(optimization)
 
-    if width > max_dim or height > max_dim:
-        scale = min(max_dim / width, max_dim / height)
+    if width > params.max_dim or height > params.max_dim:
+        scale = min(params.max_dim / width, params.max_dim / height)
         image = image.resize(scale)
         width = image.width
         height = image.height
 
-    optimized_buffer = image.write_to_buffer(
-        ".webp", Q=q_value, strip=True, effort=effort, smart_subsample=True
-    )
+    if params.lossless:
+        # Materialize once: the probe and the encode are two independent
+        # pyvips sinks, and without this each would force its own full
+        # decode (the same trap documented on _extract_placeholders). Bounded
+        # by max_dim=4096, so at most ~50MB for this branch only.
+        image = image.copy_memory()
+        _reject_unsuitable_lossless(image)
+        optimized_buffer = image.write_to_buffer(
+            _WEBP_FORMAT,
+            Q=params.q,
+            strip=True,
+            effort=params.effort,
+            lossless=True,
+        )
+        if len(optimized_buffer) > settings.LOSSLESS_MAX_OUTPUT_BYTES:
+            # Backstop for content the probe misjudged. The CPU is already
+            # spent, but an unbounded object never reaches storage.
+            raise LosslessUnsuitableError(
+                f"lossless output {len(optimized_buffer)} bytes exceeds the "
+                f"{settings.LOSSLESS_MAX_OUTPUT_BYTES}-byte limit"
+            )
+    else:
+        optimized_buffer = image.write_to_buffer(
+            _WEBP_FORMAT,
+            Q=params.q,
+            strip=True,
+            effort=params.effort,
+            smart_subsample=True,
+        )
 
     # Placeholders come from the encoded output, not the source -- see
     # _extract_placeholders. This must stay after the encode; moving it earlier

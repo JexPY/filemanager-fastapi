@@ -28,6 +28,10 @@ class RenditionSpec:
     mime_type: str = MIME_WEBP
     quality: int = 80
     crop: bool = True
+    # Only consulted when `crop` is True. "attention" runs libvips' saliency
+    # search so a portrait's subject survives a square crop; "centre" is the
+    # cheap geometric fallback.
+    crop_mode: str = "attention"
     # libwebp's compression-effort search, 0 (fastest) to 6 (slowest, smallest
     # file). 6 is the right choice for the *primary* encode (a one-time cost
     # for the asset people actually view/embed) but the wrong default for a
@@ -49,6 +53,7 @@ RENDITION_SPECS: dict[str, RenditionSpec] = {
         mime_type=MIME_WEBP,
         quality=80,
         crop=True,
+        crop_mode="attention",
         effort=4,
     ),
     "w400": RenditionSpec(

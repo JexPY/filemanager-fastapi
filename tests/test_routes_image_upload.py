@@ -206,3 +206,94 @@ async def test_dedup_image_upload_carries_placeholders(
     assert body2["id"] == body1["id"]
     assert body2["dominant_color"] == body1["dominant_color"]
     assert body2["blur_data_url"] == body1["blur_data_url"]
+
+
+async def test_upload_image_accepts_lossless_optimization(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    resp = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        data={"optimization": "lossless"},
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "success"
+    assert "id" in body
+
+
+async def test_upload_images_bulk_accepts_lossless_optimization(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    resp = await client.post(
+        "/upload/images",
+        headers=auth_headers,
+        data={"optimization": "lossless"},
+        files=[
+            ("files", ("tiny1.png", fixture_bytes("tiny.png"), "image/png")),
+            ("files", ("tiny2.png", fixture_bytes("tiny.png"), "image/png")),
+        ],
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["succeeded"] == 2
+    assert body["failed"] == 0
+    assert len(body["items"]) == 2
+
+
+async def test_upload_image_rejects_invalid_optimization(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    resp = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        data={"optimization": "invalid_mode"},
+        files={"file": ("tiny.png", fixture_bytes("tiny.png"), "image/png")},
+    )
+    assert resp.status_code == 422
+
+
+async def test_upload_image_rejects_unsuitable_lossless(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    import pyvips
+
+    noise = pyvips.Image.gaussnoise(2600, 2600, mean=128, sigma=60)
+    photo = noise.bandjoin([noise.rot(pyvips.Angle.D180), noise * 0.8]).cast("uchar")
+    raw_photo = photo.copy(interpretation="srgb").write_to_buffer(".png")
+
+    resp = await client.post(
+        "/upload/image",
+        headers=auth_headers,
+        data={"optimization": "lossless"},
+        files={"file": ("photo.png", raw_photo, "image/png")},
+    )
+    assert resp.status_code == 400
+    assert "oversized" in resp.json()["detail"]
+
+
+async def test_upload_images_bulk_handles_unsuitable_lossless(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    import pyvips
+
+    noise = pyvips.Image.gaussnoise(2600, 2600, mean=128, sigma=60)
+    photo = noise.bandjoin([noise.rot(pyvips.Angle.D180), noise * 0.8]).cast("uchar")
+    raw_photo = photo.copy(interpretation="srgb").write_to_buffer(".png")
+
+    resp = await client.post(
+        "/upload/images",
+        headers=auth_headers,
+        data={"optimization": "lossless"},
+        files=[
+            ("files", ("photo.png", raw_photo, "image/png")),
+            ("files", ("tiny.png", fixture_bytes("tiny.png"), "image/png")),
+        ],
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["succeeded"] == 1
+    assert body["failed"] == 1
+    assert "oversized" in body["items"][0]["message"]
+    assert body["items"][1]["status"] == "success"
