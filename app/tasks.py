@@ -451,9 +451,7 @@ async def _cleanup_video_task_artifacts(output_path: str, raw_storage_key: str) 
     try:
         await delete_file(raw_storage_key)
     except StorageError as exc:
-        logger.warning(
-            "Failed to delete raw video %s after processing: %s", raw_storage_key, exc
-        )
+        logger.warning("Failed to delete raw video %s after processing: %s", raw_storage_key, exc)
 
 
 @broker.task
