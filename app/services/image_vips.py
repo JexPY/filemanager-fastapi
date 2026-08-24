@@ -20,6 +20,9 @@ IMAGE_PIPELINE_VERSION = 3
 # Long edge of the throwaway thumbnail used by the lossless entropy probe.
 _LOSSLESS_PROBE_SIDE = 512
 
+# Output container format used for encoded buffers in this pipeline.
+_WEBP_FORMAT = ".webp"
+
 
 @dataclass(frozen=True)
 class _EncodeParams:
@@ -120,7 +123,7 @@ def _extract_placeholders(encoded: bytes) -> tuple[str, str]:
         r = g = b = 0
     dominant_color = f"#{r:02x}{g:02x}{b:02x}"
 
-    tile_buf = tile.write_to_buffer(".webp", Q=20, strip=True, effort=0)
+    tile_buf = tile.write_to_buffer(_WEBP_FORMAT, Q=20, strip=True, effort=0)
     b64 = base64.b64encode(tile_buf).decode("ascii")
     blur_data_url = f"data:image/webp;base64,{b64}"
 
@@ -141,7 +144,7 @@ def _lossless_probe_bytes_per_pixel(image: pyvips.Image) -> float:
         size=pyvips.Size.DOWN,
         crop=pyvips.Interesting.NONE,
     )
-    buf = small.write_to_buffer(".webp", lossless=True, Q=75, strip=True, effort=0)
+    buf = small.write_to_buffer(_WEBP_FORMAT, lossless=True, Q=75, strip=True, effort=0)
     return len(buf) / max(small.width * small.height, 1)
 
 
@@ -284,7 +287,7 @@ def validate_and_strip_image(
         image = image.copy_memory()
         _reject_unsuitable_lossless(image)
         optimized_buffer = image.write_to_buffer(
-            ".webp",
+            _WEBP_FORMAT,
             Q=params.q,
             strip=True,
             effort=params.effort,
@@ -299,7 +302,7 @@ def validate_and_strip_image(
             )
     else:
         optimized_buffer = image.write_to_buffer(
-            ".webp",
+            _WEBP_FORMAT,
             Q=params.q,
             strip=True,
             effort=params.effort,
