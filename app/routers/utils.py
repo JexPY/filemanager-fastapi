@@ -310,52 +310,36 @@ class CustomImageParams:
     format: str | None = None
 
 
-def _image_response(
-    record_id: str,
-    width: int | None,
-    height: int | None,
-    size_bytes: int | None,
-    storage_key: str,
-    renditions: dict[str, str] | None = None,
-    include_thumbnail: bool = False,
-    custom_params: CustomImageParams | None = None,
-    visibility: str = "public",
-    original_filename: str | None = None,
-    placeholders: tuple[str | None, str | None] | None = None,
-) -> dict:
-    """Shape the POST /upload/image response."""
+def _resolve_main_image_url(record_id: str, storage_key: str, visibility: str) -> str:
     if visibility == "public" and has_public_base_url():
-        main_url = public_object_url(storage_key)
-    else:
-        main_url = public_url(f"/files/{record_id}/download")
+        return public_object_url(storage_key)
+    return public_url(f"/files/{record_id}/download")
 
-    filtered_renditions = _filter_renditions(renditions, width)
 
-    response: dict[str, Any] = {
-        "status": "success",
-        "id": record_id,
-        "size_bytes": size_bytes,
-        "size_mb": round(size_bytes / (1024 * 1024), 2) if size_bytes else None,
-        "dimensions": {"width": width, "height": height},
-        "url": main_url,
-    }
-    if original_filename is not None:
-        response["original_filename"] = original_filename
+def _apply_placeholders(
+    response: dict[str, Any],
+    placeholders: tuple[str | None, str | None] | None,
+) -> None:
+    if not placeholders:
+        return
+    dominant_color, blur_data_url = placeholders
+    if dominant_color is not None:
+        response["dominant_color"] = dominant_color
+    if blur_data_url is not None:
+        response["blur_data_url"] = blur_data_url
 
-    if placeholders:
-        dominant_color, blur_data_url = placeholders
-        if dominant_color is not None:
-            response["dominant_color"] = dominant_color
-        if blur_data_url is not None:
-            response["blur_data_url"] = blur_data_url
 
-    if visibility != "public":
-        return response
-
+def _apply_public_image_fields(
+    response: dict[str, Any],
+    storage_key: str,
+    filtered_renditions: dict[str, str],
+    include_thumbnail: bool,
+    custom_params: CustomImageParams | None,
+) -> None:
     response["storage_key"] = storage_key
     response["renditions"] = filtered_renditions
 
-    if include_thumbnail or (filtered_renditions and "thumbnail" in filtered_renditions):
+    if include_thumbnail or "thumbnail" in filtered_renditions:
         response["thumbnail_url"] = derive_thumbnail_url(storage_key, filtered_renditions or None)
 
     if custom_params is not None:
@@ -368,5 +352,44 @@ def _image_response(
         )
         if custom_url is not None:
             response["custom_url"] = custom_url
+
+
+def _image_response(
+    record_id: str,
+    width: int | None,
+    height: int | None,
+    size_bytes: int | None,
+    storage_key: str,
+    renditions: dict[str, str] | None = None,
+    include_thumbnail: bool = False,
+    custom_params: CustomImageParams | None = None,
+    visibility: str = "public",
+    original_filename: str | None = None,
+    placeholders: tuple[str | None, str | None] | None = None,
+) -> dict[str, Any]:
+    """Shape the POST /upload/image response."""
+    filtered_renditions = _filter_renditions(renditions, width)
+
+    response: dict[str, Any] = {
+        "status": "success",
+        "id": record_id,
+        "size_bytes": size_bytes,
+        "size_mb": round(size_bytes / (1024 * 1024), 2) if size_bytes else None,
+        "dimensions": {"width": width, "height": height},
+        "url": _resolve_main_image_url(record_id, storage_key, visibility),
+    }
+    if original_filename is not None:
+        response["original_filename"] = original_filename
+
+    _apply_placeholders(response, placeholders)
+
+    if visibility == "public":
+        _apply_public_image_fields(
+            response,
+            storage_key=storage_key,
+            filtered_renditions=filtered_renditions,
+            include_thumbnail=include_thumbnail,
+            custom_params=custom_params,
+        )
 
     return response
