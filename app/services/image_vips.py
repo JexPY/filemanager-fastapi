@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # the same input. Folded into the upload dedup signature so a pipeline fix is
 # not masked by a hit on a record produced by the previous pipeline.
 # Sessions 3 and 4 bump this constant.
-IMAGE_PIPELINE_VERSION = 3
+IMAGE_PIPELINE_VERSION = 4
 
 # Long edge of the throwaway thumbnail used by the lossless entropy probe.
 _LOSSLESS_PROBE_SIDE = 512
@@ -148,7 +148,7 @@ def _lossless_probe_bytes_per_pixel(image: pyvips.Image) -> float:
     return len(buf) / max(small.width * small.height, 1)
 
 
-def _reject_unsuitable_lossless(image: pyvips.Image) -> None:
+def _reject_unsuitable_lossless(image: pyvips.Image, *, total_pixels: int | None = None) -> None:
     """Reject a lossless encode whose projected output would be oversized.
 
     `_lossless_probe_bytes_per_pixel` is a content signal that barely moves
@@ -164,13 +164,29 @@ def _reject_unsuitable_lossless(image: pyvips.Image) -> None:
     WebP's ~30-byte container overhead makes the ratio meaningless at tiny
     sizes (an 8x8 image scores ~0.5), but 0.5 * 64 pixels projects to 30 bytes,
     so small images pass on the projection without a special case.
+
+    `total_pixels` overrides the pixel count taken from `image`. The animated
+    path uses it to probe cheap frame-0 content while projecting against the
+    whole filmstrip -- probing the strip itself would force a decode of every
+    frame just to sample entropy.
     """
-    projected = _lossless_probe_bytes_per_pixel(image) * image.width * image.height
+    pixels = image.width * image.height if total_pixels is None else total_pixels
+    projected = _lossless_probe_bytes_per_pixel(image) * pixels
     limit = settings.LOSSLESS_MAX_OUTPUT_BYTES
     if projected > limit:
         raise LosslessUnsuitableError(
             f"lossless would produce roughly {projected / 1e6:.1f}MB, over the "
             f"{limit / 1e6:.1f}MB limit (use optimization=quality)"
+        )
+
+
+def _enforce_lossless_output_size(buffer: bytes) -> None:
+    """Backstop for content the projection misjudged. The CPU is already spent,
+    but an unbounded object never reaches storage."""
+    limit = settings.LOSSLESS_MAX_OUTPUT_BYTES
+    if len(buffer) > limit:
+        raise LosslessUnsuitableError(
+            f"lossless output {len(buffer)} bytes exceeds the {limit}-byte limit"
         )
 
 
@@ -224,6 +240,184 @@ def _get_optimization_params(optimization: str) -> _EncodeParams:
     return _EncodeParams(q=85, max_dim=1920, effort=4, lossless=False)
 
 
+def _process_animated(
+    file_data: bytes,
+    n_pages: int,
+    *,
+    optimization: str = "balanced",
+    generate_renditions: bool = False,
+) -> ProcessedImage:
+    """Process multi-frame animated GIF or WebP into an optimized animated WebP.
+
+    Preserves frames, non-uniform delays, and loop counts while bounding
+    frame counts and total cumulative pixels to protect request-path latency.
+    Renditions are kept static by generating them from frame 0 only.
+    """
+    try:
+        image = pyvips.Image.new_from_buffer(file_data, "", n=-1)
+    except pyvips.Error as exc:
+        raise ImageValidationError(f"Could not decode animated image: {exc}") from exc
+
+    frame_width = image.width
+    frame_height = (
+        image.get("page-height") if image.get_typeof("page-height") != 0 else image.height
+    )
+
+    # 1. Per-frame pixel budget (reusing MAX_IMAGE_PIXELS with frame height, not strip height).
+    if frame_width * frame_height > settings.MAX_IMAGE_PIXELS:
+        raise ImageValidationError(
+            f"Image frame dimensions {frame_width}x{frame_height} exceed the "
+            f"{settings.MAX_IMAGE_PIXELS}-pixel limit"
+        )
+
+    # 2. Maximum animation frame count cap.
+    if n_pages > settings.IMAGE_ANIMATION_MAX_FRAMES:
+        raise ImageValidationError(
+            f"Animation frame count {n_pages} exceeds the "
+            f"{settings.IMAGE_ANIMATION_MAX_FRAMES}-frame limit"
+        )
+
+    # 3. Cumulative animation pixel budget (frame_w * frame_h * frames).
+    total_pixels = frame_width * frame_height * n_pages
+    if total_pixels > settings.IMAGE_ANIMATION_MAX_TOTAL_PIXELS:
+        raise ImageValidationError(
+            f"Animation total pixels {total_pixels} exceed the "
+            f"{settings.IMAGE_ANIMATION_MAX_TOTAL_PIXELS}-pixel limit"
+        )
+
+    # Note on autorot: Skip autorot() for animated input because rotating a
+    # multi-page filmstrip as one image is meaningless, and animated GIFs/WebPs
+    # do not carry meaningful EXIF orientation.
+
+    # 4. Handle CMYK and greyscale inputs arriving with a non-sRGB interpretation.
+    if image.interpretation != pyvips.Interpretation.SRGB:
+        image = image.colourspace(pyvips.Interpretation.SRGB)
+
+    # 5. Static renditions generated from frame 0 only.
+    renditions: dict[str, bytes] = {}
+    if generate_renditions and settings.IMAGE_RENDITION_MODE == "materialize":
+        # Materialized renditions of an animated image must be static, generated
+        # from frame 0. A second cheap load at n=1 isolates still rendition
+        # generation without strip-aware special cases.
+        still = pyvips.Image.new_from_buffer(file_data, "")
+        renditions = _generate_materialized_renditions(still, still.width)
+
+    params = _get_optimization_params(optimization)
+
+    # 6. Resizing: thumbnail_buffer understands page-height and maintains it
+    # across downscaling; image.resize() does not update page-height.
+    if frame_width > params.max_dim or frame_height > params.max_dim:
+        image = pyvips.Image.thumbnail_buffer(
+            file_data,
+            params.max_dim,
+            height=params.max_dim,
+            size=pyvips.Size.DOWN,
+            option_string="n=-1",
+        )
+        frame_width = image.width
+        frame_height = (
+            image.get("page-height") if image.get_typeof("page-height") != 0 else image.height
+        )
+
+    # 7. WebP Encode with low effort (effort=2) to avoid multi-second request times
+    # on multi-frame clips. Note: strip=True removes all EXIF/GPS/ICC metadata while
+    # preserving animation layout (delay, loop, page-height).
+    if params.lossless:
+        # The still path's lossless guards apply here too, and this branch is
+        # where they are easiest to forget: an animated lossless encode
+        # multiplies an already-expensive profile by the frame count. Probe
+        # frame 0 for the content signal but project against the whole
+        # filmstrip -- probing the strip would decode every frame just to
+        # sample entropy.
+        probe_frame = pyvips.Image.new_from_buffer(file_data, "")
+        _reject_unsuitable_lossless(probe_frame, total_pixels=frame_width * frame_height * n_pages)
+        optimized_buffer = image.write_to_buffer(
+            _WEBP_FORMAT,
+            Q=params.q,
+            strip=True,
+            effort=2,
+            lossless=True,
+        )
+        _enforce_lossless_output_size(optimized_buffer)
+    else:
+        optimized_buffer = image.write_to_buffer(
+            _WEBP_FORMAT,
+            Q=params.q,
+            strip=True,
+            effort=2,
+            smart_subsample=True,
+        )
+
+    # 8. Placeholders come from the encoded output (frame 0 thumbnail).
+    dominant_color, blur_data_url = _extract_placeholders(optimized_buffer)
+
+    return ProcessedImage(
+        buffer=optimized_buffer,
+        content_type="image/webp",
+        width=frame_width,
+        height=frame_height,
+        renditions=renditions,
+        dominant_color=dominant_color,
+        blur_data_url=blur_data_url,
+    )
+
+
+def _probe_pages(file_data: bytes) -> int:
+    """Probe page count cheaply to branch early between still and animated paths.
+
+    Wrapped in try/except so a malformed page count or corrupt header falls
+    through to the standard still path rather than raising a 500.
+    """
+    try:
+        probe = pyvips.Image.new_from_buffer(file_data, "", n=-1)
+        if probe.get_typeof("n-pages") != 0:
+            return int(probe.get("n-pages"))
+    except pyvips.Error:
+        pass
+    return 1
+
+
+def _normalize_icc_profile(image: pyvips.Image) -> pyvips.Image:
+    """Convert embedded wide-gamut profile (Display P3, AdobeRGB) to sRGB before
+    strip=True drops the profile and before rendition generation."""
+    if image.get_typeof("icc-profile-data") != 0:
+        try:
+            return image.icc_transform("srgb", embedded=True)
+        except pyvips.Error as exc:
+            # An unconvertible/corrupt profile must not fail the upload; leaving
+            # the pixels untouched is the same behaviour as before this change.
+            logger.warning("Failed to apply embedded ICC profile: %s", exc)
+    return image
+
+
+def _encode_still_image(image: pyvips.Image, params: _EncodeParams) -> bytes:
+    """Encode still image to WebP using the specified optimization parameters."""
+    if params.lossless:
+        # Materialize once: the probe and the encode are two independent
+        # pyvips sinks, and without this each would force its own full
+        # decode (the same trap documented on _extract_placeholders). Bounded
+        # by max_dim=4096, so at most ~50MB for this branch only.
+        image = image.copy_memory()
+        _reject_unsuitable_lossless(image)
+        optimized_buffer = image.write_to_buffer(
+            _WEBP_FORMAT,
+            Q=params.q,
+            strip=True,
+            effort=params.effort,
+            lossless=True,
+        )
+        _enforce_lossless_output_size(optimized_buffer)
+        return optimized_buffer
+
+    return image.write_to_buffer(
+        _WEBP_FORMAT,
+        Q=params.q,
+        strip=True,
+        effort=params.effort,
+        smart_subsample=True,
+    )
+
+
 def validate_and_strip_image(
     file_data: bytes, optimization: str = "balanced", *, generate_renditions: bool = False
 ) -> ProcessedImage:
@@ -237,6 +431,15 @@ def validate_and_strip_image(
     if sniff_format(file_data) is None:
         raise ImageValidationError("Unsupported or unrecognized image format")
 
+    n_pages = _probe_pages(file_data)
+    if n_pages > 1:
+        return _process_animated(
+            file_data,
+            n_pages,
+            optimization=optimization,
+            generate_renditions=generate_renditions,
+        )
+
     try:
         image = pyvips.Image.new_from_buffer(file_data, "")
     except pyvips.Error as exc:
@@ -248,13 +451,7 @@ def validate_and_strip_image(
 
     # 2. Convert embedded wide-gamut profile (Display P3, AdobeRGB) to sRGB before
     # strip=True drops the profile and before rendition generation.
-    if image.get_typeof("icc-profile-data") != 0:
-        try:
-            image = image.icc_transform("srgb", embedded=True)
-        except pyvips.Error as exc:
-            # An unconvertible/corrupt profile must not fail the upload; leaving
-            # the pixels untouched is the same behaviour as before this change.
-            logger.warning("Failed to apply embedded ICC profile: %s", exc)
+    image = _normalize_icc_profile(image)
 
     # 3. Handle CMYK and greyscale inputs arriving with a non-sRGB interpretation.
     if image.interpretation != pyvips.Interpretation.SRGB:
@@ -279,35 +476,7 @@ def validate_and_strip_image(
         width = image.width
         height = image.height
 
-    if params.lossless:
-        # Materialize once: the probe and the encode are two independent
-        # pyvips sinks, and without this each would force its own full
-        # decode (the same trap documented on _extract_placeholders). Bounded
-        # by max_dim=4096, so at most ~50MB for this branch only.
-        image = image.copy_memory()
-        _reject_unsuitable_lossless(image)
-        optimized_buffer = image.write_to_buffer(
-            _WEBP_FORMAT,
-            Q=params.q,
-            strip=True,
-            effort=params.effort,
-            lossless=True,
-        )
-        if len(optimized_buffer) > settings.LOSSLESS_MAX_OUTPUT_BYTES:
-            # Backstop for content the probe misjudged. The CPU is already
-            # spent, but an unbounded object never reaches storage.
-            raise LosslessUnsuitableError(
-                f"lossless output {len(optimized_buffer)} bytes exceeds the "
-                f"{settings.LOSSLESS_MAX_OUTPUT_BYTES}-byte limit"
-            )
-    else:
-        optimized_buffer = image.write_to_buffer(
-            _WEBP_FORMAT,
-            Q=params.q,
-            strip=True,
-            effort=params.effort,
-            smart_subsample=True,
-        )
+    optimized_buffer = _encode_still_image(image, params)
 
     # Placeholders come from the encoded output, not the source -- see
     # _extract_placeholders. This must stay after the encode; moving it earlier

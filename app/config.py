@@ -182,6 +182,14 @@ class Settings(BaseSettings):
     # the real output size and is checked against this limit before the
     # expensive encode runs. The same limit is re-checked on the actual result.
     LOSSLESS_MAX_OUTPUT_BYTES: int = Field(default=8 * 1024 * 1024)
+    # Maximum frames accepted in an animated image. Beyond this the upload is
+    # rejected (400) rather than queued -- animated encoding runs on the
+    # synchronous request path and there is no async image pipeline.
+    IMAGE_ANIMATION_MAX_FRAMES: int = Field(default=300)
+    # Maximum frame_width * frame_height * frames. Bounds total encode work
+    # independently of frame count, so 500 tiny frames and 20 large ones are
+    # both governed.
+    IMAGE_ANIMATION_MAX_TOTAL_PIXELS: int = Field(default=100_000_000)
     # QR codes have a hard capacity limit (~2953 bytes at version 40/level L);
     # this just rejects absurd input before it ever reaches segno.
     MAX_QR_CONTENT_LENGTH: int = Field(default=2000)

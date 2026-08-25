@@ -459,3 +459,313 @@ def test_lossless_output_size_backstop(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(LosslessUnsuitableError):
         validate_and_strip_image(raw, "lossless")
+
+
+def test_animated_gif_produces_animated_webp() -> None:
+    """An animated GIF produces a WebP with matching frame count."""
+    raw = fixture_bytes("animated.gif")
+    result = validate_and_strip_image(raw)
+
+    assert result.content_type == "image/webp"
+    assert result.buffer[:4] == b"RIFF"
+
+    decoded = pyvips.Image.new_from_buffer(result.buffer, "", n=-1)
+    assert decoded.get_typeof("n-pages") != 0
+    assert decoded.get("n-pages") == 5
+
+
+def test_animated_gif_preserves_frame_delays() -> None:
+    """Non-uniform frame delays survive the animated WebP re-encode."""
+    raw = fixture_bytes("animated.gif")
+    result = validate_and_strip_image(raw)
+
+    decoded = pyvips.Image.new_from_buffer(result.buffer, "", n=-1)
+    assert decoded.get_typeof("delay") != 0
+    delays = decoded.get("delay")
+    assert delays == [100, 200, 150, 300, 250]
+
+
+def test_animated_gif_preserves_loop_count() -> None:
+    """Animation loop count survives the WebP re-encode."""
+    raw = fixture_bytes("animated.gif")
+    result = validate_and_strip_image(raw)
+
+    decoded = pyvips.Image.new_from_buffer(result.buffer, "", n=-1)
+    assert decoded.get_typeof("loop") != 0
+    assert decoded.get("loop") == 0
+
+
+def test_animated_dimensions_are_frame_not_strip() -> None:
+    """Returned dimensions must be individual frame dimensions, not strip dimensions.
+
+    animated.gif is 32x32 per frame with 5 frames (strip height 160).
+    result.height must be 32, not 160.
+    """
+    raw = fixture_bytes("animated.gif")
+    result = validate_and_strip_image(raw)
+
+    assert result.width == 32
+    assert result.height == 32
+
+
+def test_animated_renditions_are_static() -> None:
+    """Materialized renditions of animated uploads are static (1 frame) and 300x300."""
+    raw = fixture_bytes("animated.gif")
+    result = validate_and_strip_image(raw, generate_renditions=True)
+
+    assert "thumbnail" in result.renditions
+    thumb_buf = result.renditions["thumbnail"]
+    thumb_img = pyvips.Image.new_from_buffer(thumb_buf, "", n=-1)
+
+    assert thumb_img.width == 300
+    assert thumb_img.height == 300
+    # Single-frame static WebP has no n-pages metadata or n-pages == 1
+    if thumb_img.get_typeof("n-pages") != 0:
+        assert thumb_img.get("n-pages") == 1
+
+
+def test_animated_webp_input_stays_animated() -> None:
+    """Animated WebP input keeps its multi-frame animation."""
+    raw = fixture_bytes("animated.webp")
+    result = validate_and_strip_image(raw)
+
+    assert result.content_type == "image/webp"
+    decoded = pyvips.Image.new_from_buffer(result.buffer, "", n=-1)
+    assert decoded.get_typeof("n-pages") != 0
+    assert decoded.get("n-pages") == 5
+    assert result.width == 32
+    assert result.height == 32
+
+
+def test_single_frame_gif_takes_still_path() -> None:
+    """Single-frame GIF (tiny.gif) takes the still path and is unchanged."""
+    raw = fixture_bytes("tiny.gif")
+    result = validate_and_strip_image(raw)
+
+    assert result.content_type == "image/webp"
+    decoded = pyvips.Image.new_from_buffer(result.buffer, "", n=-1)
+    if decoded.get_typeof("n-pages") != 0:
+        assert decoded.get("n-pages") == 1
+    assert result.width == 8
+    assert result.height == 8
+
+
+def test_animated_frame_count_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Animated input exceeding IMAGE_ANIMATION_MAX_FRAMES is rejected with ImageValidationError."""
+    monkeypatch.setattr(settings, "IMAGE_ANIMATION_MAX_FRAMES", 2)
+    raw = fixture_bytes("animated.gif")
+
+    with pytest.raises(ImageValidationError, match="frame count"):
+        validate_and_strip_image(raw)
+
+
+def test_animated_total_pixel_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Animated input exceeding IMAGE_ANIMATION_MAX_TOTAL_PIXELS is rejected."""
+    # animated.gif is 32 * 32 * 5 = 5120 total pixels
+    monkeypatch.setattr(settings, "IMAGE_ANIMATION_MAX_TOTAL_PIXELS", 5000)
+    raw = fixture_bytes("animated.gif")
+
+    with pytest.raises(ImageValidationError, match="total pixels"):
+        validate_and_strip_image(raw)
+
+
+def test_animated_per_frame_pixel_cap_uses_frame_height(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-frame pixel cap uses frame height (32x32 = 1024), not filmstrip height (32x160 = 5120).
+
+    Cap set to 2000 pixels: frame pixels (1024) <= 2000 < strip pixels (5120),
+    so the upload must succeed.
+    """
+    monkeypatch.setattr(settings, "MAX_IMAGE_PIXELS", 2000)
+    raw = fixture_bytes("animated.gif")
+
+    result = validate_and_strip_image(raw)
+    assert result.content_type == "image/webp"
+    assert result.width == 32
+    assert result.height == 32
+
+
+def _animated_photographic(width: int, height: int, frames: int) -> bytes:
+    """A multi-frame GIF with photographic (high-entropy) frames."""
+    pages = []
+    for i in range(frames):
+        noise = pyvips.Image.gaussnoise(width, height, mean=120 + i, sigma=55)
+        frame = noise.bandjoin([noise.rot(pyvips.Angle.D180), noise * 0.8]).cast("uchar")
+        pages.append(frame.copy(interpretation="srgb"))
+    strip = pyvips.Image.arrayjoin(pages, across=1).copy()
+    strip.set_type(pyvips.GValue.gint_type, "page-height", height)
+    return strip.write_to_buffer(".gif")
+
+
+def test_animated_lossless_is_guarded_like_the_still_path() -> None:
+    """The animated branch must not bypass the lossless cost guards.
+
+    It has its own `params.lossless` branch, which is exactly where these are
+    easy to forget -- and an animated lossless encode multiplies an already
+    expensive profile by the frame count. A 640x480x40 photographic animation
+    previously sailed through with no projection check and no output-size
+    backstop at all.
+    """
+    raw = _animated_photographic(640, 480, 40)
+
+    # "would produce" is the pre-encode projection; the post-encode backstop
+    # says "output ... exceeds". Matching the former pins the cheap guard, so
+    # this cannot silently degrade into only catching it after the work.
+    with pytest.raises(LosslessUnsuitableError, match="would produce"):
+        validate_and_strip_image(raw, "lossless")
+
+
+def test_animated_lossless_allows_flat_content() -> None:
+    """The guard is about projected cost, so a cheap animation still passes."""
+    result = validate_and_strip_image(fixture_bytes("animated.gif"), "lossless")
+    assert result.content_type == "image/webp"
+
+    decoded = pyvips.Image.new_from_buffer(result.buffer, "", n=-1)
+    assert decoded.get("n-pages") == 5
+
+
+def test_animated_lossy_path_is_unaffected_by_the_lossless_guard() -> None:
+    """Guards are scoped to lossless -- a normal animated upload must not 400."""
+    raw = _animated_photographic(320, 240, 12)
+    result = validate_and_strip_image(raw, "balanced")
+    assert result.content_type == "image/webp"
+    assert result.width == 320
+    assert result.height == 240
+
+
+def test_extract_placeholders_single_band(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_extract_placeholders properly handles 1-band (greyscale) tiles."""
+    monkeypatch.setattr(
+        pyvips.Image, "thumbnail_buffer", lambda buf, w, **kw: pyvips.Image.black(16, 16)
+    )
+    dom, blur = _extract_placeholders(b"dummy")
+    assert dom == "#000000"
+    assert blur.startswith("data:image/webp;base64,")
+
+
+def test_enforce_lossless_output_size_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Backstop raises LosslessUnsuitableError when output exceeds configured byte limit."""
+    monkeypatch.setattr(settings, "LOSSLESS_MAX_OUTPUT_BYTES", 10)
+    with pytest.raises(LosslessUnsuitableError, match="exceeds"):
+        image_vips._enforce_lossless_output_size(b"0123456789012345")
+
+
+def test_get_optimization_params_size_and_quality() -> None:
+    """Optimization profiles map to expected dimensions, effort, and Q values."""
+    size_params = image_vips._get_optimization_params("size")
+    assert size_params.max_dim == 1280
+    assert size_params.q == 65
+    assert size_params.effort == 4
+    assert size_params.lossless is False
+
+    quality_params = image_vips._get_optimization_params("quality")
+    assert quality_params.max_dim == 3840
+    assert quality_params.q == 95
+    assert quality_params.effort == 6
+    assert quality_params.lossless is False
+
+
+def test_animated_single_frame_pixel_cap_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Animated image whose single frame exceeds MAX_IMAGE_PIXELS is rejected."""
+    monkeypatch.setattr(settings, "MAX_IMAGE_PIXELS", 500)  # animated.gif is 32x32 = 1024
+    raw = fixture_bytes("animated.gif")
+    with pytest.raises(ImageValidationError, match="frame dimensions"):
+        validate_and_strip_image(raw)
+
+
+def test_animated_greyscale_is_converted_to_srgb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Greyscale/non-sRGB multi-frame image is normalized to sRGB."""
+    raw = fixture_bytes("animated.gif")
+    orig_new = pyvips.Image.new_from_buffer
+
+    def mock_new(buf: bytes, *args: object, **kwargs: object) -> pyvips.Image:
+        img = orig_new(buf, *args, **kwargs)
+        if kwargs.get("n") == -1 and img.get_typeof("n-pages") != 0:
+            return img.copy(interpretation=pyvips.Interpretation.B_W)
+        return img
+
+    monkeypatch.setattr(pyvips.Image, "new_from_buffer", mock_new)
+    result = validate_and_strip_image(raw)
+    assert result.content_type == "image/webp"
+    assert result.width == 32
+    assert result.height == 32
+
+
+def test_extract_placeholders_zero_band(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_extract_placeholders handles 0-band image fallback."""
+
+    class _ZeroBandTile:
+        bands = 0
+
+        def hasalpha(self) -> bool:
+            return False
+
+        def write_to_buffer(self, *a: object, **kw: object) -> bytes:
+            return b"RIFFfake"
+
+    monkeypatch.setattr(pyvips.Image, "thumbnail_buffer", lambda *a, **kw: _ZeroBandTile())
+    dom, blur = _extract_placeholders(b"dummy")
+    assert dom == "#000000"
+
+
+def test_animated_downscales_when_exceeding_max_dim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Animated input downscales with thumbnail_buffer when exceeding max_dim."""
+    raw = fixture_bytes("animated.gif")  # 32x32
+    monkeypatch.setattr(
+        image_vips,
+        "_get_optimization_params",
+        lambda opt: image_vips._EncodeParams(q=80, max_dim=16, effort=2),
+    )
+    result = validate_and_strip_image(raw)
+    assert result.width <= 16
+    assert result.height <= 16
+    decoded = pyvips.Image.new_from_buffer(result.buffer, "", n=-1)
+    assert decoded.get("n-pages") == 5
+    assert decoded.get("page-height") == result.height
+
+
+def test_still_downscales_when_exceeding_max_dim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Still input downscales via resize when exceeding max_dim."""
+    raw = fixture_bytes("tiny.png")  # 8x8
+    monkeypatch.setattr(
+        image_vips,
+        "_get_optimization_params",
+        lambda opt: image_vips._EncodeParams(q=80, max_dim=4, effort=2),
+    )
+    result = validate_and_strip_image(raw)
+    assert result.width <= 4
+    assert result.height <= 4
+
+
+def test_animated_decode_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Corrupt multi-frame animated input raises ImageValidationError
+    with 'Could not decode animated image'.
+    """
+    raw = fixture_bytes("animated.gif")
+    original_new = pyvips.Image.new_from_buffer
+    call_count = 0
+
+    def mock_new(data: bytes, *args: object, **kwargs: object) -> pyvips.Image:
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            raise pyvips.Error("mock decode failure")
+        return original_new(data, *args, **kwargs)
+
+    monkeypatch.setattr(pyvips.Image, "new_from_buffer", mock_new)
+    with pytest.raises(ImageValidationError, match="Could not decode animated image"):
+        validate_and_strip_image(raw)
+
+
+def test_probe_pages_fallback() -> None:
+    """_probe_pages returns 1 safely when decode fails."""
+    assert image_vips._probe_pages(b"invalid data") == 1
+
+
+def test_icc_transform_error_handled() -> None:
+    """Corrupt ICC profile metadata logs a warning and does not crash."""
+    img = pyvips.Image.black(16, 16)
+    img.set_type(pyvips.GValue.blob_type, "icc-profile-data", b"corrupt profile")
+    normalized = image_vips._normalize_icc_profile(img)
+    assert normalized is not None

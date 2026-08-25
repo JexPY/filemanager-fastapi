@@ -169,3 +169,27 @@ def test_has_public_base_url_is_false_for_local_without_base(
     monkeypatch.setattr(live_settings, "STORAGE_BACKEND", "local")
     monkeypatch.setattr(live_settings, "LOCAL_PUBLIC_BASE_URL", "")
     assert has_public_base_url() is False
+
+
+# --- mode validators and token parser coverage -----------------------------
+
+
+def test_local_media_serve_mode_invalid_rejected() -> None:
+    with pytest.raises(ValidationError, match="LOCAL_MEDIA_SERVE_MODE"):
+        _settings(LOCAL_MEDIA_SERVE_MODE="invalid_mode")
+
+
+def test_private_media_serve_mode_invalid_rejected() -> None:
+    with pytest.raises(ValidationError, match="PRIVATE_MEDIA_SERVE_MODE"):
+        _settings(PRIVATE_MEDIA_SERVE_MODE="invalid_mode")
+
+
+def test_image_rendition_mode_invalid_rejected() -> None:
+    with pytest.raises(ValidationError, match="IMAGE_RENDITION_MODE"):
+        _settings(IMAGE_RENDITION_MODE="invalid_mode")
+
+
+def test_token_identities_handles_empty_secret_parts() -> None:
+    s = _settings(FILE_MANAGER_BEARER_TOKENS="label:,valid-token,, :")
+    assert "valid-token" in s.token_identities
+    assert "" not in s.token_identities
