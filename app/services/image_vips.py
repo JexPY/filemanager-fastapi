@@ -362,6 +362,62 @@ def _process_animated(
     )
 
 
+def _probe_pages(file_data: bytes) -> int:
+    """Probe page count cheaply to branch early between still and animated paths.
+
+    Wrapped in try/except so a malformed page count or corrupt header falls
+    through to the standard still path rather than raising a 500.
+    """
+    try:
+        probe = pyvips.Image.new_from_buffer(file_data, "", n=-1)
+        if probe.get_typeof("n-pages") != 0:
+            return int(probe.get("n-pages"))
+    except pyvips.Error:
+        pass
+    return 1
+
+
+def _normalize_icc_profile(image: pyvips.Image) -> pyvips.Image:
+    """Convert embedded wide-gamut profile (Display P3, AdobeRGB) to sRGB before
+    strip=True drops the profile and before rendition generation."""
+    if image.get_typeof("icc-profile-data") != 0:
+        try:
+            return image.icc_transform("srgb", embedded=True)
+        except pyvips.Error as exc:
+            # An unconvertible/corrupt profile must not fail the upload; leaving
+            # the pixels untouched is the same behaviour as before this change.
+            logger.warning("Failed to apply embedded ICC profile: %s", exc)
+    return image
+
+
+def _encode_still_image(image: pyvips.Image, params: _EncodeParams) -> bytes:
+    """Encode still image to WebP using the specified optimization parameters."""
+    if params.lossless:
+        # Materialize once: the probe and the encode are two independent
+        # pyvips sinks, and without this each would force its own full
+        # decode (the same trap documented on _extract_placeholders). Bounded
+        # by max_dim=4096, so at most ~50MB for this branch only.
+        image = image.copy_memory()
+        _reject_unsuitable_lossless(image)
+        optimized_buffer = image.write_to_buffer(
+            _WEBP_FORMAT,
+            Q=params.q,
+            strip=True,
+            effort=params.effort,
+            lossless=True,
+        )
+        _enforce_lossless_output_size(optimized_buffer)
+        return optimized_buffer
+
+    return image.write_to_buffer(
+        _WEBP_FORMAT,
+        Q=params.q,
+        strip=True,
+        effort=params.effort,
+        smart_subsample=True,
+    )
+
+
 def validate_and_strip_image(
     file_data: bytes, optimization: str = "balanced", *, generate_renditions: bool = False
 ) -> ProcessedImage:
@@ -375,17 +431,7 @@ def validate_and_strip_image(
     if sniff_format(file_data) is None:
         raise ImageValidationError("Unsupported or unrecognized image format")
 
-    # Probe page count cheaply to branch early between still and animated paths.
-    # Wrapped in try/except so a malformed page count or corrupt header falls
-    # through to the standard still path rather than raising a 500.
-    n_pages = 1
-    try:
-        probe = pyvips.Image.new_from_buffer(file_data, "", n=-1)
-        if probe.get_typeof("n-pages") != 0:
-            n_pages = probe.get("n-pages")
-    except pyvips.Error:
-        n_pages = 1
-
+    n_pages = _probe_pages(file_data)
     if n_pages > 1:
         return _process_animated(
             file_data,
@@ -405,13 +451,7 @@ def validate_and_strip_image(
 
     # 2. Convert embedded wide-gamut profile (Display P3, AdobeRGB) to sRGB before
     # strip=True drops the profile and before rendition generation.
-    if image.get_typeof("icc-profile-data") != 0:
-        try:
-            image = image.icc_transform("srgb", embedded=True)
-        except pyvips.Error as exc:
-            # An unconvertible/corrupt profile must not fail the upload; leaving
-            # the pixels untouched is the same behaviour as before this change.
-            logger.warning("Failed to apply embedded ICC profile: %s", exc)
+    image = _normalize_icc_profile(image)
 
     # 3. Handle CMYK and greyscale inputs arriving with a non-sRGB interpretation.
     if image.interpretation != pyvips.Interpretation.SRGB:
@@ -436,29 +476,7 @@ def validate_and_strip_image(
         width = image.width
         height = image.height
 
-    if params.lossless:
-        # Materialize once: the probe and the encode are two independent
-        # pyvips sinks, and without this each would force its own full
-        # decode (the same trap documented on _extract_placeholders). Bounded
-        # by max_dim=4096, so at most ~50MB for this branch only.
-        image = image.copy_memory()
-        _reject_unsuitable_lossless(image)
-        optimized_buffer = image.write_to_buffer(
-            _WEBP_FORMAT,
-            Q=params.q,
-            strip=True,
-            effort=params.effort,
-            lossless=True,
-        )
-        _enforce_lossless_output_size(optimized_buffer)
-    else:
-        optimized_buffer = image.write_to_buffer(
-            _WEBP_FORMAT,
-            Q=params.q,
-            strip=True,
-            effort=params.effort,
-            smart_subsample=True,
-        )
+    optimized_buffer = _encode_still_image(image, params)
 
     # Placeholders come from the encoded output, not the source -- see
     # _extract_placeholders. This must stay after the encode; moving it earlier
