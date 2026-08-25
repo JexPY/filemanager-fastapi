@@ -669,8 +669,9 @@ def test_get_optimization_params_size_and_quality() -> None:
 def test_animated_single_frame_pixel_cap_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Animated image whose single frame exceeds MAX_IMAGE_PIXELS is rejected."""
     monkeypatch.setattr(settings, "MAX_IMAGE_PIXELS", 500)  # animated.gif is 32x32 = 1024
+    raw = fixture_bytes("animated.gif")
     with pytest.raises(ImageValidationError, match="frame dimensions"):
-        validate_and_strip_image(fixture_bytes("animated.gif"))
+        validate_and_strip_image(raw)
 
 
 def test_animated_greyscale_is_converted_to_srgb(monkeypatch: pytest.MonkeyPatch) -> None:
